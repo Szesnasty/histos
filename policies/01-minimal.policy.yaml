@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 01 — MINIMAL
+#
+# The smallest document that enforces anything, and a demonstration that "small"
+# does not mean "permissive". Four things are already true here:
+#
+#   • a role may call exactly what it is granted, and nothing else;
+#   • a tool absent from `tools` is denied (`unknown_tool`) — there is no
+#     "allow anything not mentioned";
+#   • an argument absent from `args` is denied (`arg_schema`), so a manipulated
+#     model cannot smuggle an extra parameter past the contract;
+#   • a tool with no argument schema at all is denied, not waved through.
+#
+# What is NOT here is the point of files 02–05: ownership, binding, limits,
+# approval, and control over what comes back out.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: minimal
+version: "1"
+
+# A load-time assertion, not policy content: refuse to load at all on an engine
+# that does not implement these. Better a loud refusal than an engine quietly
+# enforcing the subset it happens to understand.
+requires:
+  features:
+    - rbac
+    - arg_schema
+    - string_bounds
+
+tools:
+  lookup_customer:
+    access: read
+    sensitivity: low
+    args:
+      customer_id: { type: string, pattern: "CUS-[0-9]+" }
+
+roles:
+  agent:
+    allow: [lookup_customer]

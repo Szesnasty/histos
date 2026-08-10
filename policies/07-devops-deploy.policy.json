@@ -1,0 +1,322 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "role_inheritance",
+      "arg_schema",
+      "string_bounds",
+      "numeric_range",
+      "enum",
+      "resource_authz",
+      "requires_confirmation",
+      "rate_limit",
+      "budget",
+      "secret_detectors",
+      "sensitive_redaction",
+      "output_projection"
+    ]
+  },
+  "policy_id": "devops-deploy",
+  "roles": {
+    "release_manager": {
+      "inherits": "deployer",
+      "allow": [
+        "deploy_production"
+      ]
+    },
+    "deployer": {
+      "inherits": "sre_agent",
+      "allow": [
+        "deploy_service"
+      ]
+    },
+    "sre_agent": {
+      "allow": [
+        "get_service_status",
+        "read_deploy_logs",
+        "rollback_service",
+        "scale_service"
+      ]
+    }
+  },
+  "tools": {
+    "delete_environment": {
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "environment": {
+          "enum": [
+            "dev",
+            "staging"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "scale_service": {
+      "output": {
+        "project": true
+      },
+      "resource": {
+        "where": [
+          {
+            "value": false,
+            "op": "eq",
+            "field": "locked"
+          }
+        ]
+      },
+      "budget": 30,
+      "returns": {
+        "status": {
+          "enum": [
+            "applied",
+            "queued"
+          ],
+          "type": "string"
+        }
+      },
+      "args": {
+        "replicas": {
+          "maximum": 10,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "environment": {
+          "enum": [
+            "dev",
+            "staging"
+          ],
+          "type": "string"
+        },
+        "service": {
+          "enum": [
+            "api",
+            "web",
+            "worker"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "write"
+    },
+    "rollback_service": {
+      "output": {
+        "project": true
+      },
+      "resource": {
+        "where": [
+          {
+            "value": false,
+            "op": "eq",
+            "field": "locked"
+          }
+        ]
+      },
+      "budget": 20,
+      "returns": {
+        "status": {
+          "enum": [
+            "started",
+            "queued"
+          ],
+          "type": "string"
+        },
+        "deploy_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "environment": {
+          "enum": [
+            "dev",
+            "staging",
+            "production"
+          ],
+          "type": "string"
+        },
+        "service": {
+          "enum": [
+            "api",
+            "web",
+            "worker"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "write"
+    },
+    "deploy_production": {
+      "output": {
+        "project": true
+      },
+      "resource": {
+        "where": [
+          {
+            "value": false,
+            "op": "eq",
+            "field": "locked"
+          }
+        ]
+      },
+      "confirmation": {
+        "expires_in": 900,
+        "required": true
+      },
+      "budget": 5,
+      "returns": {
+        "status": {
+          "enum": [
+            "started",
+            "queued"
+          ],
+          "type": "string"
+        },
+        "deploy_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "version": {
+          "pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+",
+          "type": "string"
+        },
+        "environment": {
+          "enum": [
+            "production"
+          ],
+          "type": "string"
+        },
+        "service": {
+          "enum": [
+            "api",
+            "web",
+            "worker"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "deploy_service": {
+      "output": {
+        "project": true
+      },
+      "resource": {
+        "where": [
+          {
+            "value": false,
+            "op": "eq",
+            "field": "locked"
+          }
+        ]
+      },
+      "confirmation": {
+        "expires_in": 900,
+        "required": true
+      },
+      "budget": 10,
+      "returns": {
+        "status": {
+          "enum": [
+            "started",
+            "queued"
+          ],
+          "type": "string"
+        },
+        "deploy_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "version": {
+          "pattern": "(v[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-f]{40})",
+          "type": "string"
+        },
+        "environment": {
+          "enum": [
+            "dev",
+            "staging"
+          ],
+          "type": "string"
+        },
+        "service": {
+          "enum": [
+            "api",
+            "web",
+            "worker"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "read_deploy_logs": {
+      "output": {
+        "project": true
+      },
+      "rate_limit": 60,
+      "returns": {
+        "log": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "lines": {
+          "maximum": 500,
+          "minimum": 10,
+          "required": false,
+          "type": "integer"
+        },
+        "service": {
+          "enum": [
+            "api",
+            "web",
+            "worker"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "medium",
+      "access": "read"
+    },
+    "get_service_status": {
+      "rate_limit": 120,
+      "returns": {
+        "version": {
+          "type": "string"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "service": {
+          "enum": [
+            "api",
+            "web",
+            "worker"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "low",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}

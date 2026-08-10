@@ -1,0 +1,89 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 02 — TENANT ISOLATION
+#
+# The multi-tenant case, and the one where the near-miss is dangerous enough that
+# Draft 0.1 removed it from the language.
+#
+# The wrong version — comparing a caller-supplied `tenant_id` argument to the
+# principal's — proves only that the caller *named their own tenant*. For
+# `read_document(document_id, tenant_id)` an attacker passes someone else's
+# `document_id` with their own `tenant_id`, every check passes, and the tool keys
+# on `document_id`. That is a cross-tenant read. It is not expressible here.
+#
+# What this file does instead, and the two are different mechanisms:
+#
+#   resource.owns  → resolve the ACCESSED document, compare its real owner to the
+#                    principal. Ownership, established against the datastore.
+#   bind           → overwrite an argument with a trusted principal attribute
+#                    before any check runs. The wrong value is un-passable, not
+#                    merely caught.
+#
+# `resource.owns` needs a `resource_resolver` on the host that fetches the real
+# record. A resolver that echoes an argument re-creates the hole — see SECURITY.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: tenant-isolation
+version: "1"
+
+requires:
+  features:
+    - rbac
+    - role_inheritance
+    - arg_schema
+    - string_bounds
+    - resource_authz
+    - trusted_arg_binding
+    - sensitive_redaction
+    - output_projection
+
+tools:
+  read_document:
+    access: read
+    sensitivity: high
+    args:
+      document_id: { type: string, pattern: "DOC-[0-9]+" }
+    returns:
+      document_id: { type: string }
+      title: { type: string }
+      body: { type: string }
+      owner_email: { type: string, sensitive: pii }
+    resource:
+      # Row-level, not tool-level: the grant says "this role may read documents",
+      # this says "and only ones whose real tenant_id is theirs".
+      owns: tenant_id
+
+  update_document:
+    access: write
+    sensitivity: high
+    args:
+      document_id: { type: string, pattern: "DOC-[0-9]+" }
+      title: { type: string, min_length: 1, max_length: 200 }
+      tenant_id: { type: string }
+    bind:
+      # The model may pass any tenant_id it likes; it is replaced with the trusted
+      # one from the principal. The value grammar is exactly `principal.<attr>` —
+      # allowing an expression here would make the format an expression language,
+      # and deterministic-by-construction is the whole design.
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+      where:
+        # A genuine condition on resolved state, which `owns` cannot express.
+        - { field: status, op: ne, value: archived }
+    returns:
+      document_id: { type: string }
+      updated_at: { type: string }
+    output:
+      project: true
+
+roles:
+  member:
+    allow: [read_document]
+
+  editor:
+    # Single-parent inheritance only. Two parents means a precedence rule, and
+    # precedence in authorization is where the CVEs live.
+    inherits: member
+    allow: [update_document]

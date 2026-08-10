@@ -1,0 +1,40 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "arg_schema",
+      "string_bounds"
+    ]
+  },
+  "policy_id": "minimal",
+  "roles": {
+    "agent": {
+      "allow": [
+        "lookup_customer"
+      ]
+    }
+  },
+  "tools": {
+    "lookup_customer": {
+      "output": {
+        "redact_secrets": true,
+        "scan_canary": true,
+        "on_violation": "redact_all",
+        "strict": false,
+        "project": false
+      },
+      "deny_secret_args": true,
+      "args": {
+        "customer_id": {
+          "required": true,
+          "pattern": "CUS-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "low",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}

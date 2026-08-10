@@ -1,0 +1,138 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 06 - OUTBOUND EMAIL
+#
+# The archetype behind every "executive assistant" and support agent that can
+# SEND. Sending is the case that matters: an agent that reads a poisoned message
+# and can email arbitrary recipients is a complete exfiltration pipeline - read
+# the secret here, mail it there. The controls below are about closing that
+# pipeline with per-call bounds:
+#
+#   pattern on `to`     the recipient must FULLY match the company domain.
+#                       The engine uses re.fullmatch, so "evil@x.com,me@corp.com"
+#                       is one non-matching string, not two addresses. This is a
+#                       real egress bound, not a hint.
+#   undeclared args     there is no `cc`, no `bcc`, no `reply_to` in the
+#                       contract - so they cannot be smuggled in. An argument
+#                       that is not declared is refused, not ignored.
+#   deny_secret_args    on by default: a checksum-verified secret (card number,
+#                       IBAN, decodable JWT) in the body is a DENY before the
+#                       mail exists.
+#   canaries            plant one in the mailbox corpus; if a manipulated agent
+#                       tries to send it, the call dies with `canary_exfil`.
+#   split tools         "may email externally, but only with approval" is not an
+#                       if-expression in this format - it is TWO tools with
+#                       different grants and different friction. Conditional
+#                       policy is expressed by splitting the tool.
+#
+# `histos review` flags send_email as a write with no resource constraint. That
+# flag is correct in general and consciously accepted here: there is no record
+# to own when sending mail. The bound is the recipient pattern, the budget and
+# the screening - a reviewer reads the flag, checks exactly this comment, and
+# signs off. That is review doing its job, not failing at it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: outbound-email
+version: "1"
+
+requires:
+  features:
+    - rbac
+    - role_inheritance
+    - arg_schema
+    - string_bounds
+    - resource_authz
+    - requires_confirmation
+    - rate_limit
+    - budget
+    - canary
+    - secret_detectors
+    - sensitive_redaction
+    - output_projection
+
+canaries:
+  # Planted in a decoy note in the mailbox. It should never leave.
+  - CANARY-mail-e5b2-DO-NOT-LEAK
+
+tools:
+  search_inbox:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args:
+      query: { type: string, min_length: 1, max_length: 256 }
+    returns:
+      message_id: { type: string }
+      subject: { type: string }
+      from: { type: string }
+    output:
+      project: true
+
+  read_email:
+    access: read
+    sensitivity: high
+    rate_limit: 120
+    args:
+      message_id: { type: string, pattern: "MSG-[0-9]+" }
+    returns:
+      message_id: { type: string }
+      subject: { type: string }
+      body: { type: string }
+      from: { type: string, sensitive: pii }
+    resource:
+      # The assistant reads its principal's mailbox, nobody else's. The resolver
+      # looks the message up and returns the mailbox's real owner.
+      owns: mailbox_owner
+    output:
+      project: true
+      scan_canary: true
+      redact_secrets: true
+
+  send_email:
+    access: write
+    sensitivity: critical
+    # Blast radius by volume: a hijacked loop cannot turn one legal send into
+    # three hundred. Counted per principal, in-process - see SECURITY.md.
+    budget: 50
+    rate_limit: 10
+    args:
+      # The whole value must match - one address, on the company domain, done.
+      # A list, a second address after a comma, a display name with an angle
+      # bracket: all of it is simply not this pattern.
+      to: { type: string, pattern: "[A-Za-z0-9._%+-]+@acme-corp\\.com", max_length: 254 }
+      subject: { type: string, min_length: 1, max_length: 200 }
+      body: { type: string, min_length: 1, max_length: 5000 }
+    returns:
+      message_id: { type: string }
+      status: { type: string, enum: [sent, queued] }
+    output:
+      project: true
+
+  send_email_external:
+    # The same action, different trust: any recipient, so a human approves each
+    # exact send. Approval is bound to (tool, args, principal) and single-use -
+    # the agent cannot bank one approval and reuse it with a different body.
+    access: write
+    sensitivity: critical
+    budget: 5
+    args:
+      to: { type: string, pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", max_length: 254 }
+      subject: { type: string, min_length: 1, max_length: 200 }
+      body: { type: string, min_length: 1, max_length: 5000 }
+    confirmation:
+      required: true
+      expires_in: 600
+    returns:
+      message_id: { type: string }
+      status: { type: string, enum: [sent, queued] }
+    output:
+      project: true
+
+roles:
+  assistant:
+    allow: [search_inbox, read_email, send_email]
+
+  comms_manager:
+    inherits: assistant
+    allow: [send_email_external]

@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 04 — MONEY, WITH A HUMAN IN THE LOOP
+#
+# The demo everyone asks for, and the one that has to be described precisely:
+# *Hijacked. Still bounded.* Not harmless. A €400 refund to the right tenant on an
+# allowed order with valid arguments goes through, because that is what the policy
+# says. The bounds are what a manipulated model cannot cross.
+#
+# Four different mechanisms, each answering a different failure:
+#
+#   maximum: 50000      the model cannot ask for more than the contract allows —
+#                       a bound in the tool contract, where a reviewer looks for it.
+#   budget: 20          it cannot get there by repetition either. In-policy abuse
+#                       by volume is a named part of the threat model.
+#   confirmation        above the mechanical bounds, a human decides. The approval
+#                       is a HOST callback bound to the exact (tool, args,
+#                       principal) and single-use — it is not a tool the agent can
+#                       call, so an injected agent cannot approve itself.
+#   output.strict       a return that does not match the declared shape is not
+#                       trusted: `on_violation: redact_all` replaces it wholesale,
+#                       because name-based redaction cannot save a secret sitting
+#                       in a field nobody declared.
+#
+# `expires_in` is carried by the format; the engine does not enforce it yet
+# (known debt D4). Stated here rather than discovered later.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: refund-approval
+version: "1"
+
+requires:
+  features:
+    - rbac
+    - role_inheritance
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - enum
+    - resource_authz
+    - trusted_arg_binding
+    - requires_confirmation
+    - budget
+    - rate_limit
+    - canary
+    - strict_returns
+    - output_projection
+    - sensitive_redaction
+
+canaries:
+  - CANARY-fin-4c8e-DO-NOT-LEAK
+
+tools:
+  get_order:
+    access: read
+    sensitivity: high
+    rate_limit: 60
+    args:
+      order_id: { type: string, pattern: "ORD-[0-9]+" }
+    returns:
+      order_id: { type: string }
+      total: { type: number }
+      currency: { type: string, enum: [EUR, USD, GBP] }
+      customer_email: { type: string, sensitive: pii }
+    resource:
+      owns: tenant_id
+
+  make_refund:
+    access: write
+    sensitivity: critical
+    budget: 20
+    args:
+      order_id: { type: string, pattern: "ORD-[0-9]+" }
+      # Minor units, so there is no float to argue about across languages.
+      amount: { type: integer, minimum: 1, maximum: 50000 }
+      currency: { type: string, enum: [EUR, USD, GBP] }
+      tenant_id: { type: string }
+      reason: { type: string, required: false, max_length: 280 }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+      where:
+        - { field: status, op: ne, value: cancelled }
+        - { field: refunded, op: eq, value: false }
+    confirmation:
+      required: true
+      expires_in: 900
+    returns:
+      status: { type: string, enum: [refunded, pending] }
+      reference: { type: string }
+    output:
+      project: true
+      strict: true
+      on_violation: redact_all
+
+roles:
+  support_agent:
+    allow: [get_order]
+
+  refund_officer:
+    inherits: support_agent
+    allow: [make_refund]

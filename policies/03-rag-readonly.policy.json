@@ -1,0 +1,95 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "arg_schema",
+      "string_bounds",
+      "numeric_range",
+      "rate_limit",
+      "canary",
+      "output_projection",
+      "sensitive_redaction",
+      "secret_detectors"
+    ]
+  },
+  "canaries": [
+    "CANARY-rag-9f21-DO-NOT-LEAK"
+  ],
+  "policy_id": "rag-readonly",
+  "roles": {
+    "researcher": {
+      "allow": [
+        "fetch_passage",
+        "search_corpus"
+      ]
+    }
+  },
+  "tools": {
+    "fetch_passage": {
+      "output": {
+        "project": true
+      },
+      "rate_limit": 120,
+      "returns": {
+        "author_email": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "doc_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "page": {
+          "maximum": 2000,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        },
+        "doc_id": {
+          "pattern": "DOC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "medium",
+      "access": "read"
+    },
+    "search_corpus": {
+      "output": {
+        "project": true
+      },
+      "rate_limit": 60,
+      "returns": {
+        "score": {
+          "type": "number"
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "doc_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "top_k": {
+          "maximum": 25,
+          "minimum": 1,
+          "required": false,
+          "type": "integer"
+        },
+        "query": {
+          "min_length": 1,
+          "max_length": 1024,
+          "type": "string"
+        }
+      },
+      "sensitivity": "low",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}
