@@ -1,0 +1,55 @@
+{
+  "$comment": "The same JSON Schema through a different reader must yield the same contract. Only `returns` differs: a function declares none.",
+  "kind": "openai",
+  "source": {
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "t",
+          "description": "d",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "string",
+                "maxLength": 8
+              }
+            },
+            "required": [
+              "a"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "expect": {
+    "contract": {
+      "args": {
+        "allow_extra": false,
+        "fields": {
+          "a": {
+            "type": "string",
+            "required": true,
+            "enum": null,
+            "max_length": "8",
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          }
+        }
+      },
+      "returns": null
+    },
+    "schema_sha256": "sha256:99bafa1a2f92ace151aa50a6cd015ad36058d706232a0023e960e3375159ae30",
+    "description_sha256": "sha256:957b7aa2b911ae4fc5d5cfad77f29412c0eba3247264dc865d1f2ea8193b6f63",
+    "contract_sha256": "sha256:3308733b0b48b4059aa90ee6ddbc200b383f409d933d81f791feb9902259841e"
+  }
+}

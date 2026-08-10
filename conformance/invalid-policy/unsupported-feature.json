@@ -1,0 +1,16 @@
+{
+  "description": "The policy declares a capability the engine cannot honour.",
+  "expect": {
+    "code": "unsupported_feature"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "requires": {
+      "features": [
+        "taint_labels"
+      ]
+    },
+    "tools": {},
+    "roles": {}
+  }
+}

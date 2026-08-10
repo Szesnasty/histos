@@ -1,0 +1,13 @@
+{
+  "description": "The same logical policy in either format must hash identically — otherwise policy-hash-bound approvals stop matching across services written in different stacks.",
+  "documents": [
+    {
+      "format": "yaml",
+      "text": "schema_version: histos.policy/0.1\nversion: '1'\ntools:\n  t:\n    args:\n      x: {type: integer, maximum: 5}\nroles:\n  r: {allow: [t]}\n"
+    },
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"version\": \"1\", \"tools\": {\"t\": {\"args\": {\"x\": {\"type\": \"integer\", \"maximum\": 5}}}}, \"roles\": {\"r\": {\"allow\": [\"t\"]}}}"
+    }
+  ]
+}

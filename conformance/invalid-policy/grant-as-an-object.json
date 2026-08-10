@@ -1,0 +1,22 @@
+{
+  "expect": {
+    "code": "invalid_grant"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {}
+      }
+    },
+    "roles": {
+      "r": {
+        "allow": [
+          {
+            "tool": "t"
+          }
+        ]
+      }
+    }
+  }
+}

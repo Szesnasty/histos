@@ -1,0 +1,18 @@
+{
+  "description": "There are no deny rules — allow-lists only, so precedence never arises.",
+  "expect": {
+    "code": "unknown_key"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {},
+    "roles": {
+      "r": {
+        "allow": [],
+        "deny": [
+          "t"
+        ]
+      }
+    }
+  }
+}

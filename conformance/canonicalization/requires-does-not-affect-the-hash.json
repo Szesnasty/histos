@@ -1,0 +1,13 @@
+{
+  "description": "`requires` is a load-time compatibility assertion, not policy content — adding one must not invalidate pending approvals.",
+  "documents": [
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"args\": {}}}, \"roles\": {}}"
+    },
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"requires\": {\"features\": [\"rbac\", \"arg_schema\"]}, \"tools\": {\"t\": {\"args\": {}}}, \"roles\": {}}"
+    }
+  ]
+}

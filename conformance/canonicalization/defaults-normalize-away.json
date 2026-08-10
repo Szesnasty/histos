@@ -1,0 +1,13 @@
+{
+  "description": "Stating a default must mean the same as omitting it. This is a FORMAT rule, not an implementation detail: an engine that hashed them differently would invalidate approvals whenever someone made a default explicit.",
+  "documents": [
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"args\": {}}}, \"roles\": {}}"
+    },
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"access\": \"read\", \"sensitivity\": \"low\", \"args\": {}, \"confirmation\": {\"required\": false}, \"output\": {\"project\": false, \"strict\": false, \"on_violation\": \"redact_all\", \"scan_canary\": true, \"redact_secrets\": true}, \"deny_secret_args\": true}}, \"roles\": {}}"
+    }
+  ]
+}

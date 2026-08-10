@@ -1,0 +1,58 @@
+{
+  "$comment": "format/default/title/examples are outside the table, so they must not reach the contract. They DO reach schema_sha256 — that is the point of keeping the two apart.",
+  "kind": "mcp",
+  "source": {
+    "tools": [
+      {
+        "name": "t",
+        "description": null,
+        "inputSchema": {
+          "type": "object",
+          "title": "ignored",
+          "default": {},
+          "examples": [
+            1
+          ],
+          "properties": {
+            "a": {
+              "type": "string",
+              "format": "email",
+              "default": "x"
+            }
+          },
+          "required": [
+            "a"
+          ]
+        }
+      }
+    ]
+  },
+  "expect": {
+    "contract": {
+      "args": {
+        "allow_extra": false,
+        "fields": {
+          "a": {
+            "type": "string",
+            "required": true,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          }
+        }
+      },
+      "returns": null
+    },
+    "schema_sha256": "sha256:95b012e06d90ab9ff4e9c88af4297f5404752c47bc8b6d020febf2646d5d51ea",
+    "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
+    "contract_sha256": "sha256:34b5c8873d047abf9f8e6bc2785469e63537380246e89e8399224873451ea2a0"
+  }
+}

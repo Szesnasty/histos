@@ -1,0 +1,57 @@
+{
+  "description": "Fail closed rather than inject a missing trusted value.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "make_refund": {
+        "access": "write",
+        "args": {
+          "order_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "bind": {
+          "tenant_id": "principal.tenant_id"
+        },
+        "resource": {
+          "owns": "tenant_id"
+        }
+      }
+    },
+    "roles": {
+      "support": {
+        "allow": [
+          "make_refund"
+        ]
+      }
+    }
+  },
+  "principal": {
+    "role": "support",
+    "attributes": {}
+  },
+  "resource": {
+    "tenant_id": "acme"
+  },
+  "call": {
+    "tool": "make_refund",
+    "args": {
+      "order_id": "ORD-1",
+      "amount": 400,
+      "tenant_id": "acme"
+    }
+  },
+  "expect": {
+    "effect": "deny",
+    "rule": "arg_binding_unresolved",
+    "field": "tenant_id"
+  }
+}

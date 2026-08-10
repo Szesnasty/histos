@@ -1,0 +1,18 @@
+{
+  "description": "Binding from an argument would reintroduce the confused deputy.",
+  "expect": {
+    "code": "invalid_binding"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {},
+        "bind": {
+          "tenant_id": "args.tenant_id"
+        }
+      }
+    },
+    "roles": {}
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://histos.dev/spec/tool-lock-0.1.schema.json",
+  "title": "Histos Tool Lock 1",
+  "$comment": "Provenance for the imported half of a policy. The policy itself stays a self-contained, hashed artifact and never references a contract it does not contain; this file records where the imported shapes came from and what they looked like when a human last reviewed them. Nothing here affects a decision, so nothing here is part of the policy's content_hash. The hash definitions below are NORMATIVE: a second implementation that computes them differently will report drift the reference engine does not, which is worse than reporting none.",
+  "type": "object",
+  "required": ["lock_version", "tools"],
+  "additionalProperties": false,
+  "properties": {
+    "lock_version": {
+      "description": "1. An implementation that does not recognise the value refuses the file rather than reading what it can.",
+      "const": 1
+    },
+    "policy": {
+      "description": "File name of the policy these entries belong to. Informational: the pairing is by location on disk, not by this string.",
+      "type": "string"
+    },
+    "tools": {
+      "description": "One entry per tool that came from an importable source. A policy tool absent here is not verified by a drift check, and a drift report must say so rather than imply coverage it does not have.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["source", "schema_sha256", "description_sha256", "contract_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/source" },
+        "schema_sha256": {
+          "description": "NORMATIVE. 'sha256:' + SHA-256 over canonical_json(shape), where `shape` is the per-kind object defined in $defs/shape. Answers: did the declared shape change at all, including in a part the projection discards?",
+          "$ref": "#/$defs/digest"
+        },
+        "description_sha256": {
+          "description": "NORMATIVE. 'sha256:' + SHA-256 over canonical_json(description), where description is the source's description string or null. Hashed separately because it never reaches a tool contract, and a description is where a tool-poisoning payload hides: 'the contract is unchanged' must never be reported as 'the tool definition is unchanged'. An absent description hashes as JSON null, so absent and empty are distinguishable.",
+          "$ref": "#/$defs/digest"
+        },
+        "contract_sha256": {
+          "description": "NORMATIVE. 'sha256:' + SHA-256 over canonical_json({\"args\": <schema fingerprint>, \"returns\": <schema fingerprint>}) of the projected contract. Answers: did the change reach the part that is enforced? Excludes access, resource constraints, bindings, confirmation, limits and output rules — those are written by a human and adding one is not tool drift.",
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "Which reader produced this entry. Determines the `shape` layout, so an unrecognised kind is refused rather than assumed.",
+          "enum": ["mcp", "openai", "openapi"]
+        },
+        "locator": {
+          "description": "Where the definition was read from — an endpoint, a file path, a document URL. Recorded so a drift check can be re-run against the same place; never dereferenced automatically.",
+          "type": "string"
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "shape": {
+      "$comment": "NORMATIVE per-kind layout that `schema_sha256` is computed over. The tool name is the lock's own key and the description is hashed separately, so neither appears here. Keys are always present, with null where the source has nothing, so an addition later is visible as drift rather than as a differently-shaped object.\n\nmcp     -> {\"input\": inputSchema|null, \"output\": outputSchema|null}\nopenai  -> {\"input\": parameters|null, \"output\": null}\nopenapi -> {\"method\": string, \"path\": string, \"parameters\": [...], \"requestBody\": schema|null, \"responses\": schema|null}\n\nFor `openapi` the fragments are the DEREFERENCED ones the projection actually read: hashing the operation as written would miss a #/components/schemas target changing underneath an unchanged $ref."
+    }
+  }
+}

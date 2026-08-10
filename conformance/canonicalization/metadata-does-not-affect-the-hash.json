@@ -1,0 +1,13 @@
+{
+  "description": "policy_id / version / created_at describe the artifact, not the rules.",
+  "documents": [
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"args\": {}}}, \"roles\": {}}"
+    },
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"policy_id\": \"acme\", \"version\": \"42\", \"created_at\": \"2026-01-01T00:00:00Z\", \"tools\": {\"t\": {\"args\": {}}}, \"roles\": {}}"
+    }
+  ]
+}

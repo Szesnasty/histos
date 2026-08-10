@@ -1,0 +1,38 @@
+{
+  "description": "A planted token leaving through an argument.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "send": {
+        "args": {
+          "body": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "roles": {
+      "r": {
+        "allow": [
+          "send"
+        ]
+      }
+    },
+    "canaries": [
+      "CANARY-7f3a-DO-NOT-LEAK"
+    ]
+  },
+  "principal": {
+    "role": "r"
+  },
+  "call": {
+    "tool": "send",
+    "args": {
+      "body": "here it is: CANARY-7f3a-DO-NOT-LEAK"
+    }
+  },
+  "expect": {
+    "effect": "deny",
+    "rule": "canary_exfil"
+  }
+}
