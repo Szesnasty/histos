@@ -57,6 +57,8 @@ the guarantee stops.
 
 from __future__ import annotations
 
+import sys as _sys
+
 from histos._version import __version__
 from histos.approvals import ApprovalStore, request_fingerprint
 from histos.audit import (
@@ -139,6 +141,17 @@ from histos.lockfile import (
 )
 from histos.review import PolicyReview, review_policy
 from histos.schema import Field, Schema
+
+# `from histos.gate import gate` rebinds this package's `gate` attribute from the
+# submodule the import machinery had just installed there to the one-liner of the same
+# name. So `histos.gate.Gate` raised AttributeError after a plain `import histos`,
+# while `from histos.gate import Gate` worked — one name meaning two things depending
+# on how you reached it, and the failure lands on a reader following the docs. The
+# function keeps the name, since that is the documented API, and the module's public
+# surface is re-attached to it so both spellings resolve to the same objects.
+for _name in ("Gate", "ProtectResult", "gate", "protect", "reset_principal", "set_principal", "use_principal"):
+    setattr(gate, _name, getattr(_sys.modules["histos.gate"], _name))
+del _name
 
 __all__ = [
     "ApprovalStore",
