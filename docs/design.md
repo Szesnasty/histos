@@ -89,8 +89,15 @@ deputy waiting to happen.
 6  secret_detected        a checksum-verified credential in an argument
 7  content_rule           OPTIONAL, opt-in, off by default — heuristic, not core
 8  rate_limit / budget    consumed atomically at the point of execution
-9  requires_confirmation  a trusted out-of-band approval, which the agent cannot mint
+9  escalate               the seam to a semantic tier — DENY with none wired
+10 requires_confirmation  a trusted out-of-band approval, which the agent cannot mint
 ```
+
+Steps 9 and 10 are the only two that reach outside the process, and they are last for
+that reason: nothing pays for a model call or a human's attention on behalf of a call
+the deterministic chain already refuses. Between themselves the order is fixed the
+other way round — the tier first, the human last — because a tool declaring both would
+otherwise have its escalation skipped the moment an approval arrived.
 
 **POST** — what may reach the model:
 
@@ -158,6 +165,23 @@ declared nor wrapped is invisible. Making every reachable tool flow through the 
 is the host's or the adapter's responsibility — which is why the framework adapter,
 and above all the MCP server boundary, matter as much as the checks do.
 
+There is a second failure with the same consequence and a different shape: wrapping
+happens, and the result is thrown away. `protect()` returns **new** objects and leaves
+the originals alive, so a missing assignment hands the agent the ungated tools while
+every name-based report stays green — the Gate knows `wrap()` was called and nothing
+about what the caller did with the return value. That question can only be asked of
+the objects:
+
+```python
+tools = protect_tools(tools, gate=g)         # ← keep the return value
+assert not g.ungated_tools(tools)            # ← ask the objects, not their names
+```
+
+`coverage()` takes the objects too, and reports `ungated` alongside the name-based
+keys. Passing names is still supported and still answers "is every exposed tool
+declared" — it just says so, by listing those names under `unchecked` rather than
+letting a clean report be read as an assurance it never gave.
+
 ## What is deliberately not here
 
 Semantic judgement stays out of this layer, permanently: meaning-level injection
@@ -166,6 +190,36 @@ detection, paraphrased or re-encoded exfiltration, free-text PII with no structu
 reached through the `escalate` seam — which **collapses to DENY when nothing is
 wired to it**, so the deterministic core is never weakened in order to add
 semantics.
+
+The seam is one policy key and one callback:
+
+```yaml
+tools:
+  wire_transfer:
+    escalate: {required: true}
+```
+
+```python
+Gate(policy, escalate=my_semantic_tier)   # (request) -> truthy to let it continue
+```
+
+Two properties carry the whole design, and both are structural rather than advisory:
+
+- **A tier can only release, never grant.** Escalation is the ninth check, so the tier
+  is asked about calls the other eight already allowed. There is no verdict it can
+  return that permits something they refused, which is what keeps a probabilistic
+  layer from ever widening a deterministic gate.
+- **No tier means no call.** A policy marking `escalate` on an engine with nothing
+  wired denies with `no_escalation_tier`. There is no default tier, no permissive
+  mode, no `on_missing` — the branch that would allow an unjudged call does not exist,
+  so it cannot be reached by configuration, by a stale deployment, or by a port that
+  has not implemented the tier yet. The conformance corpus pins it
+  (`decisions/escalate-without-a-tier-denies`).
+
+`GateDecision.escalate` is a marker recording that meaning was consulted, or should
+have been. It is deliberately not an `Effect` member: adding one to a public enum makes
+every `if effect is DENY` in every host silently non-exhaustive, and the branch such
+code falls through to is *proceed*.
 
 ## Further reading
 
