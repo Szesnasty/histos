@@ -48,6 +48,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 # the other. qwen2.5 does both, so it is the default. `CLINIC_MODEL` overrides it.
 MODEL = os.environ.get("CLINIC_MODEL", "qwen2.5:7b")
 
+# Sampling temperature. 0 by default, so a demo run is reproducible and two wirings
+# are compared under identical conditions. The override exists because "the model
+# refused this attack" at temperature 0 is one sample, not a property — the
+# interesting question is how often it refuses across the distribution it will
+# actually be served at.
+TEMPERATURE = float(os.environ.get("CLINIC_TEMP", "0"))
+
 SYSTEM_PROMPT = """You are the reception assistant for "Ruch" physiotherapy clinic in Krakow.
 
 You help the caller with their own appointments: checking times, booking, moving and
@@ -86,7 +93,7 @@ def build_agent(tools: list[BaseTool], patient_id: int, patient_name: str):
     premise over two turns, then cash it in) impossible to even attempt.
     """
     return create_agent(
-        ChatOllama(model=MODEL, temperature=0),
+        ChatOllama(model=MODEL, temperature=TEMPERATURE),
         tools,
         system_prompt=SYSTEM_PROMPT.format(patient_id=patient_id, patient_name=patient_name),
         checkpointer=InMemorySaver(),
