@@ -1,0 +1,109 @@
+"""Infer an argument schema from a Python function's signature + type hints.
+
+Requiring a hand-written ``arg_schema`` for 25 tools is adoption death. The
+highest-leverage feature is not an authoring UI — it is automatic contract import,
+so a developer runs ``protect(tools)`` and gets "23/25 recognised; 2 need a
+decision".
+
+**Honest scope.** A signature yields the *schema skeleton* — argument names,
+types, which are required — nothing more. It does **not** yield the security
+policy: RBAC grants, resource constraints and return-field sensitivity still
+need a human. So inference closes the *schema* gap, never the *authorization*
+gap. ``protect()`` reflects that in its coverage report.
+
+Stdlib only (``inspect`` + ``typing``). Pydantic / OpenAPI / MCP importers are
+follow-ups that produce the same :class:`~histos.contracts.ToolContract`.
+"""
+
+from __future__ import annotations
+
+import enum
+import inspect
+import types
+import typing
+from collections.abc import Callable
+from typing import Any
+
+from histos.contracts import ToolContract
+from histos.schema import Field, Schema
+
+_PY_TO_SCHEMA: dict[type, str] = {
+    int: "integer",
+    str: "string",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    tuple: "array",
+    dict: "object",
+}
+
+
+def _map_annotation(ann: Any) -> tuple[str, bool, str | None]:
+    """Return ``(schema_type, optional, item_type)`` for a type annotation."""
+    if ann is inspect.Parameter.empty or ann is None:
+        return "any", False, None
+
+    origin = typing.get_origin(ann)
+    args = typing.get_args(ann)
+
+    # Optional[X] / Union[..., None] / X | None
+    is_union = origin is typing.Union or isinstance(ann, types.UnionType)
+    if is_union:
+        non_none = [a for a in args if a is not type(None)]
+        optional = len(non_none) < len(args)
+        if len(non_none) == 1:
+            t, _opt, item = _map_annotation(non_none[0])
+            return t, optional, item
+        return "any", optional, None
+
+    if origin in (list, tuple):
+        item_type = _map_annotation(args[0])[0] if args else None
+        return "array", False, item_type
+
+    if isinstance(ann, type):
+        if issubclass(ann, enum.Enum):
+            return "string", False, None
+        if ann in _PY_TO_SCHEMA:
+            return _PY_TO_SCHEMA[ann], False, None
+
+    return "any", False, None
+
+
+def infer_schema(func: Callable[..., Any]) -> Schema:
+    """Infer a :class:`~histos.schema.Schema` from ``func``'s signature."""
+    try:
+        hints = typing.get_type_hints(func)
+    except Exception:  # noqa: BLE001 — inference must never crash the caller
+        hints = {}
+    sig = inspect.signature(func)
+
+    fields: dict[str, Field] = {}
+    allow_extra = False
+    for pname, param in sig.parameters.items():
+        if pname in ("self", "cls"):
+            continue
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            allow_extra = True  # **kwargs → cannot schema precisely
+            continue
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        ann = hints.get(pname, param.annotation)
+        ftype, optional, item_type = _map_annotation(ann)
+        required = param.default is inspect.Parameter.empty and not optional
+
+        enum_vals: tuple[Any, ...] | None = None
+        if isinstance(ann, type) and issubclass(ann, enum.Enum):
+            enum_vals = tuple(e.value for e in ann)
+
+        fields[pname] = Field(type=ftype, required=required, item_type=item_type, enum=enum_vals)
+
+    return Schema(fields, allow_extra=allow_extra)
+
+
+def infer_contract(func: Callable[..., Any], **overrides: Any) -> ToolContract:
+    """Build a schema-only :class:`ToolContract` from ``func`` (override the rest)."""
+    name = overrides.pop("name", None) or getattr(func, "__name__", None)
+    if not name:
+        raise ValueError("cannot determine tool name for inference; pass name=")
+    args = infer_schema(func)
+    return ToolContract(name=name, args=args, **overrides)

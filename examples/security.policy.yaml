@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# security.policy.yaml — the portable Histos policy.
+#
+# The AUTHORIZATION layer: who may call what, on which resource, how often, and
+# what may come back out. A tool's SHAPE (argument names and types) can be
+# imported from JSON Schema, OpenAPI, an MCP tool definition or a Python
+# signature — but no import can say "support may refund only their own tenant's
+# order". That is policy, so it lives here.
+#
+#   histos validate examples/security.policy.yaml   # structural check (CI)
+#   histos review   examples/security.policy.yaml   # ready / review / blocked
+#   histos explain  examples/security.policy.yaml make_refund \
+#       --role support --attr tenant_id=acme --args '{"order_id":"ORD-1","amount":9000}'
+#
+# Format: Histos Policy Draft 0.1 — spec/policy-0.1.schema.json.
+# YAML needs the optional extra (`pip install histos[yaml]`); the identical
+# bundle in JSON loads with the stdlib alone and hashes to the same value.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: example-support-agent
+version: "1"
+created_at: "2026-08-09T00:00:00Z"
+
+requires:
+  features:
+    - rbac
+    - role_inheritance
+    - arg_schema
+    - numeric_range
+    - string_bounds
+    - resource_authz
+    - trusted_arg_binding
+    - requires_confirmation
+    - rate_limit
+    - budget
+    - canary
+    - output_projection
+    - sensitive_redaction
+
+canaries:
+  - CANARY-7f3a-DO-NOT-LEAK
+
+tools:
+  search_docs:
+    access: read
+    sensitivity: low
+    rate_limit: 30
+    args:
+      query: { type: string, max_length: 512 }
+      top_k: { type: integer, required: false, minimum: 1, maximum: 20 }
+    returns:
+      title: { type: string }
+      snippet: { type: string }
+
+  get_order:
+    access: read
+    sensitivity: high
+    args:
+      order_id: { type: string, pattern: "ORD-[0-9]+" }
+    returns:
+      order_id: { type: string }
+      total: { type: number }
+      customer_email: { type: string, sensitive: pii }
+    resource:
+      # Resolve the order, compare its REAL owner to the principal. There is no
+      # way to express the dangerous near-miss (comparing a caller-supplied
+      # tenant_id argument) — Draft 0.1 removed it.
+      owns: tenant_id
+
+  make_refund:
+    access: write
+    sensitivity: critical
+    budget: 20
+    args:
+      order_id: { type: string, pattern: "ORD-[0-9]+" }
+      amount: { type: integer, minimum: 1, maximum: 50000 }
+      tenant_id: { type: string }
+      reason: { type: string, required: false, max_length: 280 }
+    returns:
+      status: { type: string, enum: [refunded, pending] }
+      reference: { type: string }
+    bind:
+      # The model may pass any tenant_id; it is overwritten with the trusted one
+      # before any check runs, so the wrong value is un-passable, not merely caught.
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+      where:
+        - { field: status, op: ne, value: cancelled }
+    confirmation:
+      required: true
+      expires_in: 900
+    output:
+      project: true # only `status` and `reference` may ever reach the model
+
+roles:
+  viewer:
+    allow: [search_docs, get_order]
+
+  support:
+    inherits: viewer
+    allow: [make_refund]

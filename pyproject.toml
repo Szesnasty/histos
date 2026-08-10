@@ -1,0 +1,90 @@
+[project]
+# The name is settled and is now load-bearing: it is the distribution, the import,
+# the CLI, the `schema_version` prefix and the `$id` host. Renaming a *published*
+# package fragments installs and invalidates every `$ref` in spec/, so this was
+# locked before the first PyPI upload, deliberately, and does not move again.
+name = "histos"
+version = "0.1.0"
+description = "The tool call as a security boundary, in both directions - in-process, no proxy, no models, no infra."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Łukasz Jakubowski", email = "lukasz.jakubowski1993@gmail.com" }]
+keywords = [
+    "llm",
+    "agent",
+    "security",
+    "authorization",
+    "rbac",
+    "guardrails",
+    "prompt-injection",
+    "tool-calling",
+    "mcp",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    # No `License ::` classifier on purpose: PEP 639 supersedes it with the SPDX
+    # `license` expression above, and setuptools rejects having both.
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+# Deliberately ZERO runtime dependencies: the whole point is that
+# anyone can `pip install` this and wrap a tool with no server, no DB, no model.
+dependencies = []
+
+[project.urls]
+Homepage   = "https://github.com/Szesnasty/histos"
+Repository = "https://github.com/Szesnasty/histos"
+Issues     = "https://github.com/Szesnasty/histos/issues"
+Changelog  = "https://github.com/Szesnasty/histos/blob/main/CHANGELOG.md"
+
+[project.scripts]
+histos = "histos.cli:main"
+
+[project.optional-dependencies]
+# YAML policy bundles are optional — JSON works with the stdlib alone.
+yaml = ["pyyaml>=6.0"]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.15.18",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["histos*"]
+
+[tool.setuptools.package-data]
+# Ship the PEP 561 marker so downstream type-checkers actually see the annotations.
+histos = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests keep nested `with` (principal scope + pytest.raises) for readability.
+"tests/**" = ["SIM117"]
+# The reference generator embeds the rendered Markdown as string literals; a
+# table row cannot be wrapped without changing the output, so the line-length
+# rule does not apply to its data.
+"scripts/generate_policy_reference.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
