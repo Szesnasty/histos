@@ -1,0 +1,154 @@
+# The gates this library sells to other people, run against this library.
+#
+# `histos coverage` and `histos drift` are pitched as CI gates, so a repository that
+# does not run them in its own CI is asking for trust it has not spent. The
+# conformance corpus matters most: it is what a second implementation reads, and a
+# corpus that only runs when somebody remembers is a description of what the engine
+# used to do rather than a contract.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # `[dev]` brings ruff, pytest and pyyaml. The library itself keeps zero runtime
+      # dependencies, and the wheel job below is what proves that claim.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Tests, including the conformance corpus
+        run: pytest -q
+
+  gates:
+    name: the CI gates, on the gallery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[yaml]"
+
+      - name: Every gallery policy is structurally valid
+        run: |
+          for policy in policies/*.policy.yaml; do
+            echo "── $policy"
+            histos validate "$policy"
+          done
+
+      - name: Review runs on every gallery policy
+        run: |
+          for policy in policies/*.policy.yaml; do
+            histos review "$policy" > /dev/null
+          done
+
+      - name: Coverage fails on a tool the policy never declared
+        run: |
+          # The gate working is the assertion: an undeclared tool must exit non-zero.
+          if histos coverage policies/01-minimal.policy.yaml --tools make_refund,delete_everything; then
+            echo "coverage did not fail on an undeclared tool" >&2
+            exit 1
+          fi
+
+      - name: Drift fails when a tool definition moves
+        run: |
+          set -e
+          tmp="$(mktemp -d)"
+          cat > "$tmp/tools.json" <<'JSON'
+          {"tools": [{"name": "make_refund", "description": "Refund an order.",
+            "inputSchema": {"type": "object",
+              "properties": {"order_id": {"type": "string"},
+                             "amount": {"type": "integer", "minimum": 1, "maximum": 500}},
+              "required": ["order_id", "amount"]}}]}
+          JSON
+          histos import "$tmp/tools.json" --kind mcp --out "$tmp/security.policy.json" --locator ci
+          histos drift "$tmp/security.policy.json" --source "$tmp/tools.json" --kind mcp
+
+          # Widen the bound and add an argument: this must now fail, and must say the
+          # change reaches enforcement.
+          python - "$tmp/tools.json" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          doc = json.load(open(path))
+          props = doc["tools"][0]["inputSchema"]["properties"]
+          props["amount"]["maximum"] = 50000
+          props["include_sensitive_data"] = {"type": "boolean"}
+          json.dump(doc, open(path, "w"))
+          PY
+          if histos drift "$tmp/security.policy.json" --source "$tmp/tools.json" --kind mcp; then
+            echo "drift did not fail on a widened, extended tool" >&2
+            exit 1
+          fi
+
+      - name: The examples still run
+        run: |
+          for example in examples/*.py; do
+            echo "── $example"
+            python "$example" > /dev/null
+          done
+
+  wheel:
+    name: wheel builds and imports with no dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # Installed bare, in a clean environment: if anything imported at package level
+      # ever grows a third-party dependency, this is where it is caught. "Zero runtime
+      # dependencies" is a load-bearing claim, so it gets a test rather than a promise.
+      - name: Install the wheel alone and import it
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install dist/*.whl
+          /tmp/bare/bin/python -c "import histos; print(histos.__version__)"
+          /tmp/bare/bin/histos --help > /dev/null
+          test -z "$(/tmp/bare/bin/pip list --format=freeze | grep -viE '^(histos|pip|setuptools|wheel)==')" \
+            || { echo "the wheel pulled in a runtime dependency" >&2; \
+                 /tmp/bare/bin/pip list --format=freeze >&2; exit 1; }
