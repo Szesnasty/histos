@@ -1,0 +1,4 @@
+# No model is involved in this demo, so there is no Ollama binding here.
+# Verified against langchain-core 1.5.3 and langgraph 1.2.10.
+langchain-core>=1.0
+langgraph>=1.0

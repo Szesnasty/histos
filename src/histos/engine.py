@@ -13,7 +13,14 @@ The pre-gate chain (fail-fast), review-revised:
 5. ``canary_exfil``     — exact-match canary in an argument
 6. ``content_rule``     — OPTIONAL heuristic patterns, only if opted in
 7. ``rate_limit`` / ``budget``
-8. ``requires_confirmation``
+8. ``escalate``         — the seam to a host **semantic tier**; DENY with none wired
+9. ``requires_confirmation``
+
+Step 8 sits where it does for two reasons. It is last of the machine checks because
+reaching a semantic tier is a model call, and nothing should pay for one on behalf of
+a caller the cheap deterministic chain already refuses. It is *before* confirmation
+because a human is the last word: a tool declaring both would otherwise have its
+escalation skipped the moment an approval arrived.
 
 The engine reads only the :class:`~histos.contracts.GateRequest` and the
 static :class:`~histos.contracts.Policy` — never conversation, documents, or
@@ -23,8 +30,10 @@ developer-provided** resolver, never from model output.
 
 from __future__ import annotations
 
+import copy
 import inspect
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 from histos import canary, detectors
@@ -39,6 +48,14 @@ from histos.schema import sensitive_fields, validate
 # sync tool is a wiring error and fails closed rather than comparing a coroutine.
 ResourceResolver = Callable[[str, dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]]
 
+# The **semantic tier** a host wires behind a policy's ``escalate``: given the request,
+# say whether meaning-level judgement lets it continue. Sync or async, like the
+# resolver, because reaching one is usually a model call. A truthy return is the only
+# outcome that continues the chain — and continuing is all it can do. There is no
+# verdict here that allows something the deterministic chain refused, which is the
+# property that keeps a probabilistic tier from ever widening a deterministic gate.
+EscalationTier = Callable[[GateRequest], Any]
+
 # "the resource was not fetched yet" — distinct from a resolver that legitimately
 # returned an empty dict.
 _UNRESOLVED: Any = object()
@@ -48,22 +65,167 @@ def _stringify(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
-def _stringify_args(args: dict[str, Any]) -> str:
-    return " ".join(_stringify(v) for v in args.values())
+def _callback_args(args: dict[str, Any]) -> dict[str, Any]:
+    """The argument view a host callback gets — a copy, never the live dict.
+
+    ``confirm`` used to receive the very dict the gate then splats into the tool, so a
+    well-meant normalisation in an approvals UI (rounding an amount, defaulting a
+    field) landed in the executed call *after* every check had passed, and the audit
+    record digested the mutated values. The semantic tier is handed the same request
+    and is a far more likely place for a callback to rewrite what it was given.
+    """
+    try:
+        return copy.deepcopy(args)
+    except Exception:  # noqa: BLE001 — an uncopyable argument must not fail the call
+        return dict(args)
+
+
+def for_callback(req: GateRequest) -> GateRequest:
+    """The request a host callback sees: same identity, a detached copy of the args."""
+    return GateRequest(req.tool_name, _callback_args(req.args), req.principal, phase=req.phase)
+
+
+# The canary/secret scan is linear in the argument text, and `Field` has no cap on how
+# many elements an array may carry — so one schema-valid call could hand the gate tens
+# of megabytes and stall the calling thread (6.7 s measured for 20k max-length strings)
+# inside a control that is supposed to be microsecond-scale. The blob is therefore
+# budgeted, and a call that exceeds the budget is DENIED rather than scanned partially:
+# truncating the text would silently stop looking for canaries past the cut, which is
+# exactly the fail-open this gate must not have.
+_MAX_SCAN_CHARS = 1_048_576
+
+
+def _stringify_args(args: dict[str, Any]) -> tuple[str, bool]:
+    """The text the pre-gate scans, plus whether the size budget was blown.
+
+    Containers are walked leaf by leaf so the budget can stop an oversized argument
+    *before* its text is materialised — ``str()`` on a 20k-element list costs the very
+    megabytes the bound exists to avoid.
+    """
+    pieces: list[str] = []
+    total = 0
+
+    def walk(value: Any) -> bool:
+        nonlocal total
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return all(walk(v) for v in value)
+        if isinstance(value, dict):
+            return all(walk(k) and walk(v) for k, v in value.items())
+        text = _stringify(value)
+        total += len(text)
+        if total > _MAX_SCAN_CHARS:
+            return False
+        pieces.append(text)
+        return True
+
+    for v in args.values():
+        if not walk(v):
+            return "", True
+    return " ".join(pieces), False
+
+
+def _text_blob(obj: Any) -> str:
+    """Join every str/bytes leaf of ``obj``, the way the pre-gate joins arguments.
+
+    Only *textual* leaves take part: calling ``str()`` on an arbitrary returned object
+    would run user code inside the post-gate, and a ``__str__`` that raises would turn
+    a call that already executed into a denial — the same shape as the NamedTuple bug
+    :func:`_rebuild_container` exists to prevent.
+
+    Dict *keys* are skipped: this blob exists to see a token split across adjacent
+    values, and splicing a field name between two of them breaks exactly the adjacency
+    it is looking for. Keys are still matched in both tiers leaf by leaf.
+
+    Unlike the argument blob this one is not budgeted. The pre-gate's budget refuses an
+    oversized *input* before anything runs; refusing an oversized output would drop a
+    result the tool already produced, and the scan it feeds costs ~5 ms per 4 MB against
+    the ~180 ms the secret detectors already spend on the same bytes.
+    """
+    pieces: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            pieces.append(value)
+        elif isinstance(value, bytes):
+            pieces.append(value.decode("utf-8", "surrogateescape"))
+        elif isinstance(value, dict):
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for v in value:
+                walk(v)
+
+    walk(obj)
+    return " ".join(pieces)
+
+
+def _with_ordinal(key: Any, n: int) -> Any:
+    return key + f"#{n}".encode() if isinstance(key, bytes) else f"{key}#{n}"
+
+
+def _put_redacted_key(out: dict[Any, Any], key: Any, value: Any) -> None:
+    """Insert a key that redaction may have rewritten, without dropping a record.
+
+    Two distinct secrets used as dict keys both redact to the same mark, so a plain
+    assignment collapses two records into one — silent data loss in the middle of a
+    security control, and invisible in the audit trail. Colliding redacted keys get an
+    ordinal suffix instead. Every key goes through here, including untouched ones: a
+    redacted key can also collide with a *literal* key that already spells the mark,
+    and it was the untouched one that overwrote the record.
+    """
+    if key in out:
+        n = 2
+        while _with_ordinal(key, n) in out:
+            n += 1
+        key = _with_ordinal(key, n)
+    out[key] = value
+
+
+def _rebuild_container(obj: Any, items: list[Any]) -> Any:
+    """Rebuild a sequence/set container of the same type from redacted ``items``.
+
+    ``type(obj)(items)`` is wrong for a NamedTuple — its constructor takes positional
+    fields, so redacting a NamedTuple return raised TypeError, which the post-gate
+    turned into a fail-closed DENY *after* the tool had already run: the side effect
+    happened and the caller got a denial. A tuple subclass that cannot be rebuilt at all
+    degrades to a plain tuple; losing the type is acceptable, losing the redaction (or
+    the call) is not.
+    """
+    make = getattr(obj, "_make", None)  # NamedTuple
+    if isinstance(obj, tuple) and callable(make):
+        try:
+            return make(items)
+        except (TypeError, ValueError):
+            return tuple(items)
+    try:
+        return type(obj)(items)
+    except (TypeError, ValueError):
+        if isinstance(obj, list):
+            return list(items)
+        if isinstance(obj, frozenset):
+            return frozenset(items)
+        if isinstance(obj, set):
+            return set(items)
+        return tuple(items)
 
 
 def _redact_structure(obj: Any, tokens: frozenset[str]) -> tuple[Any, list[str]]:
-    """Recursively replace verbatim canary tokens in strings within ``obj``.
+    """Recursively replace canary tokens in strings within ``obj``.
 
     Traverses str, bytes, dict (keys *and* values), list, tuple, set and
-    frozenset. **Residual (honest):** it cannot reach into opaque objects
-    (dataclass/Pydantic attributes, custom __str__), so a canary hidden inside
-    such an object's fields is not redacted — canary is a verbatim, structural
-    control, not a general exfiltration guard (see SECURITY.md).
+    frozenset, matching verbatim *and* normalized — the same two tiers the pre-gate
+    applies, so the output channel is not the cheap way around the control.
+    **Residual (honest):** it cannot reach into opaque objects (dataclass/Pydantic
+    attributes, custom __str__), so a canary hidden inside such an object's fields is
+    not redacted — canary is a mechanical, structural control, not a general
+    exfiltration guard (see SECURITY.md).
     """
     found: list[str] = []
     if isinstance(obj, str):
-        return canary.redact(obj, tokens)
+        out_s, found = canary.redact(obj, tokens)
+        out_s, norm_hits = canary.redact_normalized(out_s, tokens)
+        found.extend(tok for tok in norm_hits if tok not in found)
+        return out_s, found
     if isinstance(obj, bytes):
         out_b = obj
         for tok in sorted(tokens, key=len, reverse=True):  # longer first (see canary.redact)
@@ -71,30 +233,29 @@ def _redact_structure(obj: Any, tokens: frozenset[str]) -> tuple[Any, list[str]]
             if tb and tb in out_b:
                 found.append(tok)
                 out_b = out_b.replace(tb, b"[REDACTED-CANARY]")
+        # surrogateescape round-trips any byte string exactly, so normalized matching
+        # can run on text without disturbing a single byte outside a hit.
+        text, norm_hits = canary.redact_normalized(out_b.decode("utf-8", "surrogateescape"), tokens)
+        if norm_hits:
+            found.extend(tok for tok in norm_hits if tok not in found)
+            out_b = text.encode("utf-8", "surrogateescape")
         return out_b, found
     if isinstance(obj, dict):
         out: dict[Any, Any] = {}
         for k, v in obj.items():
             new_k, khits = _redact_structure(k, tokens)
             new_v, vhits = _redact_structure(v, tokens)
-            out[new_k] = new_v
+            _put_redacted_key(out, new_k, new_v)
             found.extend(khits)
             found.extend(vhits)
         return out, found
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, (list, tuple, set, frozenset)):
         items = []
         for v in obj:
             new_v, hits = _redact_structure(v, tokens)
             items.append(new_v)
             found.extend(hits)
-        return type(obj)(items), found
-    if isinstance(obj, (set, frozenset)):
-        items = []
-        for v in obj:
-            new_v, hits = _redact_structure(v, tokens)
-            items.append(new_v)
-            found.extend(hits)
-        return type(obj)(items), found
+        return _rebuild_container(obj, items), found
     return obj, found
 
 
@@ -142,7 +303,7 @@ def _redact_sensitive(obj: Any, sensitive_names: frozenset[str]) -> tuple[Any, l
             new_v, hits = _redact_sensitive(v, sensitive_names)
             items.append(new_v)
             found.extend(hits)
-        return type(obj)(items), found
+        return _rebuild_container(obj, items), found
     return obj, found
 
 
@@ -165,32 +326,49 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str]]:
                     dropped.append(str(k))
             return kept
         if isinstance(o, (list, tuple)):
-            return type(o)(go(x) for x in o)
+            return _rebuild_container(o, [go(x) for x in o])
         return o
 
     return go(obj), dropped
 
 
 def _redact_secrets_structure(obj: Any) -> tuple[Any, list[str]]:
-    """Redact recognised secrets (checksum + structural) in every string leaf."""
+    """Redact recognised secrets (checksum + structural) in every string leaf.
+
+    Traverses exactly what the canary traverser does — str, bytes, dict keys *and*
+    values, list, tuple, set, frozenset. It used to skip dict keys and bytes entirely,
+    so a key→credential map (an AWS key listing) or any tool returning bytes (an HTTP
+    body, a file read) handed the model the credential in the clear, with nothing in
+    the audit trail: a leak the operator could not even see.
+    """
     found: list[str] = []
     if isinstance(obj, str):
         red, kinds = detectors.redact_string(obj)
         found.extend(kinds)
         return red, found
+    if isinstance(obj, bytes):
+        # surrogateescape round-trips every byte, so only the detected span changes.
+        red, kinds = detectors.redact_string(obj.decode("utf-8", "surrogateescape"))
+        if not kinds:
+            return obj, found
+        found.extend(kinds)
+        return red.encode("utf-8", "surrogateescape"), found
     if isinstance(obj, dict):
         out: dict[Any, Any] = {}
         for k, v in obj.items():
-            out[k], hits = _redact_secrets_structure(v)
-            found.extend(hits)
+            new_k, khits = _redact_secrets_structure(k)
+            new_v, vhits = _redact_secrets_structure(v)
+            _put_redacted_key(out, new_k, new_v)
+            found.extend(khits)
+            found.extend(vhits)
         return out, found
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, (list, tuple, set, frozenset)):
         items = []
         for v in obj:
             new_v, hits = _redact_secrets_structure(v)
             items.append(new_v)
             found.extend(hits)
-        return type(obj)(items), found
+        return _rebuild_container(obj, items), found
     return obj, found
 
 
@@ -202,11 +380,13 @@ class Engine:
         *,
         content_rules: ContentRules | None = None,
         resource_resolver: ResourceResolver | None = None,
+        escalate: EscalationTier | None = None,
     ) -> None:
         self.policy = policy
         self.limits = limits
         self.content_rules = content_rules
         self.resource_resolver = resource_resolver
+        self.escalate = escalate
 
     # ── pre-gate ─────────────────────────────────────────────────────
 
@@ -218,13 +398,20 @@ class Engine:
             return GateDecision(Effect.DENY, "internal_error", f"fail-closed on exception: {exc!r}")
 
     async def apre(self, req: GateRequest) -> GateDecision:
-        """Same decision, but awaiting an async ``resource_resolver``.
+        """Same decision *and the same side effects*, awaiting an async ``resource_resolver``.
 
         Only the resolver hop is async — evaluation itself stays synchronous and
-        CPU-only, so the two paths cannot drift into different verdicts.
+        CPU-only, so the two paths cannot drift into different verdicts. The cheap
+        checks (steps 1–3) run **before** the resolver on both paths: this path used to
+        resolve first, so an unauthorized caller, or one whose arguments the schema
+        rejects, still drove a real lookup in the host's trusted datastore — an
+        existence/timing oracle and an SSRF primitive the sync path denied outright.
         """
         try:
             contract = self.policy.contract_for(req.tool_name)
+            early = self._pre_before_resource(req, contract)
+            if early is not None:
+                return early
             resource: Any = _UNRESOLVED
             if contract is not None and contract.constraints and contract.needs_resource_resolver():
                 if self.resource_resolver is None:
@@ -238,7 +425,7 @@ class Engine:
                 except Exception as exc:  # noqa: BLE001 — a raising resolver fails closed
                     return GateDecision(Effect.DENY, "resolver_error", f"resource_resolver raised: {exc!r}")
                 resource = resolved or {}
-            return self._pre(req, resource)
+            return await self._apre_after_resource(req, contract, resource)
         except Exception as exc:  # noqa: BLE001 — fail-closed
             return GateDecision(Effect.DENY, "internal_error", f"fail-closed on exception: {exc!r}")
 
@@ -252,7 +439,18 @@ class Engine:
 
     def _pre(self, req: GateRequest, resource: Any = _UNRESOLVED) -> GateDecision:
         contract = self.policy.contract_for(req.tool_name)
+        early = self._pre_before_resource(req, contract)
+        if early is not None:
+            return early
+        return self._pre_after_resource(req, contract, resource)
 
+    def _pre_before_resource(self, req: GateRequest, contract: Any) -> GateDecision | None:
+        """Steps 1–3: the CPU-only checks that must precede any resolver side effect.
+
+        Returns None when the call has earned a resource lookup — and only then, which
+        is what keeps `pre` and `apre` identical in *what they touch*, not just in what
+        they answer.
+        """
         # 1. Deny-by-default: a tool with no contract is not gated → refused.
         if contract is None:
             return GateDecision(Effect.DENY, "unknown_tool", f"no policy for tool {req.tool_name!r}")
@@ -279,7 +477,41 @@ class Engine:
             first = errors[0]
             field = first.split(":", 1)[0]
             return GateDecision(Effect.DENY, "arg_schema", "; ".join(errors), field=field)
+        return None
 
+    def _pre_after_resource(self, req: GateRequest, contract: Any, resource: Any = _UNRESOLVED) -> GateDecision:
+        """Steps 4–9, resolving a sync semantic tier inline."""
+        blocked = self._pre_checks(req, contract, resource)
+        if blocked is not None:
+            return blocked
+        if not contract.requires_escalation:
+            return self._chain_end(req, contract)
+        refusal = self._escalate(req)
+        return refusal if refusal is not None else self._after_escalation(req, contract)
+
+    async def _apre_after_resource(self, req: GateRequest, contract: Any, resource: Any) -> GateDecision:
+        """The same tail, awaiting an async semantic tier.
+
+        The two paths are duplicated for exactly one hop, the same way the resolver is:
+        everything that decides is in ``_pre_checks`` / ``_chain_end`` / a shared
+        verdict reader, so the sync and async gates cannot drift into different
+        verdicts — only into different ways of waiting for the same answer.
+        """
+        blocked = self._pre_checks(req, contract, resource)
+        if blocked is not None:
+            return blocked
+        if not contract.requires_escalation:
+            return self._chain_end(req, contract)
+        refusal = await self._aescalate(req)
+        return refusal if refusal is not None else self._after_escalation(req, contract)
+
+    def _pre_checks(self, req: GateRequest, contract: Any, resource: Any = _UNRESOLVED) -> GateDecision | None:
+        """Steps 4–7: every remaining check that is CPU-only. None = keep going.
+
+        Split out so the sync and async paths share it verbatim, and so the two steps
+        that can reach *outside* the process — the semantic tier, and the human behind
+        confirmation — sit after every check that cannot.
+        """
         # 4. Resource-aware authorization. Compares call/resource
         #    attributes against trusted principal context or literals.
         constraint_decision = self._check_constraints(req, contract, resource)
@@ -287,7 +519,18 @@ class Engine:
             return constraint_decision
 
         # 5. Canary exfiltration attempt via an argument (verbatim + normalized).
-        blob = _stringify_args(req.args)
+        blob, oversized = _stringify_args(req.args)
+        if oversized:
+            # Arguments too large to scan are refused, not scanned in part: the canary
+            # and secret checks below are only meaningful over the WHOLE argument text.
+            return GateDecision(
+                Effect.DENY,
+                "arg_schema",
+                f"arguments exceed the {_MAX_SCAN_CHARS} character budget the gate will scan",
+                field=next(iter(req.args), ""),
+                expected=f"<= {_MAX_SCAN_CHARS} characters of argument text",
+                received="oversized",
+            )
         if self.policy.canaries and (
             canary.find(blob, self.policy.canaries) or canary.find_normalized(blob, self.policy.canaries)
         ):
@@ -320,13 +563,136 @@ class Engine:
         if limit_rule is not None:
             return GateDecision(Effect.DENY, limit_rule, f"{limit_rule} exceeded for {req.tool_name!r}")
 
-        # 8. Explicit confirmation gate.
+        return None
+
+    # ── the semantic seam (step 8) ───────────────────────────────────
+
+    def _escalate(self, req: GateRequest) -> GateDecision | None:
+        """Consult the semantic tier. ``None`` means it let the call continue.
+
+        Every other outcome ends the call, **including having no tier at all**. That is
+        the whole property: the seam has no verdict meaning "allow more than the
+        deterministic chain already allowed", so wiring meaning in can never widen the
+        gate, and leaving it out can never open one. There is deliberately no
+        configuration — no ``on_missing``, no default callback, no mode — that turns the
+        absence of a tier into an allow; the branch simply does not exist.
+        """
+        if self.escalate is None:
+            return self._no_tier_decision(req.tool_name)
+        try:
+            verdict = self.escalate(for_callback(req))
+        except Exception as exc:  # noqa: BLE001 — a raising tier fails closed
+            return self._tier_error(f"escalate callback raised: {exc!r}")
+        if inspect.isawaitable(verdict):
+            # An async tier on the sync path: a coroutine object is truthy, so treating
+            # it as a verdict would let every escalated call through un-judged — the one
+            # mistake this seam exists to make impossible.
+            closer = getattr(verdict, "close", None)
+            if callable(closer):
+                closer()
+            return self._tier_error(
+                f"escalate callback for {req.tool_name!r} is async but the tool is sync — "
+                "an async tier can only be awaited on the async path"
+            )
+        return self._read_verdict(req, verdict)
+
+    async def _aescalate(self, req: GateRequest) -> GateDecision | None:
+        """:meth:`_escalate` with the one hop awaited. Same verdicts, same collapse."""
+        if self.escalate is None:
+            return self._no_tier_decision(req.tool_name)
+        try:
+            verdict = self.escalate(for_callback(req))
+            if inspect.isawaitable(verdict):
+                verdict = await verdict
+        except Exception as exc:  # noqa: BLE001 — a raising tier fails closed
+            return self._tier_error(f"escalate callback raised: {exc!r}")
+        return self._read_verdict(req, verdict)
+
+    @staticmethod
+    def _read_verdict(req: GateRequest, verdict: Any) -> GateDecision | None:
+        """Truthy continues the chain; anything else refuses. Shared by both paths."""
+        if verdict:
+            return None
+        return GateDecision(
+            Effect.DENY,
+            "escalation_denied",
+            f"the semantic tier refused {req.tool_name!r}",
+            escalate=True,
+        )
+
+    @staticmethod
+    def _no_tier_decision(tool_name: str) -> GateDecision:
+        return GateDecision(
+            Effect.DENY,
+            "no_escalation_tier",
+            f"tool {tool_name!r} must be escalated to a semantic tier but none is wired",
+            expected="a semantic tier passed as Gate(escalate=...)",
+            received="<none>",
+            escalate=True,
+        )
+
+    @staticmethod
+    def _tier_error(reason: str) -> GateDecision:
+        return GateDecision(Effect.DENY, "escalation_error", reason, escalate=True)
+
+    def _after_escalation(self, req: GateRequest, contract: Any) -> GateDecision:
+        """The chain resumed once the tier let the call through.
+
+        Never a bare ALLOW that skips step 9: a tool declaring both ``escalate`` and
+        ``confirmation`` still has to reach the human, and the tier's approval is
+        recorded on that decision rather than substituted for it.
+        """
+        decision = self._chain_end(req, contract)
+        if decision.effect is Effect.ALLOW:
+            return GateDecision(
+                Effect.ALLOW,
+                "escalated",
+                f"the semantic tier approved {req.tool_name!r}",
+                escalate=True,
+            )
+        return replace(decision, escalate=True)
+
+    def _chain_end(self, req: GateRequest, contract: Any) -> GateDecision:
+        """Step 9, and the ALLOW that ends the pre-gate."""
         if contract.requires_confirmation:
+            return self._confirmation_decision(req, contract)
+        return GateDecision(Effect.ALLOW, "allow")
+
+    @staticmethod
+    def _confirmation_decision(req: GateRequest, contract: Any) -> GateDecision:
+        """The REQUIRE_CONFIRMATION decision, carrying the declared approval window.
+
+        ``confirmation.expires_in`` is read defensively (``getattr``) because the field
+        is part of the policy *format* and an engine must not break on a contract object
+        that predates it. A window the engine cannot honour — zero, negative, or not an
+        integer — is refused rather than downgraded to "no expiry": an approval that can
+        never be inside its window must not be treated as one that never leaves it.
+
+        The window itself is published on the decision so the host's approval store can
+        enforce the clock (the engine has no clock and never consumes approvals); see
+        the handoff in ``histos.approvals``.
+        """
+        window = getattr(contract, "confirmation_expires_in", None)
+        if window is None:
             return GateDecision(
                 Effect.REQUIRE_CONFIRMATION, "requires_confirmation", f"{req.tool_name!r} requires confirmation"
             )
-
-        return GateDecision(Effect.ALLOW, "allow")
+        if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+            return GateDecision(
+                Effect.DENY,
+                "confirm_error",
+                f"tool {req.tool_name!r} declares an unusable confirmation window ({window!r}); "
+                "no approval could ever be valid",
+                field="confirmation.expires_in",
+                expected="a positive number of seconds",
+                received=repr(window),
+            )
+        return GateDecision(
+            Effect.REQUIRE_CONFIRMATION,
+            "requires_confirmation",
+            f"{req.tool_name!r} requires confirmation",
+            expected=f"an approval granted within {window}s",
+        )
 
     def _check_constraints(self, req: GateRequest, contract: Any, prefetched: Any = _UNRESOLVED) -> GateDecision | None:
         if not contract.constraints:
@@ -387,6 +753,11 @@ class Engine:
         recognised secrets. Output projection, strict returns and sensitive-field
         redaction are all keyed on a declared return *shape*, which an exception does
         not have, so applying them would be inventing semantics.
+
+        Canaries are matched in both tiers, as everywhere else. Matching verbatim only
+        made a raised message the cheapest exit in the library: one zero-width space in
+        ``ValueError(f"not found: {canary}")`` and the token reached the model inside an
+        ordinary, un-redacted exception, with nothing in the audit trail.
         """
         try:
             return self._post_exception(req, exc)
@@ -408,7 +779,7 @@ class Engine:
         redactions: list[str] = []
 
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
-            text, found = canary.redact(text, self.policy.canaries)
+            text, found = _redact_structure(text, self.policy.canaries)
             redactions.extend(f"canary:{tok}" for tok in found)
 
         if contract is not None and contract.redact_secret_output:
@@ -461,10 +832,28 @@ class Engine:
             out, dropped = _project_output(out, frozenset(contract.returns.fields))
             redactions.extend(f"drop:{k}" for k in dict.fromkeys(dropped))
 
-        # 1. Canary leak in the output → redact verbatim tokens anywhere in the structure.
+        # 1. Canary leak in the output → redact verbatim *and* normalized tokens
+        #    anywhere in the structure, then ask the pre-gate's question of the whole
+        #    thing: the pre-gate scans one blob joined from every argument, so it denies
+        #    a token split across two of them, while per-leaf redaction cannot see a
+        #    token split across two fields of the return. Post has to match at least as
+        #    hard as pre or the output channel is the cheap way round the control — and
+        #    a split token cannot be located leaf by leaf, so the value is dropped whole
+        #    rather than returned with a leak the redactor could see but not reach.
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
             out, found = _redact_structure(out, self.policy.canaries)
             redactions.extend(f"canary:{tok}" for tok in found)
+            crossing = canary.find_normalized(_text_blob(out), self.policy.canaries)
+            if crossing:
+                redactions.extend(f"canary:{tok}" for tok in crossing)
+                redactions.append("output:redacted_all")
+                why = "a canary token spans several output fields and cannot be redacted in place"
+                return (
+                    GateDecision(
+                        Effect.REDACT, "post_redaction", f"{why} — output dropped", redactions=tuple(redactions)
+                    ),
+                    f"[REDACTED: {why}]",
+                )
 
         # 2. Sensitive return fields the caller's role may not see → redact by name,
         #    recursively (covers lists of records + nested structures, not just a

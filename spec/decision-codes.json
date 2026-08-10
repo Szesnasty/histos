@@ -8,6 +8,18 @@
     "require_confirmation": "CONFIRMATION_REQUIRED",
     "redact": "OUTPUT_REDACTED"
   },
+  "escalation": {
+    "$comment": "The seam to a semantic tier, and the one place this deterministic format touches a probabilistic one. Written down here because it is a cross-implementation obligation, not an engine detail.",
+    "marker": "escalate",
+    "marker_meaning": "A boolean on the decision, set on every one of the four codes below. It RECORDS that meaning was consulted, or should have been, so an audit trail can separate those calls. It is not an effect and must never be read as one: no implementation may have a code path in which a decision is allowed because this flag is set.",
+    "collapse": "An engine with no tier wired MUST answer no_escalation_tier / deny for a tool the policy marks `escalate`. There is no configuration — no default tier, no permissive mode, no on_missing — by which the absence of a tier becomes an allow. An implementation that offers one is not compatible.",
+    "codes": [
+      "escalated",
+      "escalation_denied",
+      "escalation_error",
+      "no_escalation_tier"
+    ]
+  },
   "codes": [
     {
       "code": "allow",
@@ -144,6 +156,34 @@
       "effect": "deny",
       "phase": "pre",
       "meaning": "The confirmation callback raised, or is async while the tool is sync. Fail closed — never treat an unavailable approver as approval."
+    },
+    {
+      "code": "escalated",
+      "effect": "allow",
+      "phase": "pre",
+      "meaning": "The tool is marked `escalate` and the host's semantic tier let the call continue. The tier can only release a call the deterministic chain already allowed; it can never allow one the chain refused, so this code never appears where another code would have denied."
+    },
+    {
+      "code": "escalation_denied",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The host's semantic tier refused the call. The tier's verdict is read as a boolean: anything other than a truthy result is a refusal."
+    },
+    {
+      "code": "escalation_error",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The escalate callback raised, or is async while the tool is sync. Fail closed — an unreachable tier is never read as an approving one, and a coroutine object is never read as a verdict."
+    },
+    {
+      "code": "no_escalation_tier",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The policy marks this tool `escalate` and the engine has no semantic tier wired. THE COLLAPSE, and the property the seam exists for: an engine that cannot judge meaning refuses the call rather than proceeding without judging it. Every implementation must reproduce this — a port that treats a missing tier as 'nothing to check' turns the same policy into a weaker one.",
+      "detail": [
+        "expected",
+        "received"
+      ]
     },
     {
       "code": "internal_error",

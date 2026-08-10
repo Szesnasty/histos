@@ -60,6 +60,13 @@ that **refuses more** than these fixtures expect has diverged, not hardened.
 
 ## Vocabulary
 
+One code in the vocabulary is a corpus case in its own right. `no_escalation_tier` is
+what an engine must answer when a policy marks a call `escalate` and no semantic tier is
+wired to it: the call is **refused**, never waved through. An implementation that reads a
+missing tier as "nothing to check" passes every other fixture and quietly enforces a
+weaker policy than the one it was given, so the collapse is pinned by its own fixtures
+rather than left to prose.
+
 Decision codes and their meanings live in [`../spec/decision-codes.json`](../spec/decision-codes.json),
 split into namespaces: **RUNTIME** (a `GateDecision.rule`), **POLICY** (a
 `PolicyError.code`, raised at load time) and **REVIEW** (advisory findings, not yet

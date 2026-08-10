@@ -25,7 +25,13 @@ from typing import Any
 
 from histos.contracts import ToolContract
 from histos.importers.json_schema import schema_from_json_schema
-from histos.importers.sources import ToolSource, contracts_of
+from histos.importers.sources import (
+    UNREVIEWED_ACCESS,
+    UNREVIEWED_SENSITIVITY,
+    ToolSource,
+    contracts_of,
+    register_source_kind,
+)
 
 
 def _unwrap(tool: dict[str, Any]) -> dict[str, Any]:
@@ -52,9 +58,13 @@ def source_from_openai(tool: dict[str, Any]) -> ToolSource:
         # function declares no return schema; recording the absence keeps a later
         # addition visible as drift.
         shape={"input": parameters if isinstance(parameters, dict) else None, "output": None},
+        # A function definition declares no more about blast radius than MCP does, so
+        # it inherits the same unreviewed assumption rather than a friendlier one.
         contract=ToolContract(
             name=name,
             args=schema_from_json_schema(parameters) if isinstance(parameters, dict) else None,
+            access=UNREVIEWED_ACCESS,
+            sensitivity=UNREVIEWED_SENSITIVITY,
         ),
     )
 
@@ -85,3 +95,6 @@ def sources_from_openai(source: list[dict[str, Any]] | dict[str, Any]) -> list[T
 
 def contracts_from_openai(source: list[dict[str, Any]] | dict[str, Any]) -> list[ToolContract]:
     return contracts_of(sources_from_openai(source))
+
+
+register_source_kind("openai", sources_from_openai)

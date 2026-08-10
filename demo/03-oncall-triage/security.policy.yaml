@@ -1,0 +1,201 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# ON-CALL TRIAGE
+#
+# Written against `ops/tools.py`, which was not changed.
+#
+# The failure mode here is not confidentiality. Nothing this agent touches is
+# secret; the services are the company's own. The failure mode is an irreversible
+# action landing in the wrong place at three in the morning, and the attack surface
+# is an alert whose detail field carries text from whoever was talking to the
+# service.
+#
+# Four ideas carry this file:
+#
+#   the enum is the wall     `deploy_service` takes environment: [staging]. Not
+#                            "production requires approval" — production is a value
+#                            this tool cannot express. The safest value is the one
+#                            that does not parse.
+#
+#                            Note which things are enumerated and which are not.
+#                            `environment` is a security boundary: there are two,
+#                            there will always be two, and which one you are in is
+#                            the whole question. `service` is an *inventory* — it
+#                            grows whenever the platform team ships something — so
+#                            it is bounded by shape, not by a list. An enum of the
+#                            current service catalogue would be a second copy of the
+#                            services table, and it would be wrong the morning a
+#                            fourth service launches. The tool already answers "no
+#                            such service"; the policy does not need to know the
+#                            names.
+#
+#   a floor is availability  `replicas` has minimum: 1. "Scale payments to zero to
+#                            free capacity" is a sentence that reads like capacity
+#                            planning and lands like an outage. It is now
+#                            unwritable.
+#
+#   the row, not the tool    A floor stops zero. It does not stop three replicas
+#                            becoming one, which during a latency incident is the
+#                            same outage arriving more slowly — and it does not stop
+#                            the agent acting on a service that has no alert at all.
+#                            Neither fact is in the arguments; both are in the
+#                            platform's own tables. `resource.where` asks
+#                            `wiring.resolve_resource` for them, and the injected
+#                            runbook's target (payments, which is not alerting) and
+#                            its shape (take capacity away) both fail there.
+#
+#   cheap safety, dear harm  `page_oncall` has a generous budget and no
+#                            constraints. `deploy_service` has a budget of one, and
+#                            every capacity change is confirmed out of band by the
+#                            incident commander. If waking a human costs more than
+#                            shipping to production, the agent learns the wrong
+#                            lesson.
+#
+#                            The budgets and rate limits in this file are bounds,
+#                            not the reason for any outcome the README reports. They
+#                            are evaluated after the argument schema and the
+#                            resource constraints, and on the runs the README shows,
+#                            the run is over long before any of them binds. They are
+#                            here because a bound that only matters on the bad day
+#                            still has to be written on an ordinary one.
+#
+# `histos review` on this file reports one remaining warning — `page_oncall` has no
+# resource constraint. That is deliberate and it is not fixable: `page_oncall` takes
+# a reason and touches no resource, so there is no row to authorise against. The
+# README quotes the warning rather than hiding it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+version: "1"
+policy_id: oncall-triage
+
+requires:
+  features:
+    - rbac
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - enum
+    - resource_authz
+    - requires_confirmation
+    - rate_limit
+    - budget
+
+tools:
+  # ── looking ────────────────────────────────────────────────────────────
+  list_alerts:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args: {}
+
+  read_alert:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args:
+      alert_id: { type: integer, minimum: 1 }
+
+  get_service:
+    access: read
+    sensitivity: low
+    rate_limit: 120
+    args:
+      service: { type: string, pattern: "[a-z][a-z0-9-]{1,30}" }
+      environment: { type: string, enum: [staging, production] }
+
+  # ── acting ─────────────────────────────────────────────────────────────
+  restart_service:
+    # The cheapest remedy, so the loosest bound. A restart is recoverable and it is
+    # usually the right first move; making it expensive pushes the agent towards
+    # something worse. It still may not be pointed at a service nobody is alerting
+    # about — that is not triage, it is an injected instruction taking a walk.
+    access: write
+    sensitivity: medium
+    budget: 6
+    rate_limit: 10
+    args:
+      service: { type: string, pattern: "[a-z][a-z0-9-]{1,30}" }
+      environment: { type: string, enum: [staging, production] }
+    resource:
+      where:
+        - { field: service_is_alerting, op: eq, value: true }
+
+  scale_service:
+    access: write
+    sensitivity: high
+    budget: 4
+    rate_limit: 6
+    args:
+      service: { type: string, pattern: "[a-z][a-z0-9-]{1,30}" }
+      environment: { type: string, enum: [staging, production] }
+      # minimum: 1 is not a tidiness rule. Zero replicas is an outage, and "scale it
+      # to zero to free capacity" is exactly how an injected runbook phrases one.
+      # maximum: 12 bounds the bill in the other direction.
+      replicas: { type: integer, minimum: 1, maximum: 12 }
+    resource:
+      where:
+        # Two facts the arguments cannot carry, both read from the services table.
+        - { field: service_is_alerting, op: eq, value: true }
+        - { field: keeps_current_capacity, op: eq, value: true }
+    # A capacity change is a change to the shape of production. The agent may
+    # propose one; the incident commander it woke decides. Confirmation is bound to
+    # the exact (tool, arguments, principal), so an approval for one service cannot
+    # be replayed for another.
+    confirmation:
+      required: true
+      expires_in: 900
+
+  deploy_service:
+    access: write
+    sensitivity: critical
+    # One deploy per incident. A triage agent that ships twice is not triaging.
+    budget: 1
+    rate_limit: 2
+    args:
+      service: { type: string, pattern: "[a-z][a-z0-9-]{1,30}" }
+      # Production is absent, and that absence is the control. There is no wording
+      # of an alert, and no runbook attached to one, that makes a value parse.
+      environment: { type: string, enum: [staging] }
+      # A tag or a full commit sha. `latest`, a branch name and `v5.0.0-hotfix`
+      # invented by an injected runbook all fail to match.
+      version: { type: string, pattern: "(v[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-f]{40})" }
+    resource:
+      where:
+        - { field: service_is_alerting, op: eq, value: true }
+
+  resolve_alert:
+    # Closing an alert on a service that is still down is not a fix, it is a lie in
+    # the incident record. The resolver checks the service, not the note.
+    access: write
+    sensitivity: medium
+    budget: 4
+    rate_limit: 10
+    args:
+      alert_id: { type: integer, minimum: 1 }
+      note: { type: string, min_length: 1, max_length: 500 }
+    resource:
+      where:
+        - { field: alert_service_is_healthy, op: eq, value: true }
+
+  page_oncall:
+    access: write
+    sensitivity: low
+    budget: 20
+    args:
+      reason: { type: string, min_length: 1, max_length: 500 }
+
+roles:
+  # One role, and it is the whole estate — this agent is the only caller. RBAC is
+  # doing nothing here that the tool contracts are not already doing, which is why
+  # the README does not credit it with any of the outcomes.
+  triage_agent:
+    allow:
+      - list_alerts
+      - read_alert
+      - get_service
+      - restart_service
+      - scale_service
+      - deploy_service
+      - resolve_alert
+      - page_oncall

@@ -1,7 +1,7 @@
 {
  "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and — the part prose kept getting wrong — what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
  "manifest_version": "1",
- "corpus_version": "0.2.0",
+ "corpus_version": "0.3.0",
  "status": "draft",
  "schema_version": "histos.policy/0.1",
  "artifacts": {
@@ -104,6 +104,21 @@
      "case": "cross-tenant-resource-denies",
      "file": "decisions/cross-tenant-resource-denies.json",
      "sha256": "686df81138d309a071c56524bff9afe8fb5c6c944e8333dbf32828bb291024aa"
+    },
+    {
+     "case": "escalate-collapses-before-confirmation",
+     "file": "decisions/escalate-collapses-before-confirmation.json",
+     "sha256": "11cb59f3bfe59eda7b362cc67e5807c046a2849692ce34ab2723659f3b9f9586"
+    },
+    {
+     "case": "escalate-does-not-mask-a-deterministic-denial",
+     "file": "decisions/escalate-does-not-mask-a-deterministic-denial.json",
+     "sha256": "2122f803d2365556f9609f844a4891bbac3aa691a4878b53df1508d5fe333d45"
+    },
+    {
+     "case": "escalate-without-a-tier-denies",
+     "file": "decisions/escalate-without-a-tier-denies.json",
+     "sha256": "f1c9176acb9ce98f35492370a9c8663b1198af23ff00243b6aa4b7707187194a"
     },
     {
      "case": "inherited-grant-allows",
@@ -292,22 +307,22 @@
     {
      "case": "draft4-boolean-exclusive-minimum-is-ignored",
      "file": "projection/draft4-boolean-exclusive-minimum-is-ignored.json",
-     "sha256": "b22cd166c5b581890c07cb7775dc1a4a376fb9a4482b01aa8bac98070b2fd6cc"
+     "sha256": "f8e41e6f548e0e4e962c62c3dc1f5e084df6f563d88e192df701c40e58f02ffb"
     },
     {
      "case": "every-projected-keyword-survives",
      "file": "projection/every-projected-keyword-survives.json",
-     "sha256": "924c9a11d52c6264265fab49d84449a8cdf84d817faaa663ae9ac94d2446801e"
+     "sha256": "1a4edc664d8aab5c3a4082400cc57bb71c9d9b5c86eae40c9a8c22713486c21d"
     },
     {
      "case": "integral-bounds-hash-the-same-whether-written-as-int-or-float",
      "file": "projection/integral-bounds-hash-the-same-whether-written-as-int-or-float.json",
-     "sha256": "cf6b2a347cd056c830fb1bd552ef5da72579022445d596ce88a8c2c6250f08b1"
+     "sha256": "eaa07959b59c4450f5f1eae62c0123ca1859ec406ba1c764fe4453a53c1448aa"
     },
     {
      "case": "integral-bounds-written-as-int",
      "file": "projection/integral-bounds-written-as-int.json",
-     "sha256": "7c72001b99c820ae7c6301e27f89367a3c9fdbbf28d948f2f4248a47ff7a0796"
+     "sha256": "3fe4eb7e587cc445b463b4e6cf8da7ef056e4e6bbd870f7a2cc694775ea6d8e3"
     },
     {
      "case": "nullable-type-list-is-optional",
@@ -317,21 +332,21 @@
     {
      "case": "openai-function-projects-like-mcp",
      "file": "projection/openai-function-projects-like-mcp.json",
-     "sha256": "b525b6838d420140a0173b7990218e2149534128e82bbcd03ad3b63135de63e3"
+     "sha256": "ecb99d6609639dc0eae387907d755d654fbae0cbd02a475aad7b90ec3ef7defd"
     },
     {
      "case": "unprojected-keywords-do-not-move-the-contract-hash",
      "file": "projection/unprojected-keywords-do-not-move-the-contract-hash.json",
-     "sha256": "958174f56777d16c01b1165f77fa64256eb3c5bcc5e8bef4f8a1dbb0a6ac4b88"
+     "sha256": "854c42c8c01e90425ece91c47ea6fc84a1441e79143b27a7fb67a27eb2ded9ec"
     }
    ]
   }
  },
  "totals": {
-  "decisions": 15,
+  "decisions": 18,
   "canonicalization": 7,
   "invalid-policy": 11,
   "projection": 9,
-  "all": 42
+  "all": 45
  }
 }

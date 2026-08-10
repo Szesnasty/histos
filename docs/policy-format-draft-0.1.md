@@ -63,9 +63,10 @@ first: the prefix is part of every policy file, and the `$id` is part of every
 
 ---
 
-## The six decisions
+## The decisions
 
-All adopted. Kept in full because the reasoning is the durable part.
+All adopted. Kept in full because the reasoning is the durable part. The first six were
+settled together; the seventh (`escalate`) landed after them, under the same rules.
 
 ### 1. `tools` is a mapping keyed by name
 
@@ -163,6 +164,60 @@ Same reasoning makes `confirmation` an object rather than a boolean — approver
 (separation of duties, N-of-M, expiry) will need fields, and widening a boolean later
 breaks every policy in the field.
 
+### 7. `escalate` is a seam, and its default is DENY
+
+```yaml
+tools:
+  wire_transfer:
+    escalate: {required: true}
+```
+
+The format is deterministic and stays that way. `escalate` is the one key that hands a
+call to something that is not — a host-wired semantic tier — and the whole design is in
+what it is *unable* to express.
+
+**It cannot name a tier, a model, an endpoint or a threshold.** Those are deployment,
+and a policy that named them would stop being portable the moment it left the service
+that wrote it. The key says *this call needs meaning-level judgement*; which judge, and
+on what, is the host's.
+
+**It cannot be spelled as an allow.** The tier is consulted after every deterministic
+check has passed, so the only thing it can do is *release* a call the rest of the chain
+already permitted. There is no verdict, and no policy syntax, that lets a probabilistic
+layer permit what a deterministic one refused. A format in which that is unexpressible
+beats one where it is discouraged — the same argument as `source: call` in decision 5.
+
+**And absence is a denial, not a skip.** An engine with no tier wired answers
+`no_escalation_tier` and refuses. This is the load-bearing rule and it belongs to the
+format rather than to an engine: the alternative — treat "no tier" as "nothing to
+check" — would make the same policy mean strictly less on every deployment that had not
+finished wiring one, which is precisely the silent-partial-enforcement failure the
+unknown-key gate exists to prevent. It is pinned by
+[`conformance/decisions/escalate-without-a-tier-denies.json`](../conformance/decisions/escalate-without-a-tier-denies.json),
+so a port cannot pass the corpus without reproducing it.
+
+An object rather than a boolean, for the reason decision 6 gives about `confirmation`:
+which tier and what it is asked are fields this block will grow, and widening a boolean
+afterwards breaks every policy in the field.
+
+**This revises a commitment, so it is spelled out rather than slipped in.**
+[`open-core-boundary.md`](open-core-boundary.md) promised the semantic tier would be
+reached through an *engine-level* seam and "not through a policy key". That promise was
+protecting something real — a format must never carry a key whose purpose is to call a
+paid product — and that part is kept intact: `escalate` names no tier, no vendor, no
+endpoint and no subscription, and a host satisfies it with a local model, a regex, a
+second human, or a flat refusal. What a runtime-only seam could not do was be
+*reviewed*. Which calls need meaning-level judgement is a security decision; leaving it
+in wiring code put it outside the artifact a reviewer reads, outside the diff, and
+outside the hash an approval binds to. A routing rule a policy review cannot see is not
+a smaller commitment than a key — it is the same commitment, unenforced.
+
+**Cost, paid:** a new key in the hashed model moves every `content_hash`. Emitting it
+only when set would have kept them stable, at the price of a conditional rule in the one
+artifact two implementations must reproduce byte for byte — and a hash rule nobody can
+restate in a sentence is how approvals stop matching across services without anyone
+noticing. The regular rule wins; the hashes move once, before 1.0.
+
 ---
 
 ## Deliberately *not* in Draft 0.1
@@ -223,7 +278,7 @@ conformance/
 
 ## Implementation status
 
-All six are implemented in the reference engine, and the behaviour is pinned by the
+All seven are implemented in the reference engine, and the behaviour is pinned by the
 [conformance corpus](../conformance/) rather than by these paragraphs. Notably:
 
 - `content_hash` is computed over the **canonical semantic model**, not the file:

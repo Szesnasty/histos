@@ -6,6 +6,8 @@ Each ``path`` × ``method`` operation becomes a tool:
 * ``parameters`` (path/query/header) + JSON ``requestBody`` properties → args
 * a ``2xx`` JSON response schema → returns
 * ``GET`` → ``access="read"``; ``POST/PUT/PATCH/DELETE`` → ``access="write"``
+* ``sensitivity`` is not expressible in OpenAPI, so it imports as
+  :data:`~histos.importers.sources.UNREVIEWED_SENSITIVITY` until a human writes one
 
 This covers the common REST-tool shape. ``$ref`` resolution is intentionally
 minimal (local ``#/components/schemas`` refs one level deep); anything more exotic
@@ -18,7 +20,7 @@ from typing import Any
 
 from histos.contracts import ToolContract
 from histos.importers.json_schema import field_from_json_schema, schema_from_json_schema
-from histos.importers.sources import ToolSource, contracts_of
+from histos.importers.sources import UNREVIEWED_SENSITIVITY, ToolSource, contracts_of, register_source_kind
 from histos.schema import Schema
 
 _METHODS = ("get", "post", "put", "patch", "delete")
@@ -96,6 +98,11 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
                         returns = schema_from_json_schema(rschema)
                         break
 
+            # The method is the one security semantic OpenAPI genuinely declares, so
+            # `access` is read from the document rather than assumed. Sensitivity is
+            # not declared anywhere in OpenAPI, so it stays unreviewed: a `GET
+            # /patients/{id}` is a read, and nothing in the spec says whether reading
+            # it matters.
             access = "read" if method == "get" else "write"
             description = op.get("description") or op.get("summary")
             sources.append(
@@ -110,7 +117,9 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
                         "requestBody": body_schema,
                         "responses": response_schema,
                     },
-                    contract=ToolContract(name=name, args=args, returns=returns, access=access),
+                    contract=ToolContract(
+                        name=name, args=args, returns=returns, access=access, sensitivity=UNREVIEWED_SENSITIVITY
+                    ),
                 )
             )
 
@@ -119,3 +128,6 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
 
 def contracts_from_openapi(spec: dict[str, Any]) -> list[ToolContract]:
     return contracts_of(sources_from_openapi(spec))
+
+
+register_source_kind("openapi", sources_from_openapi)

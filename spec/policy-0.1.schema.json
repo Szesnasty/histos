@@ -133,6 +133,10 @@
           "description": "Require a trusted out-of-band approval, bound to this exact tool, arguments and principal, before the call proceeds. Approval is a host callback, never a tool - so an injected agent cannot approve itself. With no callback wired the default is DENY.",
           "$ref": "#/$defs/confirmation"
         },
+        "escalate": {
+          "description": "Route this call to the host's semantic tier - the probabilistic, meaning-level layer this format deliberately does not contain - before it may proceed. The tier can only let a call continue past the deterministic checks it already passed; it can never allow one they refused. With no tier wired the call is DENIED (no_escalation_tier), so adding meaning never weakens the gate and not having it never opens one.",
+          "$ref": "#/$defs/escalation"
+        },
         "output": {
           "description": "What is allowed to leave the boundary and re-enter the model, including what comes back when the tool raises.",
           "$ref": "#/$defs/output"
@@ -335,6 +339,20 @@
           "description": "Seconds an approval stays usable once granted.",
           "type": "integer",
           "minimum": 1
+        }
+      }
+    },
+    "escalation": {
+      "description": "The seam to a semantic tier. An object rather than a boolean for the same reason confirmation is one: which tier, and what it is being asked, are the fields this block will grow, and widening a boolean afterwards breaks every policy already in the field.",
+      "type": "object",
+      "required": [
+        "required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "description": "Turn escalation on for this tool. The engine consults the wired tier after every deterministic check has passed and before any human confirmation, and denies the call outright when no tier is wired.",
+          "type": "boolean"
         }
       }
     },

@@ -91,12 +91,22 @@ def _jwt_decodes(token: str) -> bool:
 
 # ── structural patterns ──────────────────────────────────────────────────
 
+# A PEM detection must span the whole armoured block, not the header. Matching the
+# recognisable prefix alone made redaction *worse than absent*: the header vanished,
+# every line of key material egressed, and the audit record asserted
+# `secret:pem_private_key` had been removed. The label is left open (`RSA`, `EC`,
+# `OPENSSH`, `ENCRYPTED`, `PGP … BLOCK`, anything future) because an unrecognised
+# label must still redact, and a missing END marker falls through to end-of-string —
+# a truncated key is still a key.
+_PEM_LABEL = r"(?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?"
+_PEM_BLOCK = rf"-----BEGIN {_PEM_LABEL}-----(?s:.*?)(?:-----END {_PEM_LABEL}-----|\Z)"
+
 _STRUCTURAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("aws_key", re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16}\b")),
     ("github_token", re.compile(r"\bgh[opusr]_[A-Za-z0-9]{36,}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("stripe_key", re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b")),
-    ("pem_private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
+    ("pem_private_key", re.compile(_PEM_BLOCK)),
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
 ]
 
@@ -133,21 +143,31 @@ def scan_string(text: str) -> list[Detection]:
 def redact_string(text: str, *, mark: str = REDACTION_MARK) -> tuple[str, list[str]]:
     """Replace every detected secret span with ``mark`` (both confidence classes).
 
-    Returns ``(redacted_text, kinds_found)``. Overlapping/adjacent spans are
-    handled right-to-left so indices stay valid.
+    Returns ``(redacted_text, kinds_found)``. Overlapping spans are merged into
+    their union and replaced right-to-left so indices stay valid.
+
+    Overlaps are merged rather than skipped because skipping dropped the *enclosing*
+    span: a Slack token whose digit run happens to be Luhn-valid was detected as both
+    `slack_token` and `pan`, the inner `pan` was redacted first, and the guard then
+    discarded the wider span — so the token's prefix and secret tail both egressed and
+    the audit trail named only `pan`. Every detected kind is reported, including one
+    subsumed by a wider span, so `redact_string` and `scan_string` (which the pre-gate
+    denies on) can never disagree about what was found.
     """
     dets = scan_string(text)
     if not dets:
         return text, []
-    # Sort by start desc so replacements don't shift later spans.
-    dets_sorted = sorted(dets, key=lambda d: d.start, reverse=True)
-    out = text
-    kinds: list[str] = []
-    last_start = len(text) + 1
+    # Widest span first at a given start, so a cluster merges into its enclosing span.
+    dets_sorted = sorted(dets, key=lambda d: (d.start, -d.end))
+    clusters: list[tuple[int, int, list[str]]] = []
     for d in dets_sorted:
-        if d.end > last_start:  # overlaps a span we already redacted
-            continue
-        out = out[: d.start] + mark + out[d.end :]
-        kinds.append(d.kind)
-        last_start = d.start
-    return out, list(reversed(kinds))
+        if clusters and d.start < clusters[-1][1]:
+            start, end, kinds_here = clusters[-1]
+            clusters[-1] = (start, max(end, d.end), [*kinds_here, d.kind])
+        else:
+            clusters.append((d.start, d.end, [d.kind]))
+
+    out = text
+    for start, end, _kinds in reversed(clusters):
+        out = out[:start] + mark + out[end:]
+    return out, [kind for _s, _e, kinds_here in clusters for kind in kinds_here]

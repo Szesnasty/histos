@@ -4,7 +4,11 @@
 # package fragments installs and invalidates every `$ref` in spec/, so this was
 # locked before the first PyPI upload, deliberately, and does not move again.
 name = "histos"
-version = "0.1.0"
+# Read from `histos._version`, not repeated here. The version is stamped into every
+# audit record as `gate_version`, so a drift between the distribution and the module
+# would make the audit trail claim a decision came from a build that never produced
+# it — and it would drift silently, in the one artifact that exists to be trusted.
+dynamic = ["version"]
 description = "The tool call as a security boundary, in both directions - in-process, no proxy, no models, no infra."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -62,6 +66,9 @@ dev = [
 requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.dynamic]
+version = { attr = "histos._version.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["histos*"]
@@ -88,3 +95,18 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/histos"]
+# Deliberately off. The adapters carry `type: ignore` comments that are load-bearing
+# only when LangChain IS installed — in an environment without it the same lines type
+# fine, so this flag would demand removing an ignore that the other environment needs.
+warn_unused_ignores = false
+
+# Third-party and private-stdlib modules that ship no annotations. Listed one by one
+# rather than with a blanket `ignore_missing_imports`, so a NEW untyped import has to
+# be added here deliberately instead of disappearing into a global switch.
+[[tool.mypy.overrides]]
+module = ["yaml", "langchain_core.*", "langgraph.*", "re._constants", "re._parser"]
+ignore_missing_imports = true
