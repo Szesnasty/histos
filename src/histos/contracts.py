@@ -21,17 +21,25 @@ another tool may generate one, but the gate loads it with nothing else present.
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
-from histos.canonical import normalize_numbers
+from histos.canonical import canonical_json, normalize_numbers
 from histos.errors import PolicyError
 from histos.schema import Schema
 
 _UNSET: Any = object()
+
+# The value types a Policy Format 0.1 document can actually carry, plus the Python
+# spellings of them that canonicalize deterministically (a tuple is a list; a set is
+# how anyone writes an `in` membership test in code). Anything else — a Decimal, a
+# datetime, an arbitrary object — used to reach `content_hash` and be flattened by
+# `default=str`, which both collided distinct policies and, for a set, captured
+# PYTHONHASHSEED-dependent iteration order in a hash that approvals bind to.
+_JSON_SCALARS = (str, int, float, bool, type(None))
 
 SCHEMA_VERSION = "histos.policy/0.1"
 
@@ -73,6 +81,23 @@ class Principal:
     attributes: dict[str, Any] = field(default_factory=dict)
     can_view: frozenset[str] = frozenset()
 
+    def __post_init__(self) -> None:
+        # `frozen=True` froze the *binding* and nothing else: the dict it points at
+        # stayed writable, so the trust anchor of the whole library could be edited
+        # after the gate had been built from it. Take a snapshot behind a read-only
+        # view, so a Principal handed to a gate cannot change under it and a caller
+        # who kept the dict they passed in cannot change it either.
+        object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
+
+    def __hash__(self) -> int:
+        # The generated hash covered `attributes`, which is a mapping and unhashable,
+        # so a "frozen" Principal could not go in a set or key a cache — the obvious
+        # thing to want from the type the host binds per request. Attribute *values*
+        # are host-supplied and may themselves be unhashable (a list of regions), so
+        # only the key set takes part; `__eq__` still separates principals that differ
+        # only in a value, which is all a hash has to allow.
+        return hash((self.role, self.identity, self.can_view, tuple(sorted(self.attributes))))
+
 
 # ── resource-aware authorization ──────────────────────────────
 
@@ -88,14 +113,49 @@ _OPS: dict[str, Callable[[Any, Any], bool]] = {
 }
 
 
+def _reject_unhashable_value(value: Any, where: str) -> None:
+    """Refuse a constraint literal the engine cannot hash reproducibly.
+
+    A policy whose ``content_hash`` is not reproducible is worse than one that fails
+    to load: pinning, approval binding and drift detection all keep reporting green
+    while comparing two different rulesets. So the refusal happens here, at the point
+    the policy is built, rather than silently at hash time.
+    """
+    if isinstance(value, _JSON_SCALARS):
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _reject_unhashable_value(item, where)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _reject_unhashable_value(key, where)
+            _reject_unhashable_value(item, where)
+        return
+    raise PolicyError(
+        f"{where}: value of type {type(value).__name__!r} cannot be hashed reproducibly; "
+        "a constraint literal must be a JSON value (string, number, boolean, null, array, object)"
+    )
+
+
 @dataclass(frozen=True)
 class ConstraintResult:
+    """The outcome of one constraint.
+
+    Two channels, deliberately: ``reason`` / ``expected`` / ``received`` name the rule
+    and the shape of the failure and are safe to put in a durable audit record, while
+    ``detail`` quotes the actual resource attribute and is developer-only. The
+    resolved resource is real business data — the owner's account number, a patient
+    id — and a denial message is not a place to write it down forever.
+    """
+
     ok: bool
     field: str = ""
     op: str = ""
     expected: str = ""
     received: str = ""
     reason: str = ""
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -148,6 +208,8 @@ class Constraint:
         has_attr = self.principal_attr is not None
         if has_value == has_attr:
             raise PolicyError("constraint needs exactly one of value= or principal_attr=")
+        if has_value:
+            _reject_unhashable_value(self.value, f"constraint {self.field!r} {self.op}")
 
     @classmethod
     def owns(cls, field: str, principal_attr: str | None = None) -> Constraint:
@@ -183,16 +245,25 @@ class Constraint:
                     f"principal attribute {self.principal_attr!r} is not set",
                 )
             rhs: Any = principal.attributes[self.principal_attr]
+            # Name the source, never the value: a trusted attribute is still the
+            # tenant's identifier, and `expected` is copied into the audit record.
+            expected = f"principal.{self.principal_attr}"
         else:
             rhs = self.value
+            expected = repr(rhs)  # a policy literal — written by the developer, not observed
+
+        # `received` names the *shape* of what was compared. The value itself is the
+        # resolved resource's real attribute, so it goes to the developer channel only.
+        received = f"resource.{self.field}"
+        detail = f"resource.{self.field}={lhs!r} vs {rhs!r}"
 
         try:
             ok = _OPS[self.op](lhs, rhs)
         except TypeError as exc:
-            return ConstraintResult(False, self.field, self.op, repr(rhs), repr(lhs), f"type error: {exc}")
+            return ConstraintResult(False, self.field, self.op, expected, received, f"type error: {exc}", detail)
 
-        reason = "" if ok else f"constraint {self.field} {self.op} {rhs!r} not satisfied"
-        return ConstraintResult(ok, self.field, self.op, repr(rhs), repr(lhs), reason)
+        reason = "" if ok else f"constraint {self.field} {self.op} {expected} not satisfied"
+        return ConstraintResult(ok, self.field, self.op, expected, received, reason, detail)
 
     def fingerprint(self) -> dict[str, Any]:
         return {
@@ -235,6 +306,11 @@ class ToolContract:
     # enforced by the engine (the ApprovalStore is in-process and single-use anyway);
     # the field exists because the *format* carries it to whoever routes approvals.
     confirmation_expires_in: int | None = None
+    # Route this call through the host's semantic tier before it may proceed. The tier
+    # is the *only* thing that can let it continue: with none wired the call is denied
+    # (`no_escalation_tier`), which is what makes adding meaning unable to widen the
+    # gate and lacking it unable to open one. See `Engine._escalate`.
+    requires_escalation: bool = False
     constraints: tuple[Constraint, ...] = ()  # resource-level authorization
     bindings: tuple[Binding, ...] = ()  # trusted-arg injection (Phase 0.1)
     scan_output_for_canary: bool = True
@@ -272,39 +348,58 @@ class ToolContract:
         """
         return {"args": _schema_fingerprint(self.args), "returns": _schema_fingerprint(self.returns)}
 
+    def shape_structure(self) -> dict[str, Any]:
+        """The same half, with its types intact — what the lock's hashes are taken over.
 
-def _schema_fingerprint(schema: Schema | None) -> Any:
-    """The hashable view of a schema, with every bound rendered as decimal text.
+        :meth:`shape_fingerprint` is the *projection*: a published, flattened view that
+        `conformance/projection` pins and that does not move. Hashing that view is what
+        made the lock blind to the change it exists to catch: a source shipping
+        ``enum: ["1", "2"]`` where the honest one shipped ``enum: [1, 2]`` flattened to
+        the same bytes, so all three lock hashes matched, ``histos drift`` exited 0, and
+        enforcement had silently inverted — the exact MCP rug-pull the lock is for.
+        """
+        return {"args": _schema_structure(self.args), "returns": _schema_structure(self.returns)}
 
-    Normalising *here* rather than at each call site is what keeps `content_hash` and
-    the lock's `contract_sha256` on one rule: both read this, so neither can drift
-    into hashing `500` differently from `500.0`. See :func:`histos.canonical.canonical_number`.
-    """
+
+def _schema_structure(schema: Schema | None) -> Any:
+    """Every declared keyword of a schema, typed exactly as it was written."""
     if schema is None:
         return None
-    return normalize_numbers(
-        {
-            "allow_extra": schema.allow_extra,
-            "fields": {
-                name: {
-                    "type": f.type,
-                    "required": f.required,
-                    "enum": list(f.enum) if f.enum is not None else None,
-                    "max_length": f.max_length,
-                    "min_length": f.min_length,
-                    "pattern": f.pattern,
-                    "sensitive": f.sensitive,
-                    "item_type": f.item_type,
-                    "minimum": f.minimum,
-                    "maximum": f.maximum,
-                    "exclusive_minimum": f.exclusive_minimum,
-                    "exclusive_maximum": f.exclusive_maximum,
-                    "multiple_of": f.multiple_of,
-                }
-                for name, f in schema.fields.items()
-            },
-        }
-    )
+    return {
+        "allow_extra": schema.allow_extra,
+        "fields": {
+            name: {
+                "type": f.type,
+                "required": f.required,
+                "enum": list(f.enum) if f.enum is not None else None,
+                "max_length": f.max_length,
+                "min_length": f.min_length,
+                "pattern": f.pattern,
+                "sensitive": f.sensitive,
+                "item_type": f.item_type,
+                "minimum": f.minimum,
+                "maximum": f.maximum,
+                "exclusive_minimum": f.exclusive_minimum,
+                "exclusive_maximum": f.exclusive_maximum,
+                "multiple_of": f.multiple_of,
+            }
+            for name, f in schema.fields.items()
+        },
+    }
+
+
+def _schema_fingerprint(schema: Schema | None) -> Any:
+    """The **lock's** view of a schema, with every bound flattened to decimal text.
+
+    This exact structure is pinned by ``conformance/projection`` and is what
+    ``contract_sha256`` is defined over, so it is a published artifact and does not
+    move. It shares one rule with ``content_hash`` — every number is rendered through
+    :func:`histos.canonical.canonical_number`, so `500` and `500.0` are one policy —
+    but not one *encoding*: flattening a number to a bare string is lossy, and
+    `Policy.content_hash` needs a form in which the integer `1` and the string `"1"`
+    stay distinguishable (see :meth:`Policy.fingerprint`).
+    """
+    return normalize_numbers(_schema_structure(schema))
 
 
 @dataclass(frozen=True)
@@ -346,14 +441,20 @@ class Policy:
             "schema_version": self.schema_version,
             "tools": {
                 name: {
-                    "args": _schema_fingerprint(t.args),
-                    "returns": _schema_fingerprint(t.returns),
+                    "args": _schema_structure(t.args),
+                    "returns": _schema_structure(t.returns),
                     "access": t.access,
                     "sensitivity": t.sensitivity.value,
                     "rate_limit": t.rate_limit,
                     "budget": t.budget,
                     "requires_confirmation": t.requires_confirmation,
                     "confirmation_expires_in": t.confirmation_expires_in,
+                    # Present unconditionally, like every other key here. Emitting it
+                    # only when set would keep pre-escalation hashes stable at the cost
+                    # of a conditional rule in the one artifact two implementations
+                    # must reproduce byte for byte — and a hash rule nobody can restate
+                    # in one sentence is how approvals silently stop matching.
+                    "requires_escalation": t.requires_escalation,
                     "constraints": [c.fingerprint() for c in t.constraints],
                     "bindings": [[b.field, b.principal_attr] for b in t.bindings],
                     "scan_output_for_canary": t.scan_output_for_canary,
@@ -369,17 +470,25 @@ class Policy:
             "role_inherits": dict(sorted(self.role_inherits.items())),
             "canaries": sorted(self.canaries),
         }
-        # Every number in the fingerprint becomes decimal text before it is hashed.
-        # Without this, `maximum: 500` and `maximum: 500.0` are two different policies
-        # to this engine and one policy to any JavaScript one — and `content_hash` is
-        # what policy pinning and approval binding rest on, so the divergence would be
-        # silent and would land on approvals that quietly stop matching. See
-        # `canonical_number`. Only the *hash input* is text; the engine still compares
-        # against the real numbers.
-        return normalize_numbers(structure)
+        # Returned with its types intact. Flattening numbers to bare text here is what
+        # made `value: 1` and `value: "1"` the same policy to `content_hash` while the
+        # engine still gave them opposite verdicts — a collision by construction, in
+        # the one value approvals and policy pinning are bound to. The number rule
+        # (`500` and `500.0` are one policy, because no JavaScript parser can tell them
+        # apart) still applies, but it is applied by the canonicalizer, which tags the
+        # type first. See `canonical_json(numbers_as_text=True)`.
+        return structure
 
     def content_hash(self) -> str:
-        body = json.dumps(self.fingerprint(), sort_keys=True, ensure_ascii=False, default=str)
+        """A structural identity two implementations can agree on, byte for byte.
+
+        Not `json.dumps(..., default=str)`: that had no type tags, so distinct policies
+        collided, and it inherited Python's iteration order for sets, so the same
+        `Policy` object hashed differently in two processes with different
+        `PYTHONHASHSEED` — which silently unbinds every approval issued by one worker
+        from every other worker.
+        """
+        body = canonical_json(self.fingerprint(), numbers_as_text=True)
         return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
     def validate(self) -> list[str]:
@@ -443,6 +552,11 @@ _REMEDY: dict[str, str] = {
     "budget": "raise the tool's budget for this principal",
     "requires_confirmation": "obtain an out-of-band approval for this exact action",
     "confirm_error": "the confirm callback raised, or is async while the tool is sync",
+    "no_escalation_tier": "this tool is marked `escalate` and no semantic tier is wired — "
+    "pass Gate(escalate=...), or drop `escalate` from the policy; the gate will not "
+    "let an unjudged call through",
+    "escalation_denied": "the semantic tier refused this call",
+    "escalation_error": "the escalate callback raised, or is async while the tool is sync",
     "output_schema": "the tool output did not match its declared return schema",
 }
 
@@ -462,7 +576,15 @@ class GateDecision:
     field: str = ""
     expected: str = ""
     received: str = ""
-    escalate: bool = False  # seam to a semantic tier; with none wired this collapses to DENY
+    # A MARKER, never a control input: true on every decision that came out of the
+    # semantic seam — the tier's approval, its refusal, its failure, and the collapse
+    # when no tier is wired. It records that meaning was consulted (or should have
+    # been) so an audit trail can separate those calls; the verdict itself is entirely
+    # in `effect`/`rule`. It is deliberately not an `Effect` member: adding one to a
+    # public StrEnum turns every `if effect is DENY` in every host into a silently
+    # non-exhaustive match, and the branch such code falls through to is "proceed".
+    # A flag nobody reads cannot fail open; an effect nobody handles can.
+    escalate: bool = False
     redactions: tuple[str, ...] = ()  # fields/tokens removed by a REDACT decision
 
     @property
@@ -476,14 +598,18 @@ class GateDecision:
         Never leaks the threshold / allowlist / field a denial reveals — that stays in
         the developer/audit channel (rule/field/expected/received). Adapters return
         THIS to the agent by default.
+
+        Only ALLOW says OK, and the fallthrough is the refusal rather than the other
+        way round. An effect this table has not been taught is a bug, and the message
+        it hands the model on the way out must not be the one that reads as consent.
         """
         if self.effect is Effect.REQUIRE_CONFIRMATION:
             return "CONFIRMATION_REQUIRED"
-        if self.effect is Effect.DENY:
-            return "ACTION_NOT_AUTHORIZED"
         if self.effect is Effect.REDACT:
             return "OUTPUT_REDACTED"
-        return "OK"
+        if self.effect is Effect.ALLOW:
+            return "OK"
+        return "ACTION_NOT_AUTHORIZED"
 
     @property
     def remedy(self) -> str:

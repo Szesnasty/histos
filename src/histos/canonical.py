@@ -18,43 +18,72 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
+# A lone (unpaired) surrogate survives `json.loads` — `{"q": "\ud800"}` is how every
+# framework parses an LLM tool call — but has no UTF-8 encoding, so it detonates at
+# `.encode()` rather than here. Catching it in the serializer is what lets the two
+# callers fail the way each of them should: the approval fingerprint refuses to
+# fingerprint an action it cannot represent (fail-closed), and the audit digest
+# falls back to a stable form instead of taking the whole record down with it.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
-def _canon(obj: Any) -> Any:
+
+def _canon(obj: Any, numbers_as_text: bool) -> Any:
     # bool BEFORE int (bool is a subclass of int) so True never tags as ["i", 1].
     if isinstance(obj, bool):
         return ["b", obj]
     if obj is None:
         return ["n", None]
-    if isinstance(obj, int):
-        return ["i", obj]
-    if isinstance(obj, float):
-        if not math.isfinite(obj):
+    if isinstance(obj, (int, float)):
+        if isinstance(obj, float) and not math.isfinite(obj):
             raise ValueError(f"non-finite float is not canonicalizable: {obj!r}")
+        if numbers_as_text:
+            # One tag for both, because the *source document* could not tell them
+            # apart: `JSON.parse` collapses 1 and 1.0 to one number. Keeping the tag
+            # distinct from ["s", …] is the whole point — it is what stops the
+            # integer 1 and the string "1" from sharing a policy hash while reaching
+            # opposite verdicts. See `canonical_number`.
+            return ["f", canonical_number(obj)]
+        if isinstance(obj, int):
+            return ["i", obj]
         # repr gives a stable, round-trippable text form; normalize -0.0 to 0.0.
         return ["f", repr(obj + 0.0)]
     if isinstance(obj, str):
+        if _LONE_SURROGATE.search(obj):
+            raise ValueError("string contains an unpaired surrogate and has no UTF-8 encoding")
         return ["s", obj]
     if isinstance(obj, bytes):
         return ["y", obj.hex()]
     if isinstance(obj, (list, tuple)):
-        return ["l", [_canon(x) for x in obj]]
+        return ["l", [_canon(x, numbers_as_text) for x in obj]]
     if isinstance(obj, (set, frozenset)):
-        items = sorted((_canon(x) for x in obj), key=lambda c: json.dumps(c, sort_keys=True, ensure_ascii=False))
+        items = sorted(
+            (_canon(x, numbers_as_text) for x in obj),
+            key=lambda c: json.dumps(c, sort_keys=True, ensure_ascii=False),
+        )
         return ["t", items]
     if isinstance(obj, dict):
         pairs = sorted(
-            ([_canon(k), _canon(v)] for k, v in obj.items()),
+            ([_canon(k, numbers_as_text), _canon(v, numbers_as_text)] for k, v in obj.items()),
             key=lambda p: json.dumps(p[0], sort_keys=True, ensure_ascii=False),
         )
         return ["d", pairs]
     raise ValueError(f"value of type {type(obj).__name__!r} is not canonicalizable")
 
 
-def canonical_json(obj: Any) -> str:
-    """Deterministic, type-tagged JSON string. Raises ValueError on un-representable input."""
-    return json.dumps(_canon(obj), separators=(",", ":"), ensure_ascii=False)
+def canonical_json(obj: Any, *, numbers_as_text: bool = False) -> str:
+    """Deterministic, type-tagged JSON string. Raises ValueError on un-representable input.
+
+    ``numbers_as_text=True`` is the *published-hash* mode: every number is rendered
+    through :func:`canonical_number` and tagged ``["f", …]`` whether it arrived as an
+    int or a float, so a hash a second implementation must reproduce does not depend
+    on a distinction that implementation's JSON parser cannot see. Types are still
+    tagged, so this is strictly weaker than the default mode in exactly one place and
+    nowhere else.
+    """
+    return json.dumps(_canon(obj, numbers_as_text), separators=(",", ":"), ensure_ascii=False)
 
 
 def canonical_fingerprint(obj: Any) -> str:
@@ -86,6 +115,16 @@ def canonical_number(value: int | float) -> str:
     bounds are amounts, lengths and counts, so this is a corner — but it is a corner,
     and it is written down rather than discovered.
     """
+    # Integers never go through float. They used to, and that lost the two properties
+    # this function exists to provide: `2**53` and `2**53+1` rendered identically, so
+    # two genuinely different policies shared one `content_hash` and a pinned hash
+    # accepted the wrong ruleset; and an int beyond ~1.8e308 raised OverflowError, so
+    # a bound the engine can enforce exactly made hashing the policy — and therefore
+    # constructing a Gate — crash. `str(int)` is also what JavaScript's `String`
+    # produces for every integer it can hold, so the cross-language agreement above
+    # is preserved rather than traded away.
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
     number = float(value)
     return str(int(number)) if number.is_integer() else repr(number)
 

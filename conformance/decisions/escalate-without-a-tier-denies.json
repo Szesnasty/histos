@@ -1,0 +1,39 @@
+{
+  "description": "THE COLLAPSE. A tool the policy marks `escalate`, evaluated by an engine with no semantic tier wired: the call is refused, not waved through. An engine that answers `allow` here has turned the same policy into a weaker one, which is exactly what the seam exists to prevent.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "wire": {
+        "access": "write",
+        "args": {
+          "to": {
+            "type": "string"
+          }
+        },
+        "escalate": {
+          "required": true
+        }
+      }
+    },
+    "roles": {
+      "clerk": {
+        "allow": [
+          "wire"
+        ]
+      }
+    }
+  },
+  "principal": {
+    "role": "clerk"
+  },
+  "call": {
+    "tool": "wire",
+    "args": {
+      "to": "acct-1"
+    }
+  },
+  "expect": {
+    "effect": "deny",
+    "rule": "no_escalation_tier"
+  }
+}

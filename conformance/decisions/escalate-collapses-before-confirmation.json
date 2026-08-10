@@ -1,0 +1,42 @@
+{
+  "description": "Ordering, pinned. A tool declaring both `escalate` and `confirmation` with no tier wired must answer the collapse, not `require_confirmation` — otherwise an engine missing the semantic tier would hand the call to a human as though every machine check had passed, and a granted approval would then execute a call nothing judged.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "wire": {
+        "access": "write",
+        "args": {
+          "to": {
+            "type": "string"
+          }
+        },
+        "escalate": {
+          "required": true
+        },
+        "confirmation": {
+          "required": true
+        }
+      }
+    },
+    "roles": {
+      "clerk": {
+        "allow": [
+          "wire"
+        ]
+      }
+    }
+  },
+  "principal": {
+    "role": "clerk"
+  },
+  "call": {
+    "tool": "wire",
+    "args": {
+      "to": "acct-1"
+    }
+  },
+  "expect": {
+    "effect": "deny",
+    "rule": "no_escalation_tier"
+  }
+}
