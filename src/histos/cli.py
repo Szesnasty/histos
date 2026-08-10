@@ -8,8 +8,8 @@ Subcommands (stdlib argparse, zero deps):
     histos explain   security.policy.yaml <tool> --role support --args '{"amount": 999}'
     histos import    tools.json --kind mcp [--out security.policy.yaml]
     histos import    tools.json --kind mcp --update security.policy.yaml
-    histos drift     security.policy.yaml --source tools.json --kind mcp   # → exit 0/1 (CI)
-    histos audit verify audit.jsonl [--key <hex>]  # hash-chain integrity → exit 0/1
+    histos drift     security.policy.yaml --source tools.json --kind mcp [--allow-unverifiable]  # → exit 0/1 (CI)
+    histos audit verify audit.jsonl [--key-file f]  # hash-chain integrity → exit 0/1
 """
 
 from __future__ import annotations
@@ -17,40 +17,28 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 from histos.audit import verify_chain
-from histos.bundle import dump_bundle, load_bundle_json, load_bundle_yaml
+from histos.bundle import dump_bundle, load_policy
 from histos.contracts import GateRequest, Policy, Principal
 from histos.errors import PolicyError
 from histos.gate import Gate
-from histos.importers import ToolSource, sources_from_mcp, sources_from_openai, sources_from_openapi
+from histos.importers import KINDS, ToolSource, reader_for
 from histos.lockfile import build_lock, compare, contract_hash, load_lock, lock_path_for, unverifiable_tools
 from histos.review import review_policy
-
-_SOURCE_READERS = {
-    "mcp": sources_from_mcp,
-    "openai": sources_from_openai,
-    "openapi": sources_from_openapi,
-}
 
 
 def _read_sources(path: str, kind: str) -> list[ToolSource]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return _SOURCE_READERS[kind](data)
-
-
-def _load_policy(path: str) -> Policy:
-    text = Path(path).read_text(encoding="utf-8")
-    if path.endswith((".yaml", ".yml")):
-        return load_bundle_yaml(text)
-    return load_bundle_json(text)
+    return reader_for(kind)(data)
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    issues = _load_policy(args.policy).validate()
+    issues = load_policy(args.policy).validate()
     if not issues:
         print("OK — policy is structurally valid")
         return 0
@@ -61,13 +49,17 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
-    review = review_policy(_load_policy(args.policy))
+    review = review_policy(load_policy(args.policy))
     print(review.render())
-    return 1 if review.blocked else 0
+    # An unreviewed import fails the gate as hard as a tool that cannot be gated at
+    # all. `histos review` is the step between `import` and `protect`, and a policy
+    # whose tools still carry the importer's assumption has not been through it — so
+    # this is the check that stops such a policy reaching `enforce` in CI.
+    return 1 if review.blocked or review.unreviewed else 0
 
 
 def _cmd_coverage(args: argparse.Namespace) -> int:
-    policy = _load_policy(args.policy)
+    policy = load_policy(args.policy)
     exposed = {t.strip() for t in args.tools.split(",") if t.strip()}
     declared = set(policy.tools)
     undeclared = sorted(exposed - declared)
@@ -81,7 +73,7 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
 
 
 def _cmd_explain(args: argparse.Namespace) -> int:
-    policy = _load_policy(args.policy)
+    policy = load_policy(args.policy)
     attrs: dict[str, Any] = {}
     for kv in args.attr or []:
         k, _, v = kv.partition("=")
@@ -127,6 +119,13 @@ def _cmd_import(args: argparse.Namespace) -> int:
     Path(args.out).write_text(out + "\n", encoding="utf-8")
     lock = _write_lock(sources, policy_path=args.out, locator=locator)
     print(f"wrote {len(sources)} tool contract(s) → {args.out} (REVIEW: add roles/authz before enforcing)")
+    # Say what the skeleton claims about the tools, in the same breath as writing it.
+    # The values are the import's worst-case assumption, not a reading of the source,
+    # and a committed file that does not say so reads as somebody's decision.
+    print(
+        "  access/sensitivity are the import's unreviewed assumption, not the source's — "
+        "`histos review` exits 1 until they are decided"
+    )
     print(f"wrote provenance for {len(sources)} tool(s) → {lock} (commit it; `histos drift` reads it)")
     return 0
 
@@ -138,7 +137,7 @@ def _update_policy(policy_path: str, sources: list[ToolSource], *, locator: str,
     security semantics a human wrote; no schema can supply them, so regenerating them
     would destroy the valuable half of the policy.
     """
-    policy = _load_policy(policy_path)
+    policy = load_policy(policy_path)
     by_name = {s.contract.name: s for s in sources}
 
     updated: list[str] = []
@@ -181,7 +180,7 @@ def _report_lock_written(path: Path) -> None:
 
 
 def _cmd_drift(args: argparse.Namespace) -> int:
-    policy = _load_policy(args.policy)
+    policy = load_policy(args.policy)
     lock = load_lock(args.lock or lock_path_for(args.policy))
     sources = _read_sources(args.source, args.kind)
     report = compare(lock, sources, locator=args.locator or args.source)
@@ -195,6 +194,16 @@ def _cmd_drift(args: argparse.Namespace) -> int:
             moved = ", ".join(h.removesuffix("_sha256") for h in drift.changed)
             reach = "  ← reaches enforcement" if drift.reaches_enforcement else ""
             print(f"DRIFT  {drift.name}  changed: {moved}{reach}")
+            # The difference itself, straight from the committed lock — no second
+            # build of the source needed, which is the whole point of recording it.
+            for line in drift.diff:
+                print(f"         {line}")
+            for part in drift.unexplained:
+                print(
+                    f"         {part}: this lock (version {lock.version}) recorded a hash and not the "
+                    f"{part} itself, so there is nothing here to diff against. Re-run `histos import` "
+                    "to record one."
+                )
 
     unverifiable = unverifiable_tools(sorted(policy.tools), lock)
     if unverifiable:
@@ -204,15 +213,50 @@ def _cmd_drift(args: argparse.Namespace) -> int:
         print(f"unverifiable from here ({len(unverifiable)}): {', '.join(unverifiable)}")
 
     if report.clean:
-        print(f"OK — {len(lock.tools)} tool(s) match the lock")
+        # State the fraction, not just the count: CI reads the exit code, but a human
+        # reads this line, and "OK — 0 tool(s) match the lock" against a policy of ten
+        # is not the reassurance it looks like.
+        verified = len(policy.tools) - len(unverifiable)
+        print(f"OK — {verified} of {len(policy.tools)} policy tool(s) match the lock", flush=True)
+        # Fail-closed on what could not be checked. This used to be opt-in, which made
+        # the default a CI gate that passed having verified nothing — the one arrangement
+        # worse than no gate, because it is reported as a pass.
+        if unverifiable and not args.allow_unverifiable:
+            print(
+                f"FAIL — {len(unverifiable)} policy tool(s) were not checked at all: "
+                f"{', '.join(unverifiable)}. Import them so the lock covers them, or pass "
+                "--allow-unverifiable to accept the gap deliberately.",
+                file=sys.stderr,
+            )
+            return 1
         return 0
     print(f"{len(report.drifts)} tool(s) drifted, {report.reaching_enforcement} reaching enforcement")
     return 1
 
 
+def _read_chain_key(args: argparse.Namespace) -> bytes | None:
+    """Resolve the chain key, preferring the spellings that do not leak it.
+
+    ``--key <hex>`` puts the secret in ``argv``, where it is readable by any process
+    on the box via ``ps`` and lands in shell history. It stays, because breaking a
+    documented flag is its own harm, but it warns and is documented last. The key file
+    is read whole and stripped, so a trailing newline from ``echo >`` is not part of
+    the secret.
+    """
+    if getattr(args, "key_file", None):
+        return bytes.fromhex(Path(args.key_file).read_text(encoding="utf-8").strip())
+    env = os.environ.get("HISTOS_AUDIT_KEY")
+    if env:
+        return bytes.fromhex(env.strip())
+    if args.key:
+        print("warning: --key exposes the secret in `ps` and shell history; prefer --key-file or "
+              "HISTOS_AUDIT_KEY", file=sys.stderr)
+        return bytes.fromhex(args.key)
+    return None
+
+
 def _cmd_audit_verify(args: argparse.Namespace) -> int:
-    key = bytes.fromhex(args.key) if args.key else None
-    ok, detail = verify_chain(args.log, key=key)
+    ok, detail = verify_chain(args.log, key=_read_chain_key(args))
     print(detail)
     return 0 if ok else 1
 
@@ -245,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     i = sub.add_parser("import", help="import tool shapes → policy bundle skeleton")
     i.add_argument("source")
-    i.add_argument("--kind", choices=sorted(_SOURCE_READERS), default="mcp")
+    i.add_argument("--kind", choices=sorted(KINDS), default="mcp")
     i.add_argument("--out", default=None)
     i.add_argument("--update", default=None, metavar="POLICY", help="refresh args/returns in an existing policy")
     i.add_argument("--force", action="store_true", help="with --update, rewrite even if comments would be lost")
@@ -255,16 +299,30 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("drift", help="tool definitions vs the lock (fails CI)")
     d.add_argument("policy")
     d.add_argument("--source", required=True)
-    d.add_argument("--kind", choices=sorted(_SOURCE_READERS), default="mcp")
+    d.add_argument("--kind", choices=sorted(KINDS), default="mcp")
     d.add_argument("--lock", default=None, help="defaults to <policy>.lock.json beside the policy")
     d.add_argument("--locator", default=None)
+    d.add_argument(
+        "--allow-unverifiable",
+        action="store_true",
+        help="exit 0 even when a policy tool has no lock entry (the gap is accepted deliberately)",
+    )
+    # Kept, and now a no-op, because it names the default. Removing a flag that a
+    # pipeline already passes would fail that pipeline on upgrade for asking for the
+    # behaviour it is about to get anyway.
+    d.add_argument("--fail-on-unverifiable", action="store_true", help=argparse.SUPPRESS)
     d.set_defaults(func=_cmd_drift)
 
     a = sub.add_parser("audit", help="audit-trail tools")
     asub = a.add_subparsers(dest="audit_cmd", required=True)
     av = asub.add_parser("verify", help="check hash-chain integrity")
     av.add_argument("log")
-    av.add_argument("--key", default=None, help="hex HMAC key (for keyed chains)")
+    av.add_argument("--key-file", default=None, help="file holding the hex HMAC key (preferred)")
+    av.add_argument(
+        "--key",
+        default=None,
+        help="hex HMAC key — visible in `ps` and shell history; prefer --key-file or HISTOS_AUDIT_KEY",
+    )
     av.set_defaults(func=_cmd_audit_verify)
 
     return p
