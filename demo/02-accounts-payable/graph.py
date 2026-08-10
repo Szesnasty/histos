@@ -51,6 +51,13 @@ from langgraph.types import Command
 
 MODEL = os.environ.get("AP_MODEL", "qwen2.5:7b")
 
+# Sampling temperature. 0 by default, so a demo run is reproducible and two wirings
+# are compared under identical conditions. The override exists because "the model
+# refused this attack" at temperature 0 is one sample, not a property — the
+# interesting question is how often it refuses across the distribution it will
+# actually be served at.
+TEMPERATURE = float(os.environ.get("AP_TEMP", "0"))
+
 # The model gets this many turns before the loop gives up and parks the invoice. A
 # local 7B occasionally re-reads the same row forever; that is data, not a crash.
 MAX_TURNS = 8
@@ -114,7 +121,7 @@ Decide what to do with invoice {invoice["id"]} and do it."""
 
 def build_graph(tools: list[BaseTool]):
     """The loop above, over `tools`, compiled with a checkpointer so it can suspend."""
-    llm = ChatOllama(model=MODEL, temperature=0).bind_tools(tools)
+    llm = ChatOllama(model=MODEL, temperature=TEMPERATURE).bind_tools(tools)
     by_name = {tool.name: tool for tool in tools}
 
     def decide(state: APState) -> dict[str, Any]:
