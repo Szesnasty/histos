@@ -8,10 +8,60 @@ between minor versions — every such change is listed here.
 
 ## [Unreleased]
 
+### Fixed — security
+
+- **The gate no longer publishes a route to the ungated tool.** `functools.wraps`
+  sets `__wrapped__` to the callable being wrapped, so `gate()`, `Gate.wrap()` and
+  `protect()` each handed out a public pointer at the *unprotected* function —
+  followed automatically by `inspect.unwrap`, `inspect.signature(follow_wrapped=True)`
+  and every decorator-aware framework, and by this library's own `_unwrap_target`.
+  A `viewer` refused by RBAC could call `wrapped.__wrapped__(...)` and the tool body
+  ran, with no decision and no audit record. This was fixed once in the LangChain
+  adapter and documented as closed; the core paths — the ones the README quickstart
+  shows — still had it. Metadata is now adopted attribute by attribute
+  (`_adopt_metadata`), which also stops `WRAPPER_UPDATES` from republishing a callable
+  object's `self.func`. `__closure__` traversal remains out of scope and is now stated
+  as such: a wrapper must hold what it wraps, and reaching it means in-process code
+  the trust model already excludes.
+- **`content_hash` is injective again.** `Policy.fingerprint` flattened every number
+  to bare text, so `value: 1` and `value: "1"` — two policies that reach *opposite*
+  verdicts — produced one hash. It is now taken over the type-tagged canonical form.
+- **`content_hash` is deterministic across processes.** Set-valued fields were
+  serialised in Python's iteration order, so the same `Policy` hashed differently
+  under different `PYTHONHASHSEED` values, silently unbinding approvals issued by one
+  worker from every other worker.
+- **The tool lock sees a retyped enum.** `schema_sha256` and `contract_sha256` were
+  taken over the flattened projection, so a server reshipping `enum: [1, 2]` as
+  `enum: ["1", "2"]` — which inverts which calls the tool accepts — matched byte for
+  byte and `histos drift` exited 0. That is the MCP rug-pull the lock exists for.
+  Hashes are now taken over `ToolContract.shape_structure()`; the published
+  `shape_fingerprint` projection is unchanged.
+- **An inferred argument schema is no longer mistaken for a policy.**
+  `protect(infer_missing=True)` — the default — installed a schema inferred from the
+  signature even when that schema could reject nothing (`**kwargs`, unannotated
+  parameters), which turned the documented `unknown_tool` / `no_arg_schema` denial
+  into ALLOW while the coverage report still said `needs-policy` about a tool that had
+  just run. It is now installed only when it actually constrains.
+- **A streaming tool is refused at wrap time.** A generator or async generator returns
+  its iterator immediately, so the post-gate inspected the iterator object and reported
+  `allow` while every value the tool yielded flowed past uninspected.
+- **`gate.policy = …` takes effect.** `Engine` kept its own reference, so reassigning
+  the policy read like a revocation and enforced the old ruleset forever.
+- **A `Gate` no longer rewrites its caller's `Policy`.** `protect()` mutated the
+  `tools` dict in place — `Policy` is frozen, the dict it points at was not — so one
+  gate's inference changed authorization for every other gate holding that object, and
+  moved its `content_hash` underneath them.
+
 ### Changed — breaking
 
-- **`content_hash` now renders numbers as decimal text before hashing, so every
-  policy hash changed.** The canonical serializer is type-tagged: `1` hashed as
+- **Every policy hash, lock hash and conformance fixture hash changed** as a
+  consequence of the two `content_hash` fixes above. `conformance/projection`,
+  `conformance/manifest.json` and the gallery table in `policies/README.md` were
+  regenerated; the projections themselves are byte-identical, and the two relations
+  the corpus makes normative still hold (`8` and `8.0` share a hash; unprojected
+  keywords move `schema_sha256` and not `contract_sha256`). Nothing has been
+  published, so no policy in anyone's repository is affected.
+- **`content_hash` renders numbers as decimal text before hashing.** The canonical serializer is type-tagged: `1` hashed as
   `["i",1]` and `1.0` as `["f","1.0"]`. Python preserves that distinction because
   `json.loads` does; `JSON.parse` collapses both to one number, so a second
   implementation could not have reproduced these hashes at all. Since `content_hash`

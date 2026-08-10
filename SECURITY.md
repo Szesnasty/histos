@@ -17,7 +17,7 @@ promise a response time nobody is on call for.
 **What counts as a vulnerability here:** any way to make the gate *allow* a call
 its policy forbids, *leak* content its policy would redact, or *lose* an audit
 record — without the attacker already controlling the host process. A bypass of a
-limit that is documented below as a known residual (verbatim-only canary,
+limit that is documented below as a known residual (mechanical-only canary,
 per-process limits, the resource TOCTOU window, shallow nested-argument
 validation) is not a new vulnerability — but a *worse-than-documented* version of
 one is, and so is a case where the documentation is simply wrong.
@@ -125,9 +125,13 @@ an exception chain (a traceback printer, most log handlers) would put it straigh
 back on screen. `raise ... from None` alone only suppresses the *display*, so the
 re-raise happens outside the handler.
 
-**Residual, and it is the canary limit again:** matching is verbatim and
-structural. An error message that base64s, paraphrases or reformats the secret
-passes, exactly as it would in a return value. Redaction also applies to
+**Residual, and it is the canary limit again:** matching is mechanical. The
+exception path runs the same two-tier matching as the return path — verbatim plus a
+fixed normalization — so a spaced-out or zero-width-padded token is caught. (Until an
+audit found it, this path matched verbatim only, which made a raised message the
+cheapest way out of the process: one zero-width space carried a canary to the model
+inside an ordinary `ValueError`.) An error message that base64s, paraphrases or
+translates the secret still passes, exactly as it would in a return value. Redaction also applies to
 `str(exc)` — an exception whose `__str__` masks its own contents hides from the
 check, and one that carries data on custom attributes rather than in its message is
 not reached. Output projection, strict returns and sensitive-field redaction do
@@ -172,11 +176,17 @@ Do not read this as "then it is worthless there". Narrowing what a compromised a
 can reach is worth doing at every layer. Read it as: **if you can only afford one
 control and your agent can execute code, this is not the one to buy first.**
 
-### Canary is a verbatim, structural control + an oracle — NOT exfil prevention
+### Canary is a mechanical control + an oracle — NOT exfil prevention
 The pre-gate DENYs a canary token in an argument and the post-gate REDACTs it from
-output, **at runtime** (not test-only). But matching is **verbatim**: base64,
-spelling it out, or translating the secret **passes**. Two further reachability
-limits:
+output, **at runtime** (not test-only). Matching is two-tier on both sides: verbatim,
+and again after a fixed closed normalization (NFKC, zero-width characters dropped, a
+closed separator set dropped, case folded) — so `C A N A R Y-7f3a-SECRET`,
+`CANARY_7f3a_SECRET` and a zero-width-padded token all match. The post-gate also joins
+every str/bytes leaf of a return and re-checks that, so a token **split across several
+output fields** is caught; because a split token cannot be located leaf by leaf, the
+whole value is dropped rather than partially redacted. But matching is still
+**mechanical**: base64, paraphrasing or translating the secret **passes**. Two further
+reachability limits:
 - **Opaque objects.** Redaction traverses str/bytes/dict(keys+values)/list/tuple/
   set/frozenset. A canary inside a dataclass/Pydantic attribute or any custom
   object's fields is **not** reached.
@@ -184,7 +194,7 @@ limits:
   argument whose `__str__`/`repr` masks its contents (e.g. Pydantic `SecretStr`)
   hides a canary from the check.
 
-So: treat canary as a deterministic guard against the *dumbest* verbatim leak and,
+So: treat canary as a deterministic guard against a mechanical leak and,
 above all, as a **"prove it" oracle** — plant one, and if it ever surfaces, your
 other controls (or a semantic tier, if one is wired) failed. Do not sell it as exfiltration
 prevention.
@@ -223,15 +233,23 @@ The gate bounds *which* operations the agent may attempt; it does not replace
 transactional authorization at the point of mutation (see the backend-authz note in
 the trust model).
 
-### Argument-pattern regexes can ReDoS if imported from untrusted schemas
-Patterns are **compiled at load** so an invalid regex fails loudly (not
-fail-closed on first call). But stdlib `re` has **no execution bound**: a
-catastrophic-backtracking pattern (`(a+)+$`) imported from a third-party MCP /
-OpenAPI schema can stall the calling thread on a crafted argument. Treat imported
-patterns as untrusted; keep patterns simple. Full ReDoS immunity would need a
-non-stdlib regex engine (out of scope for a zero-dependency core). *(String array
-elements are bounded by the same length cap per element, so an oversized element
-cannot slip past this bound.)*
+### Argument-pattern regexes are screened for ReDoS at load
+Patterns are **compiled at load**, so an invalid regex fails loudly rather than
+fail-closed on first call — and they are now also **screened**: a pattern whose
+structure admits exponential backtracking (nested or adjacent unbounded quantifiers
+over overlapping character sets, `(a+)+$` being the canonical one) is **refused at
+policy-load time**, with a suggested rewrite. This matters because an imported MCP /
+OpenAPI schema is written by whatever server the user pointed at, and stdlib `re` has
+no execution bound; screening is what a zero-dependency core can do without swapping
+in a non-stdlib engine.
+
+The screen is structural and therefore conservative in one direction: it can refuse a
+pattern that would in practice have been fine. It does not claim to catch every
+pathological regex ever written — a polynomial (not exponential) blowup on a very long
+input is still possible, which is why the length cap below is the second bound rather
+than the only one. *(Array arguments are bounded twice: per element by the string
+length cap, and in aggregate by a scan budget, so neither an oversized element nor an
+unbounded element count can turn one schema-valid call into a stall.)*
 
 ### Argument validation is shallow for nested objects
 The schema validator is deliberately tiny. A `type="object"` argument is
@@ -245,16 +263,33 @@ the gate validated the inner structure; validate it in the tool, or keep argumen
 The gate can only mediate a tool that was **wrapped**. `Gate.declared_but_unwrapped()`
 surfaces tools the policy declares but that were never wrapped — but a tool that is
 **neither declared nor wrapped is invisible**: the agent can call the raw function
-ungated and nothing flags it. Ensuring every tool the agent can reach flows through
+ungated and nothing flags it. The same applies to a *reference you kept*:
+`protect_tools()` returns new objects and leaves the originals alive, so a missing
+reassignment loses enforcement entirely and silently. Ensuring every tool the agent can reach flows through
 the gate is the host/adapter's responsibility (the framework adapter is the
 chokepoint); the library cannot guarantee it for a function it was never handed.
 
-### Audit tamper-evidence depends on a key
-`JSONLAuditSink(hash_chain=True)` **unkeyed** detects truncation, reordering and
-naive single-record edits — but an attacker with write access can rewrite a
-record and recompute every downstream sha256, and `verify()` then passes. For
-tamper-evidence against a motivated writer, pass `key=<secret>` (kept off the
-box): the chain becomes HMAC-SHA256 and rewriting requires the secret.
+### Audit tamper-evidence depends on a key, and truncation detection on a sidecar
+`JSONLAuditSink(hash_chain=True)` **unkeyed** detects reordering and naive
+single-record edits — but an attacker with write access can rewrite a record and
+recompute every downstream sha256, and `verify()` then passes. For tamper-evidence
+against a motivated writer, pass `key=<secret>` (kept off the box): the chain becomes
+HMAC-SHA256 and rewriting requires the secret.
+
+**Truncation is a separate problem and needs the sidecar.** A hash chain alone cannot
+tell a log that was cut short from a log that is merely young — every record in both
+still verifies. The sink therefore writes a `<log>.tip` file beside the log recording
+where the chain has reached; `verify()` compares them and reports a truncated tail.
+Delete the sidecar and that detection is gone, in keyed and unkeyed mode alike. This
+document previously claimed the unkeyed chain detected truncation on its own; it did
+not, and an audit caught it.
+
+**Concurrency.** `JSONLAuditSink.record` is atomic within a process (a `threading.Lock`)
+and, on POSIX, across processes (`flock` on the log). On Windows there is no
+cross-process guarantee: point separate processes at separate logs. Before this was
+fixed, ordinary concurrent writes corrupted the chain and `verify()` then reported
+tampering on a log nobody had touched — the failure mode that teaches people to ignore
+the signal.
 
 ## What `review_policy()` surfaces (turning silent gaps loud)
 
