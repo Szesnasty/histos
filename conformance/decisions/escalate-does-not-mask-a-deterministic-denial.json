@@ -1,0 +1,38 @@
+{
+  "description": "The seam is the LAST machine check, not the first. A caller whose role has no grant is refused by `rbac` — the escalation code must not appear, because no engine should reach a semantic tier (a model call, on the host's budget) on behalf of a call the cheap deterministic chain already refuses.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "wire": {
+        "access": "write",
+        "args": {
+          "to": {
+            "type": "string"
+          }
+        },
+        "escalate": {
+          "required": true
+        }
+      }
+    },
+    "roles": {
+      "viewer": {
+        "allow": []
+      }
+    }
+  },
+  "principal": {
+    "role": "viewer"
+  },
+  "call": {
+    "tool": "wire",
+    "args": {
+      "to": "acct-1"
+    }
+  },
+  "expect": {
+    "effect": "deny",
+    "rule": "rbac",
+    "field": "role"
+  }
+}

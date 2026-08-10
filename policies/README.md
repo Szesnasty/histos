@@ -228,13 +228,13 @@ assert yaml_hash == json_hash
 
 | policy | `content_hash` |
 |---|---|
-| `01-minimal` | `sha256:b4ca92713cacf731…` |
-| `02-tenant-isolation` | `sha256:2cb58b998df05f85…` |
-| `03-rag-readonly` | `sha256:6d9034fa7879720d…` |
-| `04-refund-approval` | `sha256:66cbf49c19691b00…` |
-| `05-mcp-surface` | `sha256:130b30f4b84ca0dc…` |
-| `06-outbound-email` | `sha256:8937bfe4bfc1959b…` |
-| `07-devops-deploy` | `sha256:07d498b23b236a39…` |
+| `01-minimal` | `sha256:372435e783e72ece…` |
+| `02-tenant-isolation` | `sha256:a17438ca9d55f691…` |
+| `03-rag-readonly` | `sha256:304016ac97d64d9d…` |
+| `04-refund-approval` | `sha256:5dcc22c636dcdb7d…` |
+| `05-mcp-surface` | `sha256:9a4160edf7d7f03d…` |
+| `06-outbound-email` | `sha256:6aea36d469f62959…` |
+| `07-devops-deploy` | `sha256:5fe57c6fe9065341…` |
 
 The twins are emitted with their **keys in reversed order** so the match is a
 demonstration and not a tautology, and `01-minimal.policy.json` additionally spells
