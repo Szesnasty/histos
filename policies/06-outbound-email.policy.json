@@ -1,0 +1,178 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "role_inheritance",
+      "arg_schema",
+      "string_bounds",
+      "resource_authz",
+      "requires_confirmation",
+      "rate_limit",
+      "budget",
+      "canary",
+      "secret_detectors",
+      "sensitive_redaction",
+      "output_projection"
+    ]
+  },
+  "canaries": [
+    "CANARY-mail-e5b2-DO-NOT-LEAK"
+  ],
+  "policy_id": "outbound-email",
+  "roles": {
+    "comms_manager": {
+      "inherits": "assistant",
+      "allow": [
+        "send_email_external"
+      ]
+    },
+    "assistant": {
+      "allow": [
+        "read_email",
+        "search_inbox",
+        "send_email"
+      ]
+    }
+  },
+  "tools": {
+    "send_email_external": {
+      "output": {
+        "project": true
+      },
+      "confirmation": {
+        "expires_in": 600,
+        "required": true
+      },
+      "budget": 5,
+      "returns": {
+        "status": {
+          "enum": [
+            "sent",
+            "queued"
+          ],
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "body": {
+          "min_length": 1,
+          "max_length": 5000,
+          "type": "string"
+        },
+        "subject": {
+          "min_length": 1,
+          "max_length": 200,
+          "type": "string"
+        },
+        "to": {
+          "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+          "max_length": 254,
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "send_email": {
+      "output": {
+        "project": true
+      },
+      "budget": 50,
+      "rate_limit": 10,
+      "returns": {
+        "status": {
+          "enum": [
+            "sent",
+            "queued"
+          ],
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "body": {
+          "min_length": 1,
+          "max_length": 5000,
+          "type": "string"
+        },
+        "subject": {
+          "min_length": 1,
+          "max_length": 200,
+          "type": "string"
+        },
+        "to": {
+          "pattern": "[A-Za-z0-9._%+-]+@acme-corp\\.com",
+          "max_length": 254,
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "read_email": {
+      "output": {
+        "project": true
+      },
+      "resource": {
+        "owns": "mailbox_owner"
+      },
+      "rate_limit": 120,
+      "returns": {
+        "from": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "message_id": {
+          "pattern": "MSG-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "read"
+    },
+    "search_inbox": {
+      "output": {
+        "project": true
+      },
+      "rate_limit": 60,
+      "returns": {
+        "from": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "query": {
+          "min_length": 1,
+          "max_length": 256,
+          "type": "string"
+        }
+      },
+      "sensitivity": "low",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}

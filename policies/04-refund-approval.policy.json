@@ -1,0 +1,146 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "role_inheritance",
+      "arg_schema",
+      "string_bounds",
+      "numeric_range",
+      "enum",
+      "resource_authz",
+      "trusted_arg_binding",
+      "requires_confirmation",
+      "budget",
+      "rate_limit",
+      "canary",
+      "strict_returns",
+      "output_projection",
+      "sensitive_redaction"
+    ]
+  },
+  "canaries": [
+    "CANARY-fin-4c8e-DO-NOT-LEAK"
+  ],
+  "policy_id": "refund-approval",
+  "roles": {
+    "refund_officer": {
+      "inherits": "support_agent",
+      "allow": [
+        "make_refund"
+      ]
+    },
+    "support_agent": {
+      "allow": [
+        "get_order"
+      ]
+    }
+  },
+  "tools": {
+    "make_refund": {
+      "output": {
+        "strict": true,
+        "project": true
+      },
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "where": [
+          {
+            "value": "cancelled",
+            "op": "ne",
+            "field": "status"
+          },
+          {
+            "value": false,
+            "op": "eq",
+            "field": "refunded"
+          }
+        ],
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "expires_in": 900,
+        "required": true
+      },
+      "budget": 20,
+      "returns": {
+        "reference": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "refunded",
+            "pending"
+          ],
+          "type": "string"
+        }
+      },
+      "args": {
+        "reason": {
+          "max_length": 280,
+          "required": false,
+          "type": "string"
+        },
+        "tenant_id": {
+          "type": "string"
+        },
+        "currency": {
+          "enum": [
+            "EUR",
+            "USD",
+            "GBP"
+          ],
+          "type": "string"
+        },
+        "amount": {
+          "maximum": 50000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "order_id": {
+          "pattern": "ORD-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "get_order": {
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "rate_limit": 60,
+      "returns": {
+        "customer_email": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "currency": {
+          "enum": [
+            "EUR",
+            "USD",
+            "GBP"
+          ],
+          "type": "string"
+        },
+        "total": {
+          "type": "number"
+        },
+        "order_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "order_id": {
+          "pattern": "ORD-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}

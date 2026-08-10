@@ -1,0 +1,185 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 07 - DEVOPS / DEPLOY
+#
+# The infrastructure agent: restarts, deployments, scaling. The failure mode is
+# not data leaving - it is an IRREVERSIBLE ACTION landing in the wrong place.
+# Four patterns carry this file:
+#
+#   enum as a wall      deploy_service takes environment: [dev, staging].
+#                       Production is not an option the model can argue for -
+#                       it is a value the format cannot express on this tool.
+#                       The safest value is the one that does not parse.
+#   pinned versions     a deploy takes `v1.2.3` or a 40-char commit sha.
+#                       Not a branch name, not "latest", not "HEAD" - a moving
+#                       ref is an argument whose meaning changes after review.
+#   change freeze       every write resolves the service and checks
+#                       `locked == false` on its REAL state. Freeze one service
+#                       in the registry and every agent, in every process, is
+#                       refused - without touching a single policy file.
+#   asymmetric friction the dangerous direction is expensive (deploy needs a
+#                       human), the safety direction is cheap (rollback does
+#                       not). If both cost the same, an incident at 3am gets
+#                       slower exactly when it should get faster.
+#
+# And one honest note: `scale_service` has `minimum: 1` on replicas, so the
+# agent cannot scale a service to zero. A numeric bound is an availability
+# control too, not only a cost control.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: devops-deploy
+version: "1"
+
+requires:
+  features:
+    - rbac
+    - role_inheritance
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - enum
+    - resource_authz
+    - requires_confirmation
+    - rate_limit
+    - budget
+    - secret_detectors
+    - sensitive_redaction
+    - output_projection
+
+tools:
+  get_service_status:
+    access: read
+    sensitivity: low
+    rate_limit: 120
+    args:
+      service: { type: string, enum: [api, web, worker] }
+    returns:
+      service: { type: string }
+      healthy: { type: boolean }
+      version: { type: string }
+
+  read_deploy_logs:
+    access: read
+    sensitivity: medium
+    rate_limit: 60
+    args:
+      service: { type: string, enum: [api, web, worker] }
+      lines: { type: integer, required: false, minimum: 10, maximum: 500 }
+    returns:
+      service: { type: string }
+      log: { type: string }
+    output:
+      project: true
+      # Logs are where credentials leak. A connection string some library
+      # helpfully printed on failure is redacted before it re-enters the model.
+      redact_secrets: true
+
+  deploy_service:
+    access: write
+    sensitivity: critical
+    budget: 10
+    args:
+      service: { type: string, enum: [api, web, worker] }
+      # Production is not in this list. That is the whole control: not a
+      # warning, not a review step - a value that does not exist on this tool.
+      environment: { type: string, enum: [dev, staging] }
+      # An exact release tag or a full commit sha. A branch name points at
+      # whatever it points at by the time the deploy runs; these two do not.
+      version: { type: string, pattern: "(v[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-f]{40})" }
+    resource:
+      # The resolver fetches the service record from the deployment registry.
+      # `locked` is its real, current state - a change freeze flips one field
+      # in one place and every runtime obeys it.
+      where:
+        - { field: locked, op: eq, value: false }
+    confirmation:
+      required: true
+      expires_in: 900
+    returns:
+      deploy_id: { type: string }
+      status: { type: string, enum: [started, queued] }
+    output:
+      project: true
+
+  deploy_production:
+    # Same action, different blast radius, so: its own tool, its own role, its
+    # own approval. "May deploy, but to production only with sign-off" is not a
+    # conditional - it is two tools with different grants.
+    access: write
+    sensitivity: critical
+    budget: 5
+    args:
+      service: { type: string, enum: [api, web, worker] }
+      environment: { type: string, enum: [production] }
+      version: { type: string, pattern: "v[0-9]+\\.[0-9]+\\.[0-9]+" }
+    resource:
+      where:
+        - { field: locked, op: eq, value: false }
+    confirmation:
+      required: true
+      expires_in: 900
+    returns:
+      deploy_id: { type: string }
+      status: { type: string, enum: [started, queued] }
+    output:
+      project: true
+
+  rollback_service:
+    # Deliberately NO confirmation: rolling back is the safety direction, and
+    # the freeze still applies. Make undo cheaper than do.
+    access: write
+    sensitivity: high
+    budget: 20
+    args:
+      service: { type: string, enum: [api, web, worker] }
+      environment: { type: string, enum: [dev, staging, production] }
+    resource:
+      where:
+        - { field: locked, op: eq, value: false }
+    returns:
+      deploy_id: { type: string }
+      status: { type: string, enum: [started, queued] }
+    output:
+      project: true
+
+  scale_service:
+    access: write
+    sensitivity: high
+    budget: 30
+    args:
+      service: { type: string, enum: [api, web, worker] }
+      environment: { type: string, enum: [dev, staging] }
+      # minimum: 1 - the agent cannot scale to zero, so "turn it off" is not
+      # expressible here. maximum: 10 bounds the bill.
+      replicas: { type: integer, minimum: 1, maximum: 10 }
+    resource:
+      where:
+        - { field: locked, op: eq, value: false }
+    returns:
+      status: { type: string, enum: [applied, queued] }
+    output:
+      project: true
+
+  delete_environment:
+    # Declared and granted to nobody, on purpose: a reviewer sees that a human
+    # looked at the most destructive verb in the registry and said no. Absent,
+    # it would deny identically - and prove nothing.
+    access: write
+    sensitivity: critical
+    args:
+      environment: { type: string, enum: [dev, staging] }
+    confirmation:
+      required: true
+
+roles:
+  sre_agent:
+    allow: [get_service_status, read_deploy_logs, rollback_service, scale_service]
+
+  deployer:
+    inherits: sre_agent
+    allow: [deploy_service]
+
+  release_manager:
+    inherits: deployer
+    allow: [deploy_production]

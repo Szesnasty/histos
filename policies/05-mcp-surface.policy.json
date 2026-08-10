@@ -1,0 +1,381 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "role_inheritance",
+      "arg_schema",
+      "string_bounds",
+      "numeric_range",
+      "enum",
+      "array_items",
+      "resource_authz",
+      "trusted_arg_binding",
+      "requires_confirmation",
+      "rate_limit",
+      "budget",
+      "output_projection",
+      "sensitive_redaction",
+      "secret_detectors"
+    ]
+  },
+  "policy_id": "mcp-support-surface",
+  "roles": {
+    "support_agent": {
+      "inherits": "ticket_reader",
+      "allow": [
+        "add_ticket_comment",
+        "set_ticket_status"
+      ]
+    },
+    "ticket_reader": {
+      "allow": [
+        "get_customer",
+        "get_ticket",
+        "search_tickets"
+      ]
+    }
+  },
+  "tools": {
+    "rotate_api_key": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "run_admin_query": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "statement": {
+          "max_length": 8000,
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "impersonate_user": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "user_id": {
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "update_billing_details": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "iban": {
+          "min_length": 15,
+          "max_length": 34,
+          "type": "string"
+        },
+        "customer_id": {
+          "pattern": "CUS-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "export_customers": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "csv",
+            "json"
+          ],
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "read"
+    },
+    "merge_tickets": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "target_id": {
+          "pattern": "TIC-[0-9]+",
+          "type": "string"
+        },
+        "source_id": {
+          "pattern": "TIC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "write"
+    },
+    "delete_ticket": {
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "confirmation": {
+        "required": true
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "ticket_id": {
+          "pattern": "TIC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "critical",
+      "access": "write"
+    },
+    "set_ticket_status": {
+      "output": {
+        "project": true
+      },
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "budget": 200,
+      "returns": {
+        "status": {
+          "type": "string"
+        },
+        "ticket_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "pending",
+            "closed"
+          ],
+          "type": "string"
+        },
+        "ticket_id": {
+          "pattern": "TIC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "medium",
+      "access": "write"
+    },
+    "add_ticket_comment": {
+      "output": {
+        "project": true
+      },
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "where": [
+          {
+            "value": "closed",
+            "op": "ne",
+            "field": "status"
+          }
+        ],
+        "owns": "tenant_id"
+      },
+      "budget": 200,
+      "returns": {
+        "comment_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "body": {
+          "min_length": 1,
+          "max_length": 4000,
+          "type": "string"
+        },
+        "ticket_id": {
+          "pattern": "TIC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "medium",
+      "access": "write"
+    },
+    "get_customer": {
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "rate_limit": 120,
+      "returns": {
+        "phone": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "email": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "customer_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "customer_id": {
+          "pattern": "CUS-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "read"
+    },
+    "get_ticket": {
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "rate_limit": 240,
+      "returns": {
+        "requester_email": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "ticket_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "ticket_id": {
+          "pattern": "TIC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "read"
+    },
+    "search_tickets": {
+      "rate_limit": 120,
+      "returns": {
+        "status": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "ticket_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "labels": {
+          "item_type": "string",
+          "required": false,
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "pending",
+            "closed"
+          ],
+          "required": false,
+          "type": "string"
+        },
+        "query": {
+          "min_length": 1,
+          "max_length": 512,
+          "type": "string"
+        }
+      },
+      "sensitivity": "low",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}

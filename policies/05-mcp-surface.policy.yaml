@@ -1,0 +1,237 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 05 — A WHOLE MCP SERVER SURFACE
+#
+# An MCP server hands an agent everything it exposes. This is the shape of the
+# answer: *this agent may use 5 of these 12 tools, with these argument bounds, on
+# resources it owns.*
+#
+# The two layers are visible here, and keeping them separate is the point:
+#
+#   SHAPE   — argument names and types. Imported, not typed by hand:
+#             `contracts_from_mcp(tools_list)` turns a `tools/list` response into
+#             ToolContracts. Nobody should retype a 12-tool server.
+#   POLICY  — who may call which of them, on whose data. No import can produce
+#             this, because it is not in the server's metadata. It is a decision.
+#
+# Note what the ungranted tools do here. They are declared but granted to nobody,
+# and that is deliberate: an imported contract with no grant denies with `rbac`
+# ("your role has no grant"), while a tool absent from the file entirely denies
+# with `unknown_tool` ("nothing governs this"). Both refuse. Only one of them
+# tells a reviewer that a human looked at the tool and said no — which is the
+# difference between a policy and a gap.
+#
+#   histos coverage 05-mcp-surface.policy.yaml --tools <what you handed the agent>
+#
+# exits 1 when the agent can reach a tool this file never mentions. That is the
+# one failure the library cannot catch at runtime: a tool it was never handed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: mcp-support-surface
+version: "1"
+
+requires:
+  features:
+    - rbac
+    - role_inheritance
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - enum
+    - array_items
+    - resource_authz
+    - trusted_arg_binding
+    - requires_confirmation
+    - rate_limit
+    - budget
+    - output_projection
+    - sensitive_redaction
+    - secret_detectors
+
+tools:
+  # ── granted: the read surface ──────────────────────────────────────
+  search_tickets:
+    access: read
+    sensitivity: low
+    rate_limit: 120
+    args:
+      query: { type: string, min_length: 1, max_length: 512 }
+      status: { type: string, required: false, enum: [open, pending, closed] }
+      labels: { type: array, required: false, item_type: string }
+    returns:
+      ticket_id: { type: string }
+      subject: { type: string }
+      status: { type: string }
+
+  get_ticket:
+    access: read
+    sensitivity: high
+    rate_limit: 240
+    args:
+      ticket_id: { type: string, pattern: "TIC-[0-9]+" }
+    returns:
+      ticket_id: { type: string }
+      subject: { type: string }
+      body: { type: string }
+      requester_email: { type: string, sensitive: pii }
+    resource:
+      owns: tenant_id
+
+  get_customer:
+    access: read
+    sensitivity: high
+    rate_limit: 120
+    args:
+      customer_id: { type: string, pattern: "CUS-[0-9]+" }
+    returns:
+      customer_id: { type: string }
+      name: { type: string }
+      email: { type: string, sensitive: pii }
+      phone: { type: string, sensitive: pii }
+    resource:
+      owns: tenant_id
+
+  # ── granted: the write surface, bounded ────────────────────────────
+  add_ticket_comment:
+    access: write
+    sensitivity: medium
+    budget: 200
+    args:
+      ticket_id: { type: string, pattern: "TIC-[0-9]+" }
+      body: { type: string, min_length: 1, max_length: 4000 }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+      where:
+        - { field: status, op: ne, value: closed }
+    returns:
+      comment_id: { type: string }
+    output:
+      project: true
+
+  set_ticket_status:
+    access: write
+    sensitivity: medium
+    budget: 200
+    args:
+      ticket_id: { type: string, pattern: "TIC-[0-9]+" }
+      status: { type: string, enum: [open, pending, closed] }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    returns:
+      ticket_id: { type: string }
+      status: { type: string }
+    output:
+      project: true
+
+  # ── declared, granted to nobody ────────────────────────────────────
+  # Imported from the server and left ungranted on purpose. A reviewer reading
+  # this file can see that each was considered — which an absent tool cannot show.
+  delete_ticket:
+    access: write
+    sensitivity: critical
+    args:
+      ticket_id: { type: string, pattern: "TIC-[0-9]+" }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+  merge_tickets:
+    access: write
+    sensitivity: high
+    args:
+      source_id: { type: string, pattern: "TIC-[0-9]+" }
+      target_id: { type: string, pattern: "TIC-[0-9]+" }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+  export_customers:
+    # The bulk-egress tool. Nothing an autonomous agent should hold, and the
+    # reason to say so here rather than to hope nobody wires it in.
+    access: read
+    sensitivity: critical
+    args:
+      format: { type: string, enum: [csv, json] }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+  update_billing_details:
+    access: write
+    sensitivity: critical
+    args:
+      customer_id: { type: string, pattern: "CUS-[0-9]+" }
+      iban: { type: string, min_length: 15, max_length: 34 }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+  impersonate_user:
+    access: write
+    sensitivity: critical
+    args:
+      user_id: { type: string }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+  run_admin_query:
+    access: write
+    sensitivity: critical
+    args:
+      statement: { type: string, max_length: 8000 }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+  rotate_api_key:
+    access: write
+    sensitivity: critical
+    args:
+      key_id: { type: string }
+      tenant_id: { type: string }
+    bind:
+      tenant_id: principal.tenant_id
+    resource:
+      owns: tenant_id
+    confirmation:
+      required: true
+
+roles:
+  ticket_reader:
+    allow: [search_tickets, get_ticket, get_customer]
+
+  support_agent:
+    inherits: ticket_reader
+    allow: [add_ticket_comment, set_ticket_status]

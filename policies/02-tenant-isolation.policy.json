@@ -1,0 +1,102 @@
+{
+  "requires": {
+    "features": [
+      "rbac",
+      "role_inheritance",
+      "arg_schema",
+      "string_bounds",
+      "resource_authz",
+      "trusted_arg_binding",
+      "sensitive_redaction",
+      "output_projection"
+    ]
+  },
+  "policy_id": "tenant-isolation",
+  "roles": {
+    "editor": {
+      "inherits": "member",
+      "allow": [
+        "update_document"
+      ]
+    },
+    "member": {
+      "allow": [
+        "read_document"
+      ]
+    }
+  },
+  "tools": {
+    "update_document": {
+      "output": {
+        "project": true
+      },
+      "bind": {
+        "tenant_id": "principal.tenant_id"
+      },
+      "resource": {
+        "where": [
+          {
+            "value": "archived",
+            "op": "ne",
+            "field": "status"
+          }
+        ],
+        "owns": "tenant_id"
+      },
+      "returns": {
+        "updated_at": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "tenant_id": {
+          "type": "string"
+        },
+        "title": {
+          "min_length": 1,
+          "max_length": 200,
+          "type": "string"
+        },
+        "document_id": {
+          "pattern": "DOC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "write"
+    },
+    "read_document": {
+      "resource": {
+        "owns": "tenant_id"
+      },
+      "returns": {
+        "owner_email": {
+          "sensitive": "pii",
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        }
+      },
+      "args": {
+        "document_id": {
+          "pattern": "DOC-[0-9]+",
+          "type": "string"
+        }
+      },
+      "sensitivity": "high",
+      "access": "read"
+    }
+  },
+  "schema_version": "histos.policy/0.1",
+  "version": "1"
+}

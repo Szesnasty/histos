@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 03 — READ-ONLY RETRIEVAL
+#
+# A retrieval agent has no write tools, which is exactly why people assume it
+# needs no policy. The risk moved rather than disappeared: this agent reads
+# untrusted documents, so it is the most likely thing in the building to be
+# carrying an injected instruction — and everything it returns flows back into a
+# context window.
+#
+# So the controls here are about the RETURN surface, not the call:
+#
+#   output.project    deny-by-default on what comes back. A field not declared in
+#                     `returns` is dropped — undeclared fields are exactly where a
+#                     secret hides out of reach of name-based redaction.
+#   sensitive: pii    declared fields the caller's role may not see are redacted.
+#   scan_canary       a planted token is removed if it ever surfaces.
+#   redact_secrets    checksum-verified secrets (PAN, IBAN, decodable JWT) are
+#                     removed wherever they appear in the output.
+#   rate_limit        bounds a scripted read-everything sweep to something a human
+#                     might notice.
+#
+# On the canary: it is a "prove it" oracle, not exfiltration prevention. Matching
+# is verbatim. If it ever fires, something upstream already failed — that is the
+# signal you planted it for. SECURITY.md says so at length; do not sell it as more.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: rag-readonly
+version: "1"
+
+requires:
+  features:
+    - rbac
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - rate_limit
+    - canary
+    - output_projection
+    - sensitive_redaction
+    - secret_detectors
+
+canaries:
+  # Plant this in the corpus. It should never come back. If it does, you have an
+  # answer rather than a suspicion.
+  - CANARY-rag-9f21-DO-NOT-LEAK
+
+tools:
+  search_corpus:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args:
+      query: { type: string, min_length: 1, max_length: 1024 }
+      top_k: { type: integer, required: false, minimum: 1, maximum: 25 }
+    returns:
+      doc_id: { type: string }
+      snippet: { type: string }
+      score: { type: number }
+    output:
+      project: true
+      scan_canary: true
+      redact_secrets: true
+
+  fetch_passage:
+    access: read
+    sensitivity: medium
+    rate_limit: 120
+    args:
+      doc_id: { type: string, pattern: "DOC-[0-9]+" }
+      page: { type: integer, required: false, minimum: 1, maximum: 2000 }
+    returns:
+      doc_id: { type: string }
+      text: { type: string }
+      author_email: { type: string, sensitive: pii }
+    output:
+      project: true
+      scan_canary: true
+      redact_secrets: true
+
+roles:
+  researcher:
+    allow: [search_corpus, fetch_passage]
