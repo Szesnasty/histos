@@ -43,8 +43,8 @@
       },
       "returns": null
     },
-    "schema_sha256": "sha256:b34b26b7c2d056f91b24b602371700fc6ca7bfc8468ddfb034775ba33e1b6345",
+    "schema_sha256": "sha256:d4b8d2d9026fb057fb44a4f667254e478e8240d42161193c4414b9b72a365a52",
     "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
-    "contract_sha256": "sha256:d91483e0a333fb22ffbe024f1b5f7ed8968e80c47401a477d49dd6c65d5007a5"
+    "contract_sha256": "sha256:1bb1397d877b4f78de2a6345eb1e945898c9d574ec159ff15860e10e14e970b9"
   }
 }

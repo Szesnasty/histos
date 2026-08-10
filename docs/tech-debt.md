@@ -15,9 +15,15 @@ and fully tested. [`integrations/langchain.py`](../src/histos/integrations/langc
 not installed and the library has no dependencies.
 
 **The cost:** *"one real call through each adapter is denied by policy and the
-framework loop survives"* is unverified. A change to LangChain's tool API would not
-break a test. Worse, the question that actually matters — *is there any
-tool-execution path that bypasses the gate?* — is not asked by anything automated.
+framework loop survives"* is unverified here. A change to LangChain's tool API would
+not break a test in this suite.
+
+**Partly answered since.** `demo/00-mediation` drives thirteen entry points at a
+gated tool — every public and private LangChain path, both async paths, the
+attributes on the object, the guard's own closure, and a compiled LangGraph
+`ToolNode` — and found one real bypass, now closed (see the resolved list). It runs
+outside this suite because it needs a framework installed. What remains unverified
+is the *loop*: that an agent survives a denial and carries on usefully.
 
 **What resolves it:** langchain-core in the dev extra plus one integration test per
 adapter, in a CI job allowed dependencies the library itself refuses.
@@ -119,6 +125,15 @@ both needing a shape that does not turn the format into an expression language.
   a repeat is a duplicate key that canonical parsing already refuses — the
   hand-written check went away with the shape that had required it.
 - **Four names for one project.** Settled on Histos before publication.
+- **The adapter published a pointer around itself.** `guard_callable` used
+  `@functools.wraps(fn)`, which sets `__wrapped__` to the *ungated* function — so a
+  gated LangChain tool carried `tool.func.__wrapped__`, and calling it executed the
+  tool with no gate decision at all. A mediation hunt (`demo/00-mediation`) found it
+  by trying thirteen entry points and watching which ones moved the money. Worse,
+  `_unwrap_target` in this library follows `__wrapped__` chains, so re-wrapping an
+  already-guarded callable would have silently stripped the guard. Closed by pinning
+  `__signature__` explicitly — frameworks still get the name, doc and parameters they
+  read — and removing the pointer, with two regression tests that need no framework.
 - **`content_hash` tagged numbers in a way another language could not reproduce.**
   The canonical serializer is type-tagged, so `1` hashed as `["i",1]` and `1.0` as
   `["f","1.0"]` — a distinction Python keeps because `json.loads` does, and one

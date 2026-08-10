@@ -2,9 +2,11 @@
 
 An MCP tool is ``{"name", "description", "inputSchema", "outputSchema"?}`` where
 the schemas are JSON Schema objects. We map ``inputSchema`` → args and
-``outputSchema`` → returns. MCP does not declare read/write, so ``access``
-defaults to ``"read"`` and should be set in the policy bundle for destructive
-tools (the review step flags tools whose access is merely assumed).
+``outputSchema`` → returns. MCP declares neither read/write nor sensitivity, so both
+come back as :data:`~histos.importers.sources.UNREVIEWED_ACCESS` /
+:data:`~histos.importers.sources.UNREVIEWED_SENSITIVITY` — the most damaging reading,
+held until a human writes one in the policy bundle. ``review_policy`` reports every
+tool still carrying that assumption as an outstanding decision.
 """
 
 from __future__ import annotations
@@ -13,7 +15,13 @@ from typing import Any
 
 from histos.contracts import ToolContract
 from histos.importers.json_schema import schema_from_json_schema
-from histos.importers.sources import ToolSource, contracts_of
+from histos.importers.sources import (
+    UNREVIEWED_ACCESS,
+    UNREVIEWED_SENSITIVITY,
+    ToolSource,
+    contracts_of,
+    register_source_kind,
+)
 
 
 def source_from_mcp(tool: dict[str, Any]) -> ToolSource:
@@ -39,6 +47,8 @@ def source_from_mcp(tool: dict[str, Any]) -> ToolSource:
             name=name,
             args=schema_from_json_schema(input_schema) if isinstance(input_schema, dict) else None,
             returns=schema_from_json_schema(output_schema) if isinstance(output_schema, dict) else None,
+            access=UNREVIEWED_ACCESS,
+            sensitivity=UNREVIEWED_SENSITIVITY,
         ),
     )
 
@@ -80,3 +90,6 @@ def contracts_from_mcp(source: list[dict[str, Any]] | dict[str, Any]) -> list[To
     """The contracts alone — one code path with :func:`sources_from_mcp`, so an
     import and a drift check can never disagree about what a definition means."""
     return contracts_of(sources_from_mcp(source))
+
+
+register_source_kind("mcp", sources_from_mcp)

@@ -70,10 +70,20 @@ def _map_annotation(ann: Any) -> tuple[str, bool, str | None]:
 
 
 def infer_schema(func: Callable[..., Any]) -> Schema:
-    """Infer a :class:`~histos.schema.Schema` from ``func``'s signature."""
+    """Infer a :class:`~histos.schema.Schema` from ``func``'s signature.
+
+    An annotation this process cannot resolve — a ``TYPE_CHECKING``-only import, a
+    forward reference to a name that is not importable at runtime — degrades that
+    argument to ``any``. The degradation is deliberate but must never masquerade as
+    validation: ``Gate.protect`` refuses to install a schema that constrains nothing
+    (``_schema_constrains``), so a fully degraded tool keeps its ``no_arg_schema``
+    denial, and ``review_policy`` warns about a partly degraded one.
+    """
     try:
         hints = typing.get_type_hints(func)
-    except Exception:  # noqa: BLE001 — inference must never crash the caller
+    except (NameError, AttributeError, TypeError):
+        # Exactly the three an unresolvable annotation raises. A wider catch turned a
+        # genuine bug in this module into a silent all-`any` schema.
         hints = {}
     sig = inspect.signature(func)
 

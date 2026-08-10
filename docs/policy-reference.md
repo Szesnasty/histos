@@ -51,6 +51,7 @@ One entry per tool the policy governs. A tool absent from this mapping is denied
 | `bind` | mapping | no | Arguments overwritten with trusted principal attributes BEFORE any check runs. This dominates validation: a wrong value becomes un-passable rather than merely detected. Fail-closed if the principal lacks the attribute. |
 | `resource` | mapping | no | Row-level authorization: not 'may this role call this tool' but 'may it act on THIS record'. Requires a resource_resolver on the host that fetches the real record; a resolver that echoes an argument re-creates the IDOR this block exists to prevent. |
 | `confirmation` | mapping | no | Require a trusted out-of-band approval, bound to this exact tool, arguments and principal, before the call proceeds. Approval is a host callback, never a tool - so an injected agent cannot approve itself. With no callback wired the default is DENY. |
+| `escalate` | mapping | no | Route this call to the host's semantic tier - the probabilistic, meaning-level layer this format deliberately does not contain - before it may proceed. The tier can only let a call continue past the deterministic checks it already passed; it can never allow one they refused. With no tier wired the call is DENIED (no_escalation_tier), so adding meaning never weakens the gate and not having it never opens one. |
 | `output` | mapping | no | What is allowed to leave the boundary and re-enter the model, including what comes back when the tool raises. |
 | `deny_secret_args` | boolean | no | Deny a checksum-verified secret passed as an argument. |
 

@@ -14,6 +14,7 @@ from histos import (
     schema_from_json_schema,
     use_principal,
 )
+from histos.importers.sources import UNREVIEWED_ACCESS, UNREVIEWED_SENSITIVITY
 
 
 def test_json_schema_bridge_maps_types_required_enum_and_constraints():
@@ -126,7 +127,13 @@ def test_mcp_import_maps_input_and_output():
     assert tools[0].name == "get_invoice"
     assert tools[0].args.fields["id"].required is True
     assert tools[0].returns.fields["total"].type == "number"
-    assert tools[0].access == "read"  # MCP does not declare — defaults read
+    # MCP declares neither access nor sensitivity, so the import records the most
+    # damaging reading rather than the most convenient one: a vendor's `export_contacts`
+    # used to land in a generated skeleton labelled `read` / `low`, which is a review
+    # safety net that reads as one and is not one. `histos review` holds the policy
+    # until a human decides.
+    assert tools[0].access == UNREVIEWED_ACCESS == "write"
+    assert tools[0].sensitivity == UNREVIEWED_SENSITIVITY
 
 
 def test_openapi_import_method_maps_to_access():

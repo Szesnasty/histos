@@ -18,7 +18,7 @@ from histos.importers.json_schema import field_from_json_schema, schema_from_jso
 from histos.importers.mcp import contracts_from_mcp, sources_from_mcp
 from histos.importers.openai import contracts_from_openai, sources_from_openai
 from histos.importers.openapi import contracts_from_openapi, sources_from_openapi
-from histos.importers.sources import KINDS, ToolSource, contracts_of
+from histos.importers.sources import KINDS, ToolSource, contracts_of, reader_for, register_source_kind
 
 __all__ = [
     "KINDS",
@@ -28,6 +28,8 @@ __all__ = [
     "contracts_from_openapi",
     "contracts_of",
     "field_from_json_schema",
+    "reader_for",
+    "register_source_kind",
     "schema_from_json_schema",
     "sources_from_mcp",
     "sources_from_openai",

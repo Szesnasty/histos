@@ -69,9 +69,12 @@ def test_import_writes_a_lock_beside_the_policy(tmp_path, capsys):
 
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     entry = lock["tools"]["make_refund"]
-    assert lock["lock_version"] == 1
+    assert lock["lock_version"] == 2
     assert entry["source"] == {"kind": "mcp", "locator": "mcp://internal"}
     assert all(entry[h].startswith("sha256:") for h in ("schema_sha256", "description_sha256", "contract_sha256"))
+    # The reviewed copy, so a later drift can show the difference rather than assert one.
+    assert entry["reviewed"]["description"] == "Refund an order."
+    assert entry["reviewed"]["shape"]["input"]["properties"]["amount"]["maximum"] == 500
 
 
 def test_import_to_stdout_writes_no_lock(tmp_path, capsys):
@@ -114,15 +117,36 @@ def test_drift_reports_a_poisoned_description_without_claiming_enforcement_chang
     assert "0 reaching enforcement" in out
 
 
-def test_drift_names_tools_it_cannot_verify(tmp_path, capsys):
-    """A hand-written tool is not covered by the lock, and a clean report must not
-    imply it was checked."""
-    source, policy, _ = _imported(tmp_path)
+def _with_a_hand_written_tool(policy):
     data = json.loads(Path(policy).read_text(encoding="utf-8"))
     data["tools"]["hand_written"] = {"args": {"x": {"type": "string"}}}
     Path(policy).write_text(json.dumps(data), encoding="utf-8")
+    return policy
 
-    assert main(["drift", policy, "--source", source, "--kind", "mcp"]) == 0
+
+def test_drift_fails_on_tools_it_cannot_verify(tmp_path, capsys):
+    """A hand-written tool is not covered by the lock, so the check did not check it.
+
+    This asserted exit 0 until the fail-closed default landed, which made the
+    documented CI gate pass having verified nothing — the one outcome worse than no
+    gate, because it is reported as a pass.
+    """
+    source, policy, _ = _imported(tmp_path)
+    _with_a_hand_written_tool(policy)
+
+    assert main(["drift", policy, "--source", source, "--kind", "mcp"]) == 1
+    captured = capsys.readouterr()
+    assert "unverifiable from here (1): hand_written" in captured.out
+    assert "OK — 1 of 2 policy tool(s) match the lock" in captured.out
+    assert "were not checked at all: hand_written" in captured.err
+    assert "--allow-unverifiable" in captured.err
+
+
+def test_allow_unverifiable_is_the_deliberate_escape_hatch(tmp_path, capsys):
+    source, policy, _ = _imported(tmp_path)
+    _with_a_hand_written_tool(policy)
+
+    assert main(["drift", policy, "--source", source, "--kind", "mcp", "--allow-unverifiable"]) == 0
     assert "unverifiable from here (1): hand_written" in capsys.readouterr().out
 
 

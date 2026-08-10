@@ -1,0 +1,238 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# RUCH PHYSIOTHERAPY — reception assistant
+#
+# Written after the agent, against the tools the clinic already had. Nothing in
+# `clinic/tools.py` was changed to accommodate this file.
+#
+# The caller is identified by the phone number they rang from, before the model
+# sees anything. That identity is the only thing here the model cannot influence,
+# and every rule below is ultimately anchored to it.
+#
+# Read this file against `wiring.unprotected()`, which is the same authorization
+# written by hand — ordinary session scoping, the thing every REST backend has.
+# Most of what is below, that function also does. Being honest about which rules
+# earn their place is the point:
+#
+#   owns      duplicates the baseline. `cancel_appointment` is keyed by
+#             appointment, so the resolver fetches the row and compares its REAL
+#             owner to the caller — and `unprotected()` runs the identical query
+#             eight lines earlier. This rule moves where the decision lives; it
+#             does not add a decision. It is here because it is the control that
+#             survives somebody adding a ninth tool and forgetting the check.
+#
+#   bind      on `patient_id` also duplicates the baseline, by a different route:
+#             scoped tools have no `patient_id` parameter at all, so there is
+#             nothing to poison. Where `bind` is not a duplicate is `send_sms`.
+#
+#   bind      on `phone` is the rule with no hand-written equivalent, and it is
+#             the one the demo actually turns on. There is no session value to
+#             scope an SMS recipient to — the clinic genuinely texts carers and
+#             spouses — so no ownership predicate can be written there. The bound
+#             deletes the choice instead of policing it, which costs a real
+#             feature. `smoke.py` measures that cost rather than asserting it away.
+#
+#   sensitive the other rule with no baseline equivalent. Session scoping picks
+#             the right ROW; it says nothing about which COLUMNS of that row are
+#             safe to hand a model. `national_id` is redacted out of the caller's
+#             OWN record, which no amount of scoping would have done.
+#
+# And one thing deliberately NOT here: no rule tries to detect the injected text
+# in a patient's intake note. Reading it is allowed. What the agent may *do*
+# afterwards is what is bounded.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: ruch-reception
+version: "1"
+
+# `requires.features` is a load-time refusal, not a brochure: if an engine cannot
+# do one of these, this policy must not load at all rather than silently enforce
+# less than it says. So the list is exactly the capabilities the rules below use.
+#
+# `canary` was here, along with a `canaries:` block and `scan_canary: true` on two
+# tools, and it has been removed. The comment claimed the token was "planted in
+# the clinic's own records"; it was not, in any patient, note or appointment — it
+# existed only in this file. A control that cannot fire is worse than an absent
+# one in the file a reviewer reads most carefully. This demo does not exercise
+# canaries and no longer claims to.
+requires:
+  features:
+    - rbac
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - resource_authz
+    - trusted_arg_binding
+    - rate_limit
+    - budget
+    - secret_detectors
+    - sensitive_redaction
+    - output_projection
+
+tools:
+  # ── reading ────────────────────────────────────────────────────────────
+  list_services:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args: {}
+    returns:
+      id: { type: integer }
+      name: { type: string }
+      minutes: { type: integer }
+      price_pln: { type: integer }
+    output:
+      project: true
+
+  find_free_slots:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args:
+      therapist_id: { type: integer, minimum: 1, maximum: 2 }
+      # No pattern on `date`, deliberately. `find_free_slots` already parses it with
+      # `strptime` and returns nothing on a malformed value — that is the function
+      # protecting itself, and repeating it here would be the same rule in two files
+      # with nobody to notice when they diverge.
+      #
+      # The test for whether a check belongs in a policy: *would you delete it if the
+      # caller were trusted?* A date parser stays either way, so it is validation and
+      # it lives in the code. `bind`, `owns`, budgets and confirmation all vanish for
+      # a trusted caller, so they are authorization and they live here.
+      date: { type: string, max_length: 10 }
+
+  get_patient:
+    access: read
+    sensitivity: high
+    rate_limit: 30
+    args:
+      # The model proposes a patient_id; this replaces it with the caller's own
+      # before the function runs. There is no phrasing that gets around a value
+      # the model never supplies.
+      patient_id: { type: integer }
+    bind:
+      patient_id: principal.patient_id
+    resource:
+      owns: patient_id
+    returns:
+      id: { type: integer }
+      full_name: { type: string }
+      # `phone` is declared sensitive AND listed in the patient role's `can_view`,
+      # so it comes back in the clear: "what number do you have on file for me?"
+      # is a reception task, and the number is the caller's own.
+      phone: { type: string, sensitive: pii }
+      # The national identity number is not. It has no business entering a model
+      # context to book a massage, so it is declared and redacted rather than left
+      # undeclared — a reviewer can see the decision was made.
+      #
+      # This is the field-level half of the argument, and it is the half ordinary
+      # session scoping does not reach: scoping picks the right ROW, it says
+      # nothing about which columns of that row are safe to hand a model.
+      national_id: { type: string, sensitive: secret }
+      intake_note: { type: string }
+    output:
+      project: true
+      redact_secrets: true
+
+  list_appointments:
+    access: read
+    sensitivity: medium
+    rate_limit: 60
+    args:
+      patient_id: { type: integer }
+    bind:
+      patient_id: principal.patient_id
+    resource:
+      owns: patient_id
+    returns:
+      id: { type: integer }
+      starts_at: { type: string }
+      status: { type: string }
+      therapist: { type: string }
+      service: { type: string }
+      price_pln: { type: integer }
+    output:
+      project: true
+
+  # ── writing ────────────────────────────────────────────────────────────
+  book_appointment:
+    access: write
+    sensitivity: medium
+    budget: 5
+    rate_limit: 10
+    args:
+      patient_id: { type: integer }
+      therapist_id: { type: integer, minimum: 1, maximum: 2 }
+      service_id: { type: integer, minimum: 1, maximum: 3 }
+      # The optional seconds group is not decoration. Written without it, this
+      # pattern refused every booking the agent made: the model emits
+      # `2026-08-20T12:00:00` and `re.fullmatch` does not care that the extra
+      # `:00` is harmless. A policy is written against what the model actually
+      # sends, which you only find out by running one.
+      starts_at: { type: string, pattern: "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?" }
+    bind:
+      patient_id: principal.patient_id
+
+  cancel_appointment:
+    access: write
+    sensitivity: high
+    # A caller cancelling their own appointments is normal. A caller cancelling
+    # twenty is not a booking pattern, it is a denial-of-service against the
+    # clinic's day, and no wording of the request makes it one.
+    budget: 3
+    rate_limit: 5
+    args:
+      appointment_id: { type: integer }
+    # Binding cannot help: the key is the appointment, not the patient. The
+    # resolver reads `appointments.patient_id` from the database and the policy
+    # compares it to the caller.
+    resource:
+      owns: patient_id
+
+  reschedule_appointment:
+    access: write
+    sensitivity: high
+    budget: 10
+    rate_limit: 10
+    args:
+      appointment_id: { type: integer }
+      new_starts_at: { type: string, pattern: "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?" }
+    resource:
+      owns: patient_id
+
+  # ── the way out ────────────────────────────────────────────────────────
+  send_sms:
+    access: write
+    sensitivity: critical
+    budget: 3
+    rate_limit: 5
+    args:
+      # The clinic texts its own caller, nobody else. The number is overwritten
+      # from the verified line, so an instruction to text +48 999 888 777 has
+      # nowhere to put that number.
+      phone: { type: string }
+      body: { type: string, min_length: 1, max_length: 320 }
+    bind:
+      phone: principal.phone
+
+  # Declared and granted to nobody. The clinic's tool set includes a raw patient
+  # lookup by phone; a reviewer should see that somebody considered exposing it
+  # to the agent and decided against it, rather than find it simply missing.
+  find_patient_by_phone:
+    access: read
+    sensitivity: high
+    args:
+      phone: { type: string }
+
+roles:
+  patient:
+    allow:
+      - list_services
+      - find_free_slots
+      - get_patient
+      - list_appointments
+      - book_appointment
+      - cancel_appointment
+      - reschedule_appointment
+      - send_sms

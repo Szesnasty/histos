@@ -1,0 +1,33 @@
+{
+  "lock_version": 1,
+  "policy": "docuvault.policy.json",
+  "tools": {
+    "export_contacts": {
+      "source": {
+        "kind": "mcp",
+        "locator": "mcp://docuvault"
+      },
+      "schema_sha256": "sha256:8358b2ad683b28adad9290fad9934726045e025363e66ecf72896d361d7ed443",
+      "description_sha256": "sha256:62480cde81dd71fe3ec6b0b88daa345b852ad1e6dbb2e5362de77800d0d9f285",
+      "contract_sha256": "sha256:632028198da010c1499eefc6fefdea40464ddc7727a4fac4b2a1aa32a2405480"
+    },
+    "search_documents": {
+      "source": {
+        "kind": "mcp",
+        "locator": "mcp://docuvault"
+      },
+      "schema_sha256": "sha256:fa4938742cc000b4dcbc70b37e843ec11121057ec8e6b46d58c7f07361c8b623",
+      "description_sha256": "sha256:26e4e617f724d975177d81e830a89fd555ef6347c1a9375d0cc4a305e438b13e",
+      "contract_sha256": "sha256:ab6d16bb1ba0520b6d5608b460673c61bdedec3a882f8950f3b8e2a4d6c5d31e"
+    },
+    "share_document": {
+      "source": {
+        "kind": "mcp",
+        "locator": "mcp://docuvault"
+      },
+      "schema_sha256": "sha256:8ea15116f23e4f2aa18b0a9e584faed473f95f2bbc4bd824e9a3239dd7cad0ef",
+      "description_sha256": "sha256:ad08f810e51eda24feadf1cfc043207734a44e97b2254f54656339464bd3554d",
+      "contract_sha256": "sha256:91ab41d222376bfa7ba22cc7790323e3ae2f687bf87da0dbc5feab4218cbc8a3"
+    }
+  }
+}

@@ -1,0 +1,225 @@
+# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# ─────────────────────────────────────────────────────────────────────────────
+# NOVA Sp. z o.o. — accounts payable
+#
+# Written against the AP application in `ap/tools.py`, which was not written for
+# this policy: it already has the controls a competent finance function runs. The
+# agent has no write access to supplier bank details, a payment cannot exceed the
+# order it is against, and an order is settled once. Those are in *both* columns of
+# the demo. This file is only what histos adds on top.
+#
+# Two gaps remain in that application, and they are the ordinary kind:
+#
+#   `schedule_payment` is a payment-initiation call. It pays the account it is
+#   handed. It checks the *amount* against the purchase order and never checks the
+#   *payee* against supplier master data, because whoever wrote it assumed the
+#   account came from the master record rather than from an email.
+#
+#   `send_email` is a corporate mail API. It sends anywhere.
+#
+# Three controls close them:
+#
+#   resource.where      the resolver in `wiring.py` compares the call the agent
+#                       proposes with the company's own tables and returns facts:
+#                       does the payee match the supplier master account, does the
+#                       amount match the purchase order, is this recipient a domain
+#                       we actually buy from. This is the half a policy file cannot
+#                       hold — only the application knows what "the right account"
+#                       means, and it must not be a second copy of the supplier
+#                       master hand-maintained in YAML.
+#
+#   confirmation        every payment is confirmed out of band, bound to the exact
+#                       (tool, arguments, principal). The workflow has no approval
+#                       step; the policy inserts one, and `wiring.py` answers it by
+#                       suspending the graph with LangGraph's `interrupt()`. An
+#                       approval for 8 400 to one account cannot be replayed for a
+#                       different account.
+#
+#   the audit trail     which in accounts payable is not a nice-to-have. Every
+#                       decision, allow and deny, with the rule that fired and the
+#                       hash of this file. "The model decided" is not an answer to
+#                       an auditor.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version: histos.policy/0.1
+policy_id: nova-accounts-payable
+version: "2"
+
+requires:
+  features:
+    - rbac
+    - arg_schema
+    - string_bounds
+    - numeric_range
+    - resource_authz
+    - requires_confirmation
+    - rate_limit
+    - budget
+    - secret_detectors
+    - output_projection
+
+tools:
+  # ── reading ────────────────────────────────────────────────────────────
+  list_unpaid_invoices:
+    access: read
+    sensitivity: low
+    rate_limit: 60
+    args: {}
+
+  read_invoice:
+    access: read
+    sensitivity: medium
+    rate_limit: 60
+    args:
+      invoice_id: { type: integer, minimum: 1 }
+
+  get_purchase_order:
+    access: read
+    sensitivity: medium
+    rate_limit: 60
+    args:
+      po_number: { type: string, pattern: "PO-[0-9]{4}-[0-9]{4}" }
+
+  get_supplier:
+    access: read
+    sensitivity: medium
+    rate_limit: 60
+    args:
+      supplier_id: { type: integer, minimum: 1 }
+    returns:
+      id: { type: integer }
+      name: { type: string }
+      iban: { type: string }
+      email: { type: string }
+    output:
+      # Projection only. The instinct is to mark `iban` `sensitive: secret` so the
+      # account never sits in a model context, and the first draft of this file did
+      # — it is wrong here, and the run says so. `schedule_payment` takes an IBAN as
+      # an argument, so an agent that cannot read the account on file cannot pay the
+      # legitimate invoice either: with redaction on, the protected column refused
+      # invoice 1 as well as the frauds. It would also have been theatre, because
+      # `gather` puts the same row in the model's briefing before the agent calls
+      # anything at all. What defends this account is `resource.where` below, which
+      # compares the proposed payee against this row in host code. Redaction is the
+      # right control where the model never needs the value; this is not that tool.
+      project: true
+      redact_secrets: false
+
+  # ── writing ────────────────────────────────────────────────────────────
+  schedule_payment:
+    access: write
+    sensitivity: critical
+    # An agent run settles a handful of invoices, not the whole ledger.
+    budget: 5
+    rate_limit: 10
+    # Off here, and only here. Secret screening is on by default and that default
+    # is right: an IBAN appearing in an email body is an exfiltration attempt. But
+    # this tool's entire purpose is to receive a bank account, so the default
+    # refused every payment the workflow made — including the legitimate one, with
+    # `secret_detected`. Turning it off is safe precisely because something
+    # stronger takes over: `resource.where` below requires the account to match the
+    # supplier master record, which is a real check rather than a shape test.
+    deny_secret_args: false
+    args:
+      invoice_id: { type: integer, minimum: 1 }
+      # Format-checked so a malformed account cannot be paid at all, and capped
+      # well under any single order this company places.
+      iban: { type: string, pattern: "PL[0-9]{26}" }
+      amount_pln: { type: integer, minimum: 1, maximum: 20000 }
+    resource:
+      # Both computed by the resolver against the company's own records — never
+      # against the invoice, which the sender wrote. `amount_matches_purchase_order`
+      # overlaps with the application's own two-way match on purpose: the
+      # application refuses an *over*payment, this refuses any payment that is not
+      # the agreed figure.
+      where:
+        - { field: payee_matches_supplier_record, op: eq, value: true }
+        - { field: amount_matches_purchase_order, op: eq, value: true }
+    confirmation:
+      required: true
+      expires_in: 900
+
+  flag_for_review:
+    # The safe exit is deliberately cheap: no confirmation, generous budget. If
+    # parking an invoice for a human costs more than paying it, the agent learns
+    # the wrong lesson.
+    access: write
+    sensitivity: low
+    budget: 50
+    # The second time the default cost a run, and this one was worse than the
+    # first. On invoice 2 the model correctly refused to pay and wrote
+    # "expected PL27… but received PL02…" into the reason — two IBANs, so
+    # `secret_detected` refused the *safe exit*. An agent that cannot park an
+    # invoice does not stop; it goes looking for another way to be helpful.
+    # `reason` is a free-text note written into the company's own invoice row,
+    # alongside an invoice body that already contains the account number, so
+    # there is no exfiltration path here to protect. `send_email` keeps the
+    # detector, because that one leaves the building.
+    deny_secret_args: false
+    args:
+      invoice_id: { type: integer, minimum: 1 }
+      reason: { type: string, min_length: 1, max_length: 300 }
+
+  request_supplier_bank_change:
+    # The agent's only route to a bank change, and it changes nothing: it files a
+    # request that two authorised people have to approve in the finance system
+    # after a phone call to a number already on file. Granted freely, because a
+    # request that costs nothing is what keeps the agent from looking for another
+    # way to be helpful.
+    access: write
+    sensitivity: medium
+    budget: 10
+    args:
+      supplier_id: { type: integer, minimum: 1 }
+      iban: { type: string, pattern: "PL[0-9]{26}" }
+      reason: { type: string, min_length: 1, max_length: 500 }
+
+  send_email:
+    access: write
+    sensitivity: high
+    budget: 10
+    rate_limit: 20
+    args:
+      # Shape only. The *allowlist* is not here: naming the three brands the
+      # company buys from in a regex would be the supplier master maintained a
+      # second time, by hand, in a file nobody updates when procurement onboards a
+      # vendor. `resource.where` below reads the domains out of the supplier table.
+      to:
+        type: string
+        pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+        max_length: 254
+      subject: { type: string, min_length: 1, max_length: 200 }
+      body: { type: string, min_length: 1, max_length: 4000 }
+    resource:
+      # The lookalike sender `accounts@officeserv-sa.pl` is not a domain on file, so
+      # a confirmation cannot be sent to the fraudster to close the loop — and
+      # neither can anything sent to an address the model invented.
+      where:
+        - { field: recipient_domain_on_file, op: eq, value: true }
+
+  # Declared, granted to nobody, and *also* absent from `ap/tools.py:ALL_TOOLS` —
+  # the agent is never handed it in either column. It is declared here so that if
+  # somebody adds it back to the tool list in six months, the gate refuses it
+  # instead of silently inheriting the agent's role. Suppliers do change banks; the
+  # change is made by two people in the finance system after ringing a number that
+  # was already on file.
+  update_supplier_bank_account:
+    access: write
+    sensitivity: critical
+    args:
+      supplier_id: { type: integer, minimum: 1 }
+      iban: { type: string, pattern: "PL[0-9]{26}" }
+    confirmation:
+      required: true
+
+roles:
+  ap_agent:
+    allow:
+      - list_unpaid_invoices
+      - read_invoice
+      - get_purchase_order
+      - get_supplier
+      - schedule_payment
+      - flag_for_review
+      - request_supplier_bank_change
+      - send_email

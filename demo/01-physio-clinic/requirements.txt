@@ -1,0 +1,8 @@
+# `langchain` is the distribution that owns `langchain.agents.create_agent`
+# (agent.py). None of the other three depend on it: langchain-ollama requires
+# only langchain-core + ollama, and langgraph requires langchain-core. Leaving it
+# out made the documented setup fail at the first import on a clean machine.
+langchain>=1.0
+langchain-core>=1.0
+langchain-ollama>=1.0
+langgraph>=1.0

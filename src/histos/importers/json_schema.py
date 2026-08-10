@@ -21,11 +21,38 @@ is deny-by-default on the argument surface too. Pass an object whose
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
+from histos.errors import PolicyError
 from histos.schema import Field, Schema
 
 _JS_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
+
+# Only these two ever legitimately carry a boolean: draft-4 wrote
+# `exclusiveMinimum: true` as a *modifier* of `minimum`. Everywhere else a boolean
+# is a malformed document, not an older dialect.
+_DRAFT4_MODIFIERS = frozenset({"exclusiveMinimum", "exclusiveMaximum"})
+
+# What a JSON Schema `type` promises about the values that satisfy it. Used to catch
+# an `enum` that contradicts the type it sits next to.
+_TYPE_OF: dict[str, type | tuple[type, ...]] = {
+    "string": str,
+    "integer": int,
+    "number": (int, float),
+    "boolean": bool,
+    "array": (list, tuple),
+    "object": dict,
+}
+
+
+def _malformed(keyword: str, value: Any, expected: str) -> PolicyError:
+    return PolicyError(
+        f"imported schema declares {keyword}={value!r}, which is not {expected}. The source is "
+        "malformed; importing it would produce a policy that looks like it carries this bound and "
+        "does not.",
+        code="invalid_import",
+    )
 
 
 def _resolve_type(js_type: Any) -> tuple[str, bool]:
@@ -40,16 +67,76 @@ def _resolve_type(js_type: Any) -> tuple[str, bool]:
     return "any", False
 
 
-def _numeric(value: Any) -> float | None:
-    """Keep a JSON Schema numeric bound, or drop it if it is not a number.
+def _numeric(keyword: str, value: Any) -> float | None:
+    """Keep a JSON Schema numeric bound, drop draft-4's boolean form, refuse the rest.
 
-    ``bool`` is excluded on purpose: it is a subclass of ``int`` in Python, and
+    ``bool`` is not read as a number: it is a subclass of ``int`` in Python, and
     draft-4 wrote ``exclusiveMinimum: true`` as a *modifier* of ``minimum``. Reading
-    that as the number 1 would invent a bound nobody asked for.
+    that as the number 1 would invent a bound nobody asked for, so that one spelling
+    is dropped. A boolean anywhere else, or a string, or a non-finite value, is a
+    malformed source: it is refused rather than dropped, because a dropped bound
+    leaves a policy that reads as constrained and enforces nothing.
     """
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    if value is None:
         return None
+    if isinstance(value, bool):
+        if keyword in _DRAFT4_MODIFIERS:
+            return None
+        raise _malformed(keyword, value, "a number")
+    if not isinstance(value, int | float):
+        raise _malformed(keyword, value, "a number")
+    if isinstance(value, float) and not math.isfinite(value):
+        # `1e999` is valid JSON that json.loads overflows to inf. A bound of inf is
+        # satisfied by every value, so it would import as a cap that never caps.
+        raise _malformed(keyword, value, "a finite number")
     return value
+
+
+def _length(keyword: str, value: Any) -> int | None:
+    """A ``minLength`` / ``maxLength`` must be a non-negative whole number.
+
+    Unguarded, ``maxLength: true`` reached ``Field.max_length`` as ``True`` and
+    ``len(value) > True`` silently became a one-character cap; ``maxLength: "50"``
+    raised TypeError from inside the gate, where a decision was owed.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise _malformed(keyword, value, "a non-negative whole number")
+    if isinstance(value, float) and not (math.isfinite(value) and value.is_integer()):
+        raise _malformed(keyword, value, "a non-negative whole number")
+    if value < 0:
+        raise _malformed(keyword, value, "a non-negative whole number")
+    return int(value)
+
+
+def _checked_enum(enum: Any, ftype: str, *, nullable: bool) -> tuple[Any, ...] | None:
+    """An ``enum`` whose members contradict the declared ``type`` is refused.
+
+    A string enum on an integer field cannot ever be satisfied — the type check runs
+    first, so every call to that tool is denied. That is fail-closed and therefore
+    silent: the tool simply stops working, with nothing naming the source document
+    that broke it. Catching it at import puts the failure where it can be fixed.
+    """
+    if not isinstance(enum, list):
+        return None
+    expected = _TYPE_OF.get(ftype)
+    if expected is not None:
+        for member in enum:
+            if member is None and nullable:
+                continue
+            wrong_type = not isinstance(member, expected)
+            # bool is a subclass of int; an integer field's enum must not hold `true`.
+            if ftype in ("integer", "number") and isinstance(member, bool):
+                wrong_type = True
+            if wrong_type:
+                raise PolicyError(
+                    f"imported schema declares type {ftype!r} with enum member {member!r} "
+                    f"({type(member).__name__}) — no value can satisfy both, so every call to this "
+                    "tool would be denied. Fix the source document.",
+                    code="invalid_import",
+                )
+    return tuple(enum)
 
 
 def field_from_json_schema(prop: dict[str, Any], *, required: bool) -> Field:
@@ -62,7 +149,6 @@ def field_from_json_schema(prop: dict[str, Any], *, required: bool) -> Field:
         if isinstance(items, dict):
             item_type = _resolve_type(items.get("type", "any"))[0]
 
-    enum = tuple(prop["enum"]) if isinstance(prop.get("enum"), list) else None
     sensitive = prop.get("x-sensitive")
     if sensitive not in (None, "pii", "secret"):
         sensitive = None
@@ -70,17 +156,17 @@ def field_from_json_schema(prop: dict[str, Any], *, required: bool) -> Field:
     return Field(
         type=ftype,
         required=required and not nullable,
-        enum=enum,
-        max_length=prop.get("maxLength"),
-        min_length=prop.get("minLength"),
+        enum=_checked_enum(prop.get("enum"), ftype, nullable=nullable),
+        max_length=_length("maxLength", prop.get("maxLength")),
+        min_length=_length("minLength", prop.get("minLength")),
         pattern=prop.get("pattern"),
         sensitive=sensitive,
         item_type=item_type,
-        minimum=_numeric(prop.get("minimum")),
-        maximum=_numeric(prop.get("maximum")),
-        exclusive_minimum=_numeric(prop.get("exclusiveMinimum")),
-        exclusive_maximum=_numeric(prop.get("exclusiveMaximum")),
-        multiple_of=_numeric(prop.get("multipleOf")),
+        minimum=_numeric("minimum", prop.get("minimum")),
+        maximum=_numeric("maximum", prop.get("maximum")),
+        exclusive_minimum=_numeric("exclusiveMinimum", prop.get("exclusiveMinimum")),
+        exclusive_maximum=_numeric("exclusiveMaximum", prop.get("exclusiveMaximum")),
+        multiple_of=_numeric("multipleOf", prop.get("multipleOf")),
     )
 
 

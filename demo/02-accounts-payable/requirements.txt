@@ -1,0 +1,10 @@
+# The workflow used to import `langchain.agents.create_agent`, which lives in the
+# `langchain` distribution — and none of the three below pull it in, so the
+# documented install produced an environment that failed at the first import.
+# `graph.py` now builds its own decide/act loop, because it needs a checkpointer
+# and an `interrupt()` the prebuilt agent does not expose, so nothing here imports
+# `langchain` any more. Verified by importing every module of this demo with the
+# `langchain` namespace blocked at `sys.meta_path`.
+langchain-core>=1.0
+langchain-ollama>=1.0
+langgraph>=1.0

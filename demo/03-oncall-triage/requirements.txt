@@ -1,0 +1,9 @@
+# Nothing. That is the point of this demo — no framework, no SDK, no HTTP client.
+# The loop is `urllib` and the standard library.
+#
+# The one thing you do need is histos itself, and it is not on PyPI yet, so it is
+# installed from this checkout rather than named here:
+#
+#     python3.13 -m venv .venv && .venv/bin/pip install -e ../..
+#
+# `pip install -r requirements.txt` on this file is a no-op, deliberately.
