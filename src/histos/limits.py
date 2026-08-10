@@ -10,6 +10,12 @@ process (the pilot target) that is correct and needs no infra. Across processes
 or replicas it would need shared state — the same limitation any in-memory
 limiter has. We surface the caveat rather than pretend it is free.
 
+**Growth:** only the *enforcement* path allocates, and only for a key that has
+actually consumed a slot — checking a limit for a thousand identities leaves
+nothing behind. Rate state that has fallen out of the window is dropped by
+:meth:`LimitStore.prune`, which a long-lived host should call periodically; budget
+counters are permanent by definition and are never pruned.
+
 The clock is injectable so limit behaviour is deterministic under test.
 """
 
@@ -40,7 +46,13 @@ class LimitStore:
         return (identity or "<anonymous>", tool)
 
     def check(self, identity: str | None, tool: str, *, rate_limit: int | None, budget: int | None) -> str | None:
-        """Return a rule name if a limit would be exceeded, else ``None`` (read-only).
+        """Return a rule name if a limit would be exceeded, else ``None``.
+
+        Genuinely read-only: it allocates nothing and prunes nothing, so evaluating a
+        policy for analysis (``histos explain``, a change-impact replay) does not
+        perturb the store it is measuring. It used to allocate a deque per key, which
+        made ``Engine.pre`` — documented as pure — grow without bound under an
+        attacker-chosen identity string.
 
         Advisory only — use :meth:`try_consume` for enforcement, since a separate
         ``check`` then ``consume`` is not atomic across concurrent callers.
@@ -66,21 +78,48 @@ class LimitStore:
                 self._consume_locked(key)
             return rule
 
+    def prune(self) -> int:
+        """Drop rate state that has fallen out of the window; return how many keys went.
+
+        A budget is by definition for the life of the store, so budget counters are
+        never pruned — forgetting one would hand the caller its allowance back. Rate
+        state is different: once the window has passed, the entry says nothing that a
+        missing entry does not, so keeping it is pure growth. Call this from whatever
+        already runs periodically; nothing here calls it for you, because a limiter
+        that decides on its own when to forget is a limiter you cannot reason about.
+        """
+        with self._lock:
+            cutoff = self._now() - self._window
+            stale = [key for key, window in self._calls.items() if not window or window[-1] < cutoff]
+            for key in stale:
+                del self._calls[key]
+            return len(stale)
+
     def _check_locked(self, key: tuple[str, str], rate_limit: int | None, budget: int | None) -> str | None:
-        if budget is not None and self._budget_used[key] >= budget:
+        if budget is not None and self._budget_used.get(key, 0) >= budget:
             return "budget"
         if rate_limit is not None and self._recent_count(key) >= rate_limit:
             return "rate_limit"
         return None
 
     def _consume_locked(self, key: tuple[str, str]) -> None:
-        self._calls[key].append(self._now())
+        window = self._calls[key]
+        window.append(self._now())
+        # Prune where the state is already being written, so the deque for one key
+        # cannot outgrow its window even if `prune()` is never called.
+        cutoff = self._now() - self._window
+        while window and window[0] < cutoff:
+            window.popleft()
         self._budget_used[key] += 1
 
     def _recent_count(self, key: tuple[str, str]) -> int:
-        now = self._now()
-        window = self._calls[key]
-        cutoff = now - self._window
-        while window and window[0] < cutoff:
-            window.popleft()
-        return len(window)
+        """Calls inside the window, without allocating or mutating anything.
+
+        Expired entries are skipped rather than popped: this runs on the read path,
+        and a read that edits the store is not a read.
+        """
+        window = self._calls.get(key)
+        if not window:
+            return 0
+        cutoff = self._now() - self._window
+        return sum(1 for at in window if at >= cutoff)

@@ -68,6 +68,7 @@ ENGINE_FEATURES = frozenset(
         "budget",
         "canary",
         "enum",
+        "escalation",
         "numeric_range",
         "output_projection",
         "rate_limit",
@@ -95,6 +96,7 @@ _TOOL_KEYS = frozenset(
         "budget",
         "confirmation",
         "deny_secret_args",
+        "escalate",
         "output",
         "rate_limit",
         "resource",
@@ -104,6 +106,10 @@ _TOOL_KEYS = frozenset(
 )
 _RESOURCE_KEYS = frozenset({"owns", "where"})
 _CONFIRMATION_KEYS = frozenset({"expires_in", "required"})
+# An object, not a boolean, for the same reason `confirmation` is one: which tier, and
+# what it is being asked, are the fields this block will grow, and widening a boolean
+# afterwards breaks every policy in the field.
+_ESCALATE_KEYS = frozenset({"required"})
 _OUTPUT_KEYS = frozenset({"on_violation", "project", "redact_secrets", "scan_canary", "strict"})
 # `bind` values are frozen to exactly `principal.<identifier>` — a substitution, not
 # an expression language. See `_bind_from_dict`.
@@ -127,6 +133,76 @@ _FIELD_KEYS = frozenset(
 )
 _CONDITION_KEYS = frozenset({"field", "op", "principal_attr", "value"})
 _ROLE_KEYS = frozenset({"allow", "inherits"})
+
+
+# A YAML alias is a reference, not a copy: PyYAML resolves every `*a` to the *same*
+# object, so seven nested levels of `[*a,*a,...]` parse in milliseconds and cost
+# almost nothing to hold. They cost everything to *walk* — and `content_hash`,
+# `validate()` and `dump_bundle` all walk. Measured: 276 bytes of policy became 59 MB
+# of canonical JSON and 700 MB of RSS, inside `content_hash`, before any decision was
+# made. The document is still a DAG at load time, so the expanded size is cheap to
+# compute here and ruinous to discover later. The budget is far above any real policy
+# (the largest in `policies/` is under 2,000 nodes) and far below anything that hurts.
+_MAX_EXPANDED_NODES = 200_000
+
+
+def _expanded_size(node: Any, memo: dict[int, int]) -> int:
+    """How many nodes a consumer that walks this document as a *tree* would visit."""
+    if isinstance(node, dict):
+        children: Any = [x for item in node.items() for x in item]
+    elif isinstance(node, list | tuple):
+        children = node
+    else:
+        return 1
+    cached = memo.get(id(node))
+    if cached is not None:
+        return cached
+    total = 1 + sum(_expanded_size(child, memo) for child in children)
+    if total > _MAX_EXPANDED_NODES:
+        raise PolicyError(
+            f"policy expands to more than {_MAX_EXPANDED_NODES:,} nodes — refusing to load. "
+            "Aliases that reference other aliases multiply, so a small file can expand to "
+            "gigabytes the moment anything walks it (hashing, validation, dumping).",
+            code="policy_too_large",
+        )
+    memo[id(node)] = total
+    return total
+
+
+def _reject_expansion_bomb(data: dict[str, Any]) -> None:
+    try:
+        _expanded_size(data, {})
+    except RecursionError as exc:
+        raise PolicyError("policy is nested too deeply to walk — refusing to load", code="policy_too_large") from exc
+
+
+def _as_mapping(where: str, node: Any) -> dict[str, Any]:
+    """Assert a node is a mapping, as a :class:`PolicyError` rather than an AttributeError.
+
+    Every ``load_bundle`` failure has to be a ``PolicyError``: the documented contract
+    is that a host wraps ``load_policy`` in ``except PolicyError`` and fails closed, and
+    a raw ``AttributeError`` from a mistyped node walks straight past that handler and
+    out of the CLI as a traceback.
+    """
+    if not isinstance(node, dict):
+        raise PolicyError(f"{where} must be a mapping, got {type(node).__name__}", code="not_a_mapping")
+    return node
+
+
+def _as_list(where: str, node: Any) -> list[Any]:
+    """Assert a node is a list. A ``str`` is iterable, which is the whole problem.
+
+    ``canaries: SECRET-TOKEN`` (one missing bracket) iterates into nine one-character
+    canaries that deny every call containing any of those letters, and `validate()`
+    reports the policy as fine.
+    """
+    if not isinstance(node, list):
+        raise PolicyError(
+            f"{where} must be a list, got {type(node).__name__}"
+            + (" — a bare string iterates into one entry per character" if isinstance(node, str) else ""),
+            code="not_a_list",
+        )
+    return node
 
 
 def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -> None:
@@ -177,12 +253,18 @@ def _check_compatibility(data: dict[str, Any]) -> None:
 # ── field / schema (compact form used inside a bundle) ───────────────────
 
 
-def _field_from_compact(spec: dict[str, Any]) -> Field:
-    _reject_unknown("an argument/return field", spec, _FIELD_KEYS)
+def _field_from_compact(where: str, spec: Any) -> Field:
+    spec = _as_mapping(where, spec)
+    _reject_unknown(where, spec, _FIELD_KEYS)
+    # A declared `enum` that is not a list must not be silently dropped: the field
+    # would read as constrained and accept everything.
+    enum = spec.get("enum")
+    if enum is not None:
+        enum = tuple(_as_list(f"`enum` on {where}", enum))
     return Field(
         type=spec.get("type", "string"),
         required=spec.get("required", True),
-        enum=tuple(spec["enum"]) if isinstance(spec.get("enum"), list) else None,
+        enum=enum,
         max_length=spec.get("max_length"),
         min_length=spec.get("min_length"),
         pattern=spec.get("pattern"),
@@ -196,18 +278,27 @@ def _field_from_compact(spec: dict[str, Any]) -> Field:
     )
 
 
-def _schema_from_node(node: dict[str, Any] | None) -> Schema | None:
+def _schema_from_node(where: str, node: Any) -> Schema | None:
     if node is None:
         return None
+    node = _as_mapping(where, node)
     # allow an inline standard JSON Schema via {"json_schema": {...}}
     if set(node.keys()) == {"json_schema"}:
-        return schema_from_json_schema(node["json_schema"])
-    return Schema({name: _field_from_compact(spec) for name, spec in node.items()})
+        return schema_from_json_schema(_as_mapping(f"`json_schema` in {where}", node["json_schema"]))
+    return Schema({name: _field_from_compact(f"field {name!r} of {where}", spec) for name, spec in node.items()})
 
 
-def _condition_from_dict(name: str, d: dict[str, Any]) -> Constraint:
-    _reject_unknown(f"a `resource.where` condition on tool {name!r}", d, _CONDITION_KEYS)
-    kwargs: dict[str, Any] = {"field": d["field"], "op": d["op"]}
+def _required(where: str, d: dict[str, Any], key: str) -> Any:
+    if key not in d:
+        raise PolicyError(f"{where} is missing the required key {key!r}", code="missing_key")
+    return d[key]
+
+
+def _condition_from_dict(name: str, d: Any) -> Constraint:
+    where = f"a `resource.where` condition on tool {name!r}"
+    d = _as_mapping(where, d)
+    _reject_unknown(where, d, _CONDITION_KEYS)
+    kwargs: dict[str, Any] = {"field": _required(where, d, "field"), "op": _required(where, d, "op")}
     if "principal_attr" in d:
         kwargs["principal_attr"] = d["principal_attr"]
     if "value" in d:
@@ -215,27 +306,31 @@ def _condition_from_dict(name: str, d: dict[str, Any]) -> Constraint:
     return Constraint(**kwargs)
 
 
-def _resource_from_dict(name: str, d: dict[str, Any]) -> tuple[Constraint, ...]:
+def _resource_from_dict(name: str, d: Any) -> tuple[Constraint, ...]:
     """Parse the `resource:` block into constraints, `owns` first.
 
     `owns` is sugar for the row-ownership case and is listed first so a denial names
     ownership before a secondary condition — the answer a reader wants first.
     """
-    _reject_unknown(f"the `resource` block on tool {name!r}", d, _RESOURCE_KEYS)
+    where = f"the `resource` block on tool {name!r}"
+    d = _as_mapping(where, d)
+    _reject_unknown(where, d, _RESOURCE_KEYS)
     out: list[Constraint] = []
     owns = d.get("owns")
     if isinstance(owns, str):
         out.append(Constraint.owns(owns))
     elif isinstance(owns, dict):
-        _reject_unknown(f"`resource.owns` on tool {name!r}", owns, frozenset({"field", "principal_attr"}))
-        out.append(Constraint.owns(owns["field"], owns["principal_attr"]))
+        owns_where = f"`resource.owns` on tool {name!r}"
+        _reject_unknown(owns_where, owns, frozenset({"field", "principal_attr"}))
+        out.append(Constraint.owns(_required(owns_where, owns, "field"), _required(owns_where, owns, "principal_attr")))
     elif owns is not None:
         raise PolicyError(f"`resource.owns` on tool {name!r} must be a string or a mapping, got {type(owns).__name__}")
-    out.extend(_condition_from_dict(name, c) for c in d.get("where", []))
+    conditions = _as_list(f"`resource.where` on tool {name!r}", d.get("where", []))
+    out.extend(_condition_from_dict(name, c) for c in conditions)
     return tuple(out)
 
 
-def _bind_from_dict(name: str, d: dict[str, Any]) -> tuple[Binding, ...]:
+def _bind_from_dict(name: str, d: Any) -> tuple[Binding, ...]:
     """Parse `bind: {field: principal.attr}`.
 
     The grammar is frozen hard on purpose: exactly ``principal.<identifier>``. A
@@ -244,7 +339,7 @@ def _bind_from_dict(name: str, d: dict[str, Any]) -> tuple[Binding, ...]:
     inspection and every engine has to agree on an evaluator.
     """
     out: list[Binding] = []
-    for arg, ref in d.items():
+    for arg, ref in _as_mapping(f"the `bind` block on tool {name!r}", d).items():
         if not isinstance(ref, str) or not _PRINCIPAL_REF.fullmatch(ref):
             raise PolicyError(
                 f"binding for {arg!r} on tool {name!r} must be exactly 'principal.<attr>', got {ref!r} — "
@@ -255,24 +350,39 @@ def _bind_from_dict(name: str, d: dict[str, Any]) -> tuple[Binding, ...]:
     return tuple(out)
 
 
-def _tool_from_dict(name: str, d: dict[str, Any]) -> ToolContract:
+def _sensitivity_of(name: str, value: Any) -> Sensitivity:
+    try:
+        return Sensitivity(value)
+    except ValueError as exc:
+        raise PolicyError(
+            f"tool {name!r} declares sensitivity {value!r}; expected one of {', '.join(s.value for s in Sensitivity)}",
+            code="invalid_field",
+        ) from exc
+
+
+def _tool_from_dict(name: str, d: Any) -> ToolContract:
+    d = _as_mapping(f"tool {name!r}", d)
     _reject_unknown(f"tool {name!r}", d, _TOOL_KEYS)
-    confirmation = d.get("confirmation") or {}
+    confirmation = _as_mapping(f"`confirmation` on tool {name!r}", d.get("confirmation") or {})
     if confirmation:
         _reject_unknown(f"`confirmation` on tool {name!r}", confirmation, _CONFIRMATION_KEYS)
-    output = d.get("output") or {}
+    escalate = _as_mapping(f"`escalate` on tool {name!r}", d.get("escalate") or {})
+    if escalate:
+        _reject_unknown(f"`escalate` on tool {name!r}", escalate, _ESCALATE_KEYS)
+    output = _as_mapping(f"`output` on tool {name!r}", d.get("output") or {})
     if output:
         _reject_unknown(f"`output` on tool {name!r}", output, _OUTPUT_KEYS)
     return ToolContract(
         name=name,
-        args=_schema_from_node(d.get("args")),
-        returns=_schema_from_node(d.get("returns")),
+        args=_schema_from_node(f"`args` on tool {name!r}", d.get("args")),
+        returns=_schema_from_node(f"`returns` on tool {name!r}", d.get("returns")),
         access=d.get("access", "read"),
-        sensitivity=Sensitivity(d.get("sensitivity", "low")),
+        sensitivity=_sensitivity_of(name, d.get("sensitivity", "low")),
         rate_limit=d.get("rate_limit"),
         budget=d.get("budget"),
         requires_confirmation=bool(confirmation.get("required", False)),
         confirmation_expires_in=confirmation.get("expires_in"),
+        requires_escalation=bool(escalate.get("required", False)),
         constraints=_resource_from_dict(name, d.get("resource") or {}),
         bindings=_bind_from_dict(name, d.get("bind") or {}),
         scan_output_for_canary=output.get("scan_canary", True),
@@ -314,10 +424,24 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]
     return dict(pairs)
 
 
+def _reject_json_constant(token: str) -> Any:
+    """`NaN` / `Infinity` / `-Infinity` are Python's extension, not JSON.
+
+    They are also the one literal that can express a bound which parses, hashes and
+    validates cleanly and then never fires — every comparison against NaN is False.
+    Refusing them at parse time keeps the failure at the line that wrote it.
+    """
+    raise PolicyError(
+        f"policy contains the non-standard JSON literal {token} — a bound written this way "
+        "would load and then never reject anything. Write a real number, or omit the bound.",
+        code="unparseable",
+    )
+
+
 def parse_json_bundle(text: str) -> dict[str, Any]:
     """Strictly parse a JSON bundle into a dict (duplicate keys are refused)."""
     try:
-        data = json.loads(text, object_pairs_hook=_reject_duplicate_json_pairs)
+        data = json.loads(text, object_pairs_hook=_reject_duplicate_json_pairs, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as exc:
         raise PolicyError(f"policy is not valid JSON: {exc}", code="unparseable") from exc
     if not isinstance(data, dict):
@@ -329,11 +453,18 @@ def parse_json_bundle(text: str) -> dict[str, Any]:
 # have resolved (`yes`, `no`, `on`, `off`, `y`, `n`) stays the string it looks like.
 _JSON_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 
-_yaml_loader_cache: Any = None
+_yaml_loader_cache: tuple[Any, Any] | None = None
 
 
-def _strict_yaml_loader() -> Any:
-    """Build (once) a SafeLoader that rejects duplicate keys and JSON-aligns bools."""
+def _strict_yaml_loader() -> tuple[Any, Any]:
+    """Build (once) a SafeLoader that rejects duplicate keys and JSON-aligns bools.
+
+    Returns ``(yaml_module, loader_class)``. The module comes back from here rather
+    than being imported again by the caller, so the curated "pip install histos[yaml]"
+    message is the only thing a user without PyYAML can hit — a second bare
+    ``import yaml`` anywhere else would raise ModuleNotFoundError first and make this
+    branch dead code.
+    """
     global _yaml_loader_cache
     if _yaml_loader_cache is not None:
         return _yaml_loader_cache
@@ -370,15 +501,13 @@ def _strict_yaml_loader() -> Any:
     }
     StrictLoader.add_implicit_resolver(bool_tag, _JSON_BOOL, list("tTfF"))
 
-    _yaml_loader_cache = StrictLoader
-    return StrictLoader
+    _yaml_loader_cache = (yaml, StrictLoader)
+    return _yaml_loader_cache
 
 
 def parse_yaml_bundle(text: str) -> dict[str, Any]:
     """Strictly parse a YAML bundle into a dict. Requires the optional ``[yaml]`` extra."""
-    import yaml
-
-    loader = _strict_yaml_loader()
+    yaml, loader = _strict_yaml_loader()
     try:
         data = yaml.load(text, Loader=loader)  # noqa: S506 — StrictLoader derives from SafeLoader
     except PolicyError:
@@ -389,6 +518,9 @@ def parse_yaml_bundle(text: str) -> dict[str, Any]:
         raise PolicyError("policy file is empty", code="unparseable")
     if not isinstance(data, dict):
         raise PolicyError(f"policy must be a mapping at the top level, got {type(data).__name__}", code="not_an_object")
+    # Checked here as well as in `load_bundle`, because aliases are a YAML feature and
+    # this function is public: whoever parses is holding the bomb.
+    _reject_expansion_bomb(data)
     return data
 
 
@@ -422,6 +554,26 @@ def load_policy(source: str | Path | dict[str, Any]) -> Policy:
 
 # ── load ─────────────────────────────────────────────────────────────────
 
+# A canary is a token planted to be conspicuous; anything this short is a fragment
+# of one, and matching it turns every ordinary argument into an exfiltration alert.
+_MIN_CANARY_LENGTH = 6
+
+
+def _canaries(node: Any) -> list[str]:
+    tokens = _as_list("`canaries`", node)
+    for token in tokens:
+        if not isinstance(token, str):
+            raise PolicyError(
+                f"canary {token!r} is a {type(token).__name__}; canaries are string tokens", code="invalid_canary"
+            )
+        if len(token) < _MIN_CANARY_LENGTH:
+            raise PolicyError(
+                f"canary {token!r} is shorter than {_MIN_CANARY_LENGTH} characters — a token this short "
+                "appears in ordinary text, so it would deny every call and redact every result",
+                code="invalid_canary",
+            )
+    return tokens
+
 
 def load_bundle(data: dict[str, Any]) -> Policy:
     """Build a :class:`Policy` from a parsed bundle dict.
@@ -432,6 +584,8 @@ def load_bundle(data: dict[str, Any]) -> Policy:
     partially would enforce only part of what it says — see the compatibility
     gate above.
     """
+    data = _as_mapping("a policy bundle", data)
+    _reject_expansion_bomb(data)
     _reject_unknown("the policy bundle", data, _BUNDLE_KEYS)
     _check_compatibility(data)
 
@@ -445,14 +599,16 @@ def load_bundle(data: dict[str, Any]) -> Policy:
         )
     # No duplicate-name check here on purpose: as a mapping, a repeated name is a
     # duplicate key and the strict parsers reject it before this code runs.
-    tools = {name: _tool_from_dict(name, spec or {}) for name, spec in tools_node.items()}
+    # `spec is None` is the YAML spelling of a tool with no body (`t:`); anything else
+    # non-mapping is a mistake `_tool_from_dict` names.
+    tools = {name: _tool_from_dict(name, {} if spec is None else spec) for name, spec in tools_node.items()}
 
     permissions: dict[str, frozenset[str]] = {}
     role_inherits: dict[str, str] = {}
-    for role, spec in (data.get("roles") or {}).items():
-        spec = spec or {}
+    for role, raw_spec in _as_mapping("`roles`", data.get("roles") or {}).items():
+        spec = _as_mapping(f"role {role!r}", raw_spec or {})
         _reject_unknown(f"role {role!r}", spec, _ROLE_KEYS)
-        allow = spec.get("allow", [])
+        allow = _as_list(f"`allow` on role {role!r}", spec.get("allow", []))
         for entry in allow:
             if not isinstance(entry, str):
                 raise PolicyError(
@@ -468,7 +624,7 @@ def load_bundle(data: dict[str, Any]) -> Policy:
         tools=tools,
         permissions=permissions,
         role_inherits=role_inherits,
-        canaries=frozenset(data.get("canaries", [])),
+        canaries=frozenset(_canaries(data.get("canaries", []))),
         policy_id=data.get("policy_id"),
         policy_version=str(data.get("version", "0")),
         created_at=data.get("created_at"),
@@ -559,24 +715,28 @@ def _condition_to_dict(c: Constraint) -> dict[str, Any]:
 
 
 def _resource_to_node(tool: ToolContract) -> dict[str, Any]:
-    """Inverse of :func:`_resource_from_dict`: recover `owns` sugar where it applies."""
+    """Inverse of :func:`_resource_from_dict`: recover `owns` sugar where it applies.
+
+    Only the *first* constraint can become `owns`, because the loader re-emits `owns`
+    ahead of every `where` condition. Hoisting an ownership rule out of the middle of
+    the list reordered it on the way back in, and ``Policy.fingerprint`` hashes the
+    constraint list in order — so a policy that was dumped, reviewed and reloaded (what
+    `histos import --update` does) came back with a different ``content_hash`` and
+    silently invalidated every approval pinned to the old one. An ownership constraint
+    that is not first is written out longhand instead; it round-trips identically.
+    """
     node: dict[str, Any] = {}
-    where: list[dict[str, Any]] = []
-    for c in tool.constraints:
-        is_owns = c.op == "eq" and c.principal_attr is not None
-        if is_owns and "owns" not in node:
-            node["owns"] = (
-                c.field
-                if c.principal_attr == c.field
-                else {
-                    "field": c.field,
-                    "principal_attr": c.principal_attr,
-                }
-            )
-        else:
-            where.append(_condition_to_dict(c))
-    if where:
-        node["where"] = where
+    constraints = list(tool.constraints)
+    first = constraints[0] if constraints else None
+    if first is not None and first.op == "eq" and first.principal_attr is not None:
+        node["owns"] = (
+            first.field
+            if first.principal_attr == first.field
+            else {"field": first.field, "principal_attr": first.principal_attr}
+        )
+        constraints.pop(0)
+    if constraints:
+        node["where"] = [_condition_to_dict(c) for c in constraints]
     return node
 
 
@@ -605,6 +765,8 @@ def dump_bundle(policy: Policy) -> dict[str, Any]:
             entry["confirmation"] = {"required": True}
             if tool.confirmation_expires_in is not None:
                 entry["confirmation"]["expires_in"] = tool.confirmation_expires_in
+        if tool.requires_escalation:
+            entry["escalate"] = {"required": True}
         resource = _resource_to_node(tool)
         if resource:
             entry["resource"] = resource
