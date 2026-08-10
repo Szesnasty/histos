@@ -1,0 +1,39 @@
+{
+  "description": "A high-risk tool pauses; the agent cannot satisfy this itself.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "wire": {
+        "access": "write",
+        "args": {
+          "to": {
+            "type": "string"
+          }
+        },
+        "confirmation": {
+          "required": true
+        }
+      }
+    },
+    "roles": {
+      "clerk": {
+        "allow": [
+          "wire"
+        ]
+      }
+    }
+  },
+  "principal": {
+    "role": "clerk"
+  },
+  "call": {
+    "tool": "wire",
+    "args": {
+      "to": "acct-1"
+    }
+  },
+  "expect": {
+    "effect": "require_confirmation",
+    "rule": "requires_confirmation"
+  }
+}

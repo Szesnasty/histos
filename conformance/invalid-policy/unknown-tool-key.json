@@ -1,0 +1,20 @@
+{
+  "description": "A key from a newer engine must not be silently ignored — half a fleet would stop enforcing it.",
+  "expect": {
+    "code": "unknown_key"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "fetch": {
+        "args": {},
+        "url_egress_allowlist": {
+          "hosts": [
+            "a"
+          ]
+        }
+      }
+    },
+    "roles": {}
+  }
+}

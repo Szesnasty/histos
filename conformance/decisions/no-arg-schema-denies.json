@@ -1,0 +1,29 @@
+{
+  "description": "A gated tool whose arguments cannot be validated fails closed.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "mystery": {
+        "access": "read"
+      }
+    },
+    "roles": {
+      "r": {
+        "allow": [
+          "mystery"
+        ]
+      }
+    }
+  },
+  "principal": {
+    "role": "r"
+  },
+  "call": {
+    "tool": "mystery",
+    "args": {}
+  },
+  "expect": {
+    "effect": "deny",
+    "rule": "no_arg_schema"
+  }
+}

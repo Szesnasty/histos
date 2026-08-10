@@ -1,0 +1,50 @@
+{
+  "$comment": "The twin of the previous case. Equal contract_sha256 is the assertion.",
+  "kind": "mcp",
+  "source": {
+    "tools": [
+      {
+        "name": "t",
+        "description": null,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "n": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        }
+      }
+    ]
+  },
+  "expect": {
+    "contract": {
+      "args": {
+        "allow_extra": false,
+        "fields": {
+          "n": {
+            "type": "integer",
+            "required": false,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": "1",
+            "maximum": "500",
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          }
+        }
+      },
+      "returns": null
+    },
+    "schema_sha256": "sha256:e1ab1d32f86dea5f666b24adede034fec36ed6b8fc0e6777afbda61fc2f4a46f",
+    "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
+    "contract_sha256": "sha256:75296b8340268c891793a1259993e9cb7d01dfa46bd6dc0704f7fb703e0f2e97"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "description": "`owns: tenant_id` and the explicit field/principal_attr form are the same rule.",
+  "documents": [
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"args\": {}, \"resource\": {\"owns\": \"tenant_id\"}}}, \"roles\": {}}"
+    },
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"args\": {}, \"resource\": {\"owns\": {\"field\": \"tenant_id\", \"principal_attr\": \"tenant_id\"}}}}, \"roles\": {}}"
+    }
+  ]
+}

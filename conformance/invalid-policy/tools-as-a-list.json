@@ -1,0 +1,15 @@
+{
+  "description": "The pre-0.1 shape, refused with an explanation rather than a type error.",
+  "expect": {
+    "code": "tools_not_a_mapping"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": [
+      {
+        "name": "t"
+      }
+    ],
+    "roles": {}
+  }
+}

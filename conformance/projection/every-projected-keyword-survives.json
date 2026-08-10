@@ -1,0 +1,142 @@
+{
+  "$comment": "Every keyword in the projection table, in one tool. An implementation that drops one produces a different contract_sha256 and will report drift the reference engine does not.",
+  "kind": "mcp",
+  "source": {
+    "tools": [
+      {
+        "name": "make_refund",
+        "description": "Refund an order.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "order_id": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 20,
+              "pattern": "ORD-[0-9]+"
+            },
+            "amount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "multipleOf": 1
+            },
+            "rate": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            "currency": {
+              "type": "string",
+              "enum": [
+                "EUR",
+                "USD"
+              ]
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "order_id",
+            "amount"
+          ]
+        }
+      }
+    ]
+  },
+  "expect": {
+    "contract": {
+      "args": {
+        "allow_extra": false,
+        "fields": {
+          "order_id": {
+            "type": "string",
+            "required": true,
+            "enum": null,
+            "max_length": "20",
+            "min_length": "4",
+            "pattern": "ORD-[0-9]+",
+            "sensitive": null,
+            "item_type": null,
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          },
+          "amount": {
+            "type": "integer",
+            "required": true,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": "1",
+            "maximum": "500",
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": "1"
+          },
+          "rate": {
+            "type": "number",
+            "required": false,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": "0",
+            "exclusive_maximum": "1",
+            "multiple_of": null
+          },
+          "currency": {
+            "type": "string",
+            "required": false,
+            "enum": [
+              "EUR",
+              "USD"
+            ],
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          },
+          "tags": {
+            "type": "array",
+            "required": false,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": "string",
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          }
+        }
+      },
+      "returns": null
+    },
+    "schema_sha256": "sha256:22502b57a27b06d6351be5638c325a11c2ba109eb96002c2b8c8af60a8220ce1",
+    "description_sha256": "sha256:71d473960704ae7a05fc9543e4ed25b9773547d3c21822434239ddbaeb4c86af",
+    "contract_sha256": "sha256:a7794a7f8521f925f838907842c68c570610c2ab418cd4f3723f5fca8f6911a1"
+  }
+}

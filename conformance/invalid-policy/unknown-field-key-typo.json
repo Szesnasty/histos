@@ -1,0 +1,20 @@
+{
+  "description": "`maxium` is caught by the same rule that catches a future capability.",
+  "expect": {
+    "code": "unknown_key"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {
+          "x": {
+            "type": "integer",
+            "maxium": 5
+          }
+        }
+      }
+    },
+    "roles": {}
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "$comment": "A nullable field is an optional field, even when the source lists it in required[].",
+  "kind": "mcp",
+  "source": {
+    "tools": [
+      {
+        "name": "t",
+        "description": null,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "a"
+          ]
+        }
+      }
+    ]
+  },
+  "expect": {
+    "contract": {
+      "args": {
+        "allow_extra": false,
+        "fields": {
+          "a": {
+            "type": "string",
+            "required": false,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": null,
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          }
+        }
+      },
+      "returns": null
+    },
+    "schema_sha256": "sha256:b4de9170654b5c1370628eeb4e2140503a7d194fead2deecbf5bd7816b3b939f",
+    "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
+    "contract_sha256": "sha256:f8b9b4e38e17cf125fb46f7cd9833a61a3cbccf5e9e88ac5e28a06b817ad1bb7"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "expect": {
+    "code": "unknown_key"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {},
+        "resource": {
+          "owns": "tenant_id",
+          "unless": "admin"
+        }
+      }
+    },
+    "roles": {}
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "expect": {
+    "code": "unsupported_version"
+  },
+  "document": {
+    "schema_version": "histos.policy/99",
+    "tools": {},
+    "roles": {}
+  }
+}

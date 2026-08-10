@@ -1,0 +1,195 @@
+{
+  "$comment": "Histos decision vocabulary — Draft 0.1. Part of the cross-language contract: every engine must use these codes with these meanings and map them to the same public_reason. THREE NAMESPACES, because they answer different questions and a conformance suite must tell them apart: RUNTIME (a GateDecision.rule — this call was refused), POLICY (a PolicyError.code — this policy cannot be loaded at all), REVIEW (advisory findings from review_policy; not yet coded, deliberately). Adding a code is a format change; changing what one means is a breaking change.",
+  "version": "0.1",
+  "public_reasons": {
+    "$comment": "What the AGENT is told. Deliberately non-coaching: no threshold, no allowlist entry, no tenant name, no field name that reveals the rule's shape. The rich detail (rule/field/expected/received/remedy) goes to the developer and the audit sink only.",
+    "allow": "OK",
+    "deny": "ACTION_NOT_AUTHORIZED",
+    "require_confirmation": "CONFIRMATION_REQUIRED",
+    "redact": "OUTPUT_REDACTED"
+  },
+  "codes": [
+    {
+      "code": "allow",
+      "effect": "allow",
+      "phase": "pre",
+      "meaning": "Every check passed."
+    },
+    {
+      "code": "confirmed",
+      "effect": "allow",
+      "phase": "pre",
+      "meaning": "A required confirmation was satisfied by a trusted out-of-band approval."
+    },
+    {
+      "code": "unknown_tool",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "No contract exists for this tool. Deny-by-default: an ungoverned tool is never callable."
+    },
+    {
+      "code": "no_arg_schema",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The tool has a contract but no argument schema, so its arguments cannot be validated. Fail closed rather than wave the call through."
+    },
+    {
+      "code": "no_principal",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "No trusted principal was bound. Identity is bound out-of-band by the host; the engine never infers one."
+    },
+    {
+      "code": "rbac",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The principal's role has no grant for this tool, directly or through inheritance."
+    },
+    {
+      "code": "arg_schema",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "An argument failed the tool's declared schema: type, required, enum, numeric range, string length, pattern, or array element.",
+      "detail": [
+        "field",
+        "expected",
+        "received"
+      ]
+    },
+    {
+      "code": "arg_binding_unresolved",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "A bound argument could not be filled because the principal lacks the trusted attribute. The engine never injects a missing value.",
+      "detail": [
+        "field"
+      ]
+    },
+    {
+      "code": "resource_constraint",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The resolved resource does not satisfy a constraint for this principal — typically the accessed resource is not theirs.",
+      "detail": [
+        "field",
+        "expected",
+        "received"
+      ]
+    },
+    {
+      "code": "no_resource_resolver",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The tool declares resource-bound constraints but the host configured no resolver, so ownership cannot be established."
+    },
+    {
+      "code": "resource_not_found",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The resolver reported that the resource does not exist. Distinct from a mismatch and from a resolver failure."
+    },
+    {
+      "code": "resolver_error",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The resource resolver raised, or is async while the tool is sync. Fail closed."
+    },
+    {
+      "code": "canary_exfil",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "A planted canary token appeared in an argument, verbatim or after the defined normalization."
+    },
+    {
+      "code": "secret_detected",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "An argument contains a checksum-verified secret (PAN, IBAN, decodable JWT). Structural-only matches are redacted on output rather than denied.",
+      "detail": [
+        "received"
+      ]
+    },
+    {
+      "code": "injection_pattern",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "OPTIONAL, opt-in only. A static content rule matched. Heuristic, off by default, and not part of the deterministic core."
+    },
+    {
+      "code": "exfiltration_pattern",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "OPTIONAL, opt-in only. A static content rule matched. Heuristic, off by default, and not part of the deterministic core."
+    },
+    {
+      "code": "rate_limit",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "Calls per rolling window exceeded for this principal and tool."
+    },
+    {
+      "code": "budget",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "Total call budget exhausted for this principal and tool."
+    },
+    {
+      "code": "requires_confirmation",
+      "effect": "require_confirmation",
+      "phase": "pre",
+      "meaning": "The tool needs a trusted out-of-band approval bound to this exact action. The agent cannot satisfy this itself."
+    },
+    {
+      "code": "confirm_error",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The confirmation callback raised, or is async while the tool is sync. Fail closed — never treat an unavailable approver as approval."
+    },
+    {
+      "code": "internal_error",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "A check raised unexpectedly. Fail closed. This is a bug; the reason carries the exception."
+    },
+    {
+      "code": "post_redaction",
+      "effect": "redact",
+      "phase": "post",
+      "meaning": "The result was returned with content removed: canary tokens, sensitive fields the role may not see, recognised secrets, or undeclared fields dropped by output projection.",
+      "detail": [
+        "redactions"
+      ]
+    },
+    {
+      "code": "exception_redaction",
+      "effect": "redact",
+      "phase": "post",
+      "meaning": "The tool raised, and its error text carried canary tokens or recognised secrets, which were removed before the error reached the caller. An exception is the other way a tool returns content to the model, so it goes through the same content controls — but only the ones that apply to unstructured text: output projection, strict returns and sensitive-field redaction all need a declared return shape an exception does not have.",
+      "detail": [
+        "redactions"
+      ]
+    },
+    {
+      "code": "output_schema",
+      "effect": "deny | redact",
+      "phase": "post",
+      "meaning": "The tool's output did not match its declared return schema. Under strict returns this is handled per on_violation, because name-based redaction cannot protect a secret in an undeclared field."
+    }
+  ],
+  "policy_codes": {
+    "unparseable": "The document is not valid JSON/YAML, or is empty.",
+    "not_an_object": "The top level is not an object/mapping.",
+    "not_found": "The policy file does not exist.",
+    "duplicate_key": "A repeated mapping key. Never last-one-wins — the engine refuses to guess.",
+    "unknown_key": "A key this engine does not understand, at any level. Loading partially would enforce partially.",
+    "unsupported_version": "The document's schema_version is not implemented by this engine.",
+    "unsupported_feature": "requires.features names a capability this engine does not implement.",
+    "tools_not_a_mapping": "`tools` is a list (the pre-0.1 shape) rather than a mapping keyed by tool name.",
+    "invalid_binding": "A `bind` value is not exactly `principal.<attr>` — bindings are substitutions, not expressions.",
+    "invalid_grant": "A role's `allow` entry is not a plain tool name.",
+    "policy_invalid": "Any other structural problem (unclassified; new cases should get their own code)."
+  },
+  "review_codes": {
+    "$comment": "Not yet coded — review_policy currently emits prose. Coding these is a prerequisite for policy-analysis tooling and is tracked in docs/roadmap.md, not implied here."
+  }
+}

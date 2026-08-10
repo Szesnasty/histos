@@ -1,0 +1,39 @@
+{
+  "description": "Role inheritance is followed, cycle-safe.",
+  "policy": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "read_doc": {
+        "args": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "roles": {
+      "viewer": {
+        "allow": [
+          "read_doc"
+        ]
+      },
+      "editor": {
+        "inherits": "viewer",
+        "allow": []
+      }
+    }
+  },
+  "principal": {
+    "role": "editor"
+  },
+  "call": {
+    "tool": "read_doc",
+    "args": {
+      "id": 1
+    }
+  },
+  "expect": {
+    "effect": "allow",
+    "rule": "allow"
+  }
+}

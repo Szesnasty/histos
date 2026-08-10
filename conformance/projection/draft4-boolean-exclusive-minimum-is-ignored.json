@@ -1,0 +1,50 @@
+{
+  "$comment": "Draft 4 wrote exclusiveMinimum as a boolean modifier. Reading it as the number 1 would invent a bound nobody asked for, so a non-numeric value is dropped and `minimum` stands.",
+  "kind": "mcp",
+  "source": {
+    "tools": [
+      {
+        "name": "t",
+        "description": null,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "n": {
+              "type": "integer",
+              "minimum": 3,
+              "exclusiveMinimum": true
+            }
+          }
+        }
+      }
+    ]
+  },
+  "expect": {
+    "contract": {
+      "args": {
+        "allow_extra": false,
+        "fields": {
+          "n": {
+            "type": "integer",
+            "required": false,
+            "enum": null,
+            "max_length": null,
+            "min_length": null,
+            "pattern": null,
+            "sensitive": null,
+            "item_type": null,
+            "minimum": "3",
+            "maximum": null,
+            "exclusive_minimum": null,
+            "exclusive_maximum": null,
+            "multiple_of": null
+          }
+        }
+      },
+      "returns": null
+    },
+    "schema_sha256": "sha256:b34b26b7c2d056f91b24b602371700fc6ca7bfc8468ddfb034775ba33e1b6345",
+    "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
+    "contract_sha256": "sha256:d91483e0a333fb22ffbe024f1b5f7ed8968e80c47401a477d49dd6c65d5007a5"
+  }
+}

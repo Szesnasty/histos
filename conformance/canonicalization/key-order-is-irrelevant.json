@@ -1,0 +1,13 @@
+{
+  "description": "Canonical serialization sorts; source order must not leak into the hash.",
+  "documents": [
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"t\": {\"args\": {}}}, \"roles\": {\"r\": {\"allow\": [\"t\"]}}}"
+    },
+    {
+      "format": "json",
+      "text": "{\"roles\": {\"r\": {\"allow\": [\"t\"]}}, \"tools\": {\"t\": {\"args\": {}}}, \"schema_version\": \"histos.policy/0.1\"}"
+    }
+  ]
+}

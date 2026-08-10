@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://histos.dev/spec/policy-0.1.schema.json",
+  "$comment": "Histos Policy Format, Draft 0.1. The $id is an identifier first, but it is meant to resolve: this host MUST serve this document before Draft 0.1 is published, because changing an $id after publication breaks every $ref that points at it. NOT STABLE: see docs/policy-format-draft-0.1.md for what is still open. An engine MUST reject any document with a property not described here (additionalProperties is false everywhere on purpose — a policy an engine only partly understands would enforce only part of what it says).",
+  "title": "Histos Policy, Draft 0.1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tools"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "The FORMAT version. An engine refuses a value it does not implement.",
+      "const": "histos.policy/0.1"
+    },
+    "version": {
+      "description": "The ruleset's own revision, chosen by whoever authors the policy. Opaque to the engine; recorded on every audit record.",
+      "type": "string"
+    },
+    "policy_id": {
+      "description": "A stable name for this policy, for humans and for the audit trail. Metadata: excluded from content_hash, so renaming a policy does not invalidate approvals bound to its hash.",
+      "type": "string"
+    },
+    "created_at": {
+      "description": "ISO-8601. Set by the exporter; never auto-stamped, so a policy is reproducible.",
+      "type": "string"
+    },
+    "requires": {
+      "description": "Capabilities this policy depends on. An engine that does not implement one MUST refuse the whole policy rather than enforce it partially. This — not an engine version — is the portable contract, because a version number stops meaning anything once more than one engine exists.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "features": {
+          "description": "A load-time compatibility assertion, not policy content. An engine that does not implement every feature listed here REFUSES to load the document rather than enforcing the subset it understands. Excluded from content_hash: if it passed, it changed no decision.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "canaries": {
+      "description": "Planted tokens. Denied verbatim in an argument, redacted from output. A 'prove it' oracle, not exfiltration prevention.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "tools": {
+      "description": "Keyed by tool name. A mapping, not a list: a repeated tool name is then a duplicate key, which canonical parsing already refuses.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/toolName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/tool"
+      }
+    },
+    "roles": {
+      "description": "Keyed by role name. Role-centric rather than inline on the tool, because the reviewable question is 'what can this role do' and because inheritance has no home in the inline form.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/role"
+      }
+    }
+  },
+  "$defs": {
+    "toolName": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]*$"
+    },
+    "principalRef": {
+      "description": "A reference to a trusted principal attribute. Deliberately NOT an expression language: exactly 'principal.<attr>' and nothing else.",
+      "type": "string",
+      "pattern": "^principal\\.[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "description": "'write' marks a tool whose effects are not undone by not reading the result. Drives review warnings and the IDOR refusal.",
+          "enum": [
+            "read",
+            "write"
+          ],
+          "default": "read"
+        },
+        "sensitivity": {
+          "description": "How much damage this tool's data or effect represents. Does not change a verdict on its own - it drives review severity, so a high or critical read with no resource constraint is flagged rather than passing silently. Default: low.",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "default": "low"
+        },
+        "rate_limit": {
+          "description": "Maximum calls per rolling window, per principal.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "budget": {
+          "description": "Maximum total calls, per principal, for the life of the limit store.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "args": {
+          "description": "The argument contract, and it is deny-by-default: an argument not declared here is REFUSED, not ignored. A gated tool with no args block at all is denied outright rather than waved through.",
+          "$ref": "#/$defs/schema"
+        },
+        "returns": {
+          "description": "The return contract. Names the fields output projection is allowed to keep and gives sensitive-field redaction something to match on. Without it the post-gate has almost nothing to work with.",
+          "$ref": "#/$defs/schema"
+        },
+        "bind": {
+          "description": "Arguments overwritten with trusted principal attributes BEFORE any check runs. This dominates validation: a wrong value becomes un-passable rather than merely detected. Fail-closed if the principal lacks the attribute.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/principalRef"
+          }
+        },
+        "resource": {
+          "description": "Row-level authorization: not 'may this role call this tool' but 'may it act on THIS record'. Requires a resource_resolver on the host that fetches the real record; a resolver that echoes an argument re-creates the IDOR this block exists to prevent.",
+          "$ref": "#/$defs/resource"
+        },
+        "confirmation": {
+          "description": "Require a trusted out-of-band approval, bound to this exact tool, arguments and principal, before the call proceeds. Approval is a host callback, never a tool - so an injected agent cannot approve itself. With no callback wired the default is DENY.",
+          "$ref": "#/$defs/confirmation"
+        },
+        "output": {
+          "description": "What is allowed to leave the boundary and re-enter the model, including what comes back when the tool raises.",
+          "$ref": "#/$defs/output"
+        },
+        "deny_secret_args": {
+          "description": "Deny a checksum-verified secret passed as an argument.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "schema": {
+      "description": "A deliberately tiny validator — not JSON Schema. Field names follow JSON Schema vocabulary so imported OpenAPI/MCP schemas map across without a rename. Nested objects are shallow-checked; see SECURITY.md.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/field"
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "description": "The declared type, checked before the tool runs. 'object' is checked only for BEING an object - inner fields are not validated (see SECURITY.md); validate those inside the tool or keep arguments flat.",
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "array",
+            "object",
+            "any"
+          ],
+          "default": "string"
+        },
+        "required": {
+          "description": "Whether the argument must be present. Default: true. A missing required argument is a denial, not a None passed through to the tool.",
+          "type": "boolean",
+          "default": true
+        },
+        "enum": {
+          "description": "The complete set of permitted values. Anything else is denied - this is an allow-list, like every other construct in the format.",
+          "type": "array",
+          "minItems": 1
+        },
+        "min_length": {
+          "description": "Minimum string length, inclusive.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_length": {
+          "description": "Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "pattern": {
+          "description": "Compiled at load, so an invalid regex fails loudly. NOT ReDoS-safe: treat patterns imported from third-party schemas as untrusted.",
+          "type": "string"
+        },
+        "minimum": {
+          "description": "Inclusive lower bound for a number. Expressed in the tool's own units - keep money in minor units so no implementation has to agree about floats.",
+          "type": "number"
+        },
+        "maximum": {
+          "description": "Inclusive upper bound for a number. This is the ceiling a hijacked model cannot raise, and it belongs here rather than in application code precisely so a reviewer can find it.",
+          "type": "number"
+        },
+        "exclusive_minimum": {
+          "description": "Exclusive lower bound for a number: the value must be strictly greater.",
+          "type": "number"
+        },
+        "exclusive_maximum": {
+          "description": "Exclusive upper bound for a number: the value must be strictly less.",
+          "type": "number"
+        },
+        "multiple_of": {
+          "description": "The number must be an exact multiple of this. Useful for step sizes and whole-unit amounts.",
+          "type": "number",
+          "not": {
+            "const": 0
+          }
+        },
+        "item_type": {
+          "description": "Element type for an array. String elements are bounded by the same length/pattern caps as a scalar string.",
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "object",
+            "any"
+          ]
+        },
+        "sensitive": {
+          "description": "Return schemas only: redacted on the way out unless the principal may view this field.",
+          "enum": [
+            "pii",
+            "secret"
+          ]
+        }
+      }
+    },
+    "resource": {
+      "description": "Row-level authorization against the resource ACTUALLY accessed, fetched by a trusted host-provided resolver. Never against a caller-declared argument — that proves self-declaration, not ownership (IDOR).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "owns": {
+          "description": "The IDOR-safe shorthand. 'owns: tenant_id' means: resolve the accessed resource, compare its tenant_id to the principal's tenant_id. A string uses the same name on both sides; the object form maps different names.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "principal_attr"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "principal_attr": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "where": {
+          "description": "Further conditions on RESOLVED resource attributes, e.g. refuse to act on a closed record. Compares against a literal or a trusted principal attribute — never against another argument.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          }
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "required": [
+        "field",
+        "op"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "required": [
+            "principal_attr"
+          ]
+        }
+      ],
+      "properties": {
+        "field": {
+          "description": "The attribute to read on the RESOLVED resource - the record the resolver fetched, not the arguments of the call. Comparing an argument against itself proves nothing, which is why the format cannot express it.",
+          "type": "string"
+        },
+        "op": {
+          "description": "The comparison. Only comparisons exist: the format is deliberately not an expression language, because an expression language stops being deterministic by construction.",
+          "enum": [
+            "eq",
+            "ne",
+            "in",
+            "not_in",
+            "le",
+            "lt",
+            "ge",
+            "gt"
+          ]
+        },
+        "value": {
+          "description": "A literal to compare the resource attribute against. Mutually exclusive with principal_attr."
+        },
+        "principal_attr": {
+          "description": "A TRUSTED principal attribute to compare the resource attribute against, bound out-of-band by the host. Mutually exclusive with value. This is the trusted half of the comparison; the attacker supplies the other half and cannot change what the constraint requires.",
+          "type": "string"
+        }
+      }
+    },
+    "confirmation": {
+      "description": "A trusted, out-of-band approval bound to this exact action. An object rather than a boolean because approver rules will need fields, and widening a boolean later is a breaking change.",
+      "type": "object",
+      "required": [
+        "required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "description": "Turn confirmation on for this tool. The gate returns REQUIRE_CONFIRMATION until a trusted approval for this exact action is presented.",
+          "type": "boolean"
+        },
+        "expires_in": {
+          "description": "Seconds an approval stays usable once granted.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "output": {
+      "description": "What may leave the tool and reach the model.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project": {
+          "description": "Deny-by-default on the return surface: drop any field not declared in 'returns'. A secret in an undeclared field is out of reach of name-based redaction.",
+          "type": "boolean",
+          "default": false
+        },
+        "strict": {
+          "description": "Validate the output against 'returns' and act on a mismatch per on_violation.",
+          "type": "boolean",
+          "default": false
+        },
+        "on_violation": {
+          "description": "What to do when strict returns is on and the result does not match the declared schema. 'redact_all' replaces the whole output, 'deny' refuses the call, 'allow' opts out. Default: redact_all - because name-based redaction cannot protect a secret sitting in a field nobody declared.",
+          "enum": [
+            "redact_all",
+            "deny",
+            "allow"
+          ],
+          "default": "redact_all"
+        },
+        "scan_canary": {
+          "description": "Remove planted canary tokens from the result. Default: true. Verbatim matching only: this is a 'prove it' oracle, not exfiltration prevention.",
+          "type": "boolean",
+          "default": true
+        },
+        "redact_secrets": {
+          "description": "Remove recognised secrets (checksum-verified card numbers, IBANs, decodable JWTs) from anywhere in the result. Default: true.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inherits": {
+          "description": "Single parent. Cycle-safe at evaluation; a parent that does not exist is a load error.",
+          "type": "string"
+        },
+        "allow": {
+          "description": "Tools this role may call. Anything not listed is denied.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/toolName"
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

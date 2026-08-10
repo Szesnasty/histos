@@ -1,0 +1,17 @@
+{
+  "description": "A bound written as `500` and the same bound written as `500.0` are one policy, and must hash to one value. This is the case a JavaScript implementation cannot get right by accident: Python's json.loads keeps the int/float distinction the document wrote, and JSON.parse collapses both to one number. An engine that hashes them differently is reproducible only in the language it was written in, which for a hash that approvals and policy pinning are bound to is the same as not being reproducible. Every number reaching the hash is therefore rendered as decimal text first: integral values without a fractional part, the rest in shortest round-trip form.",
+  "documents": [
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"make_refund\": {\"args\": {\"amount\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 500, \"multiple_of\": 1}}, \"rate_limit\": 10, \"budget\": 20}}, \"roles\": {}}"
+    },
+    {
+      "format": "json",
+      "text": "{\"schema_version\": \"histos.policy/0.1\", \"tools\": {\"make_refund\": {\"args\": {\"amount\": {\"type\": \"integer\", \"minimum\": 1.0, \"maximum\": 500.0, \"multiple_of\": 1.0}}, \"rate_limit\": 10, \"budget\": 20}}, \"roles\": {}}"
+    },
+    {
+      "format": "yaml",
+      "text": "schema_version: histos.policy/0.1\ntools:\n  make_refund:\n    args:\n      amount: { type: integer, minimum: 1.0, maximum: 500.00, multiple_of: 1 }\n    rate_limit: 10\n    budget: 20\nroles: {}\n"
+    }
+  ]
+}
