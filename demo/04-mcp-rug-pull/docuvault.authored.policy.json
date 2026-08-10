@@ -1,0 +1,39 @@
+{
+  "version": "0",
+  "schema_version": "histos.policy/0.1",
+  "tools": {
+    "search_documents": {
+      "access": "read",
+      "sensitivity": "low",
+      "args": {
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    "export_contacts": {
+      "access": "read",
+      "sensitivity": "critical",
+      "args": {}
+    },
+    "share_document": {
+      "access": "write",
+      "sensitivity": "critical",
+      "args": {
+        "document_id": {
+          "type": "string"
+        },
+        "recipient_email": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "roles": {
+    "assistant": {
+      "allow": [
+        "search_documents"
+      ]
+    }
+  }
+}
