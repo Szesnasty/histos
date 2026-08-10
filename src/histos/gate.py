@@ -19,20 +19,40 @@ never blocks or modifies — a dry-run for calibration. Observe records carry
 ``executed: true`` next to a ``deny`` effect so watching is never mistaken for
 protecting.
 
+**Host callbacks**: three seams, all passed to :class:`Gate` and all guarded the same
+way — ``resource_resolver`` (fetch the real record a constraint judges), ``confirm``
+(a trusted human approval) and ``escalate`` (a semantic tier). One raising, or being
+async while the tool is sync, is a denial rather than an escape. Leaving one unwired
+is a denial too, for every call the policy routes through it: ``no_resource_resolver``
+and ``no_escalation_tier`` exist so a control the policy asks for is never quietly
+skipped by a host that did not finish wiring it.
+
 **Async**: a coroutine tool is detected automatically and gets an
-``async`` wrapper; the ``resource_resolver`` and ``confirm`` callbacks may then be
-sync or async. Detection unwraps decorators and ``functools.partial`` and checks a
+``async`` wrapper; the ``resource_resolver``, ``confirm`` and ``escalate`` callbacks
+may then be sync or async. Detection unwraps decorators and ``functools.partial`` and checks a
 callable object's ``__call__``; a genuinely ambiguous target raises at wrap time
-rather than silently picking a path.
+rather than silently picking a path. A **streaming** tool (a generator or async
+generator) is refused at wrap time: the output half of the gate can only inspect a
+materialised value, and a gate that silently skips it is worse than none.
+
+**Identity is per-context, not per-thread-forever.** ``use_principal`` unbinds on
+exit. Bare ``set_principal`` without :func:`reset_principal` leaves the identity
+bound in *that* context — on a pooled worker thread the next task submitted to the
+same worker inherits it. Use ``use_principal`` (or reset the token) in any pooled
+or long-lived worker.
 """
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import os
+import sys
+import threading
 import time
 import warnings
+import weakref
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -45,11 +65,12 @@ from histos.audit import AuditRecord, AuditSink, InMemoryAuditSink, digest_args
 from histos.bundle import load_policy
 from histos.content_rules import ContentRules
 from histos.contracts import Effect, GateDecision, GateRequest, Policy, Principal
-from histos.engine import Engine, ResourceResolver
+from histos.engine import Engine, EscalationTier, ResourceResolver, for_callback
 from histos.errors import GateConfirmationRequired, GateDenied, PolicyError, ToolErrorRedacted
 from histos.infer import infer_contract, infer_schema
 from histos.limits import LimitStore
 from histos.review import PolicyReview, review_policy
+from histos.schema import Schema
 
 # Anything `load_policy` accepts, plus an already-built Policy and None (which
 # means "empty policy" — every call then denies by default).
@@ -60,7 +81,14 @@ _current_principal: ContextVar[Principal | None] = ContextVar("histos_principal"
 
 
 def set_principal(principal: Principal) -> Token[Principal | None]:
-    """Bind the current trusted principal; returns a token for :func:`reset_principal`."""
+    """Bind the current trusted principal; returns a token for :func:`reset_principal`.
+
+    The token is not optional bookkeeping. A context variable stays bound until it is
+    reset, so on a pooled worker (``ThreadPoolExecutor``, a WSGI worker) an identity
+    set and never reset is still bound when the *next* task lands on that worker, and
+    that task runs as the previous caller. :func:`use_principal` resets on exit and is
+    the path to reach for.
+    """
     return _current_principal.set(principal)
 
 
@@ -85,7 +113,17 @@ def _coerce_policy(policy: PolicySource) -> Policy:
     if policy is None:
         return Policy()
     if isinstance(policy, Policy):
-        return policy
+        # A Gate owns its ruleset. `Policy` is frozen but its `tools`/`permissions`
+        # dicts are not, so aliasing the caller's object meant one Gate's `protect()`
+        # rewrote the ruleset of every other Gate holding it, and a grant added to the
+        # dict after construction took effect against a `policy_hash` that no longer
+        # described the policy that decided.
+        return replace(
+            policy,
+            tools=dict(policy.tools),
+            permissions=dict(policy.permissions),
+            role_inherits=dict(policy.role_inherits),
+        )
     return load_policy(policy)
 
 
@@ -114,7 +152,7 @@ def _resolve_fixed_principal(fixed_principal: Principal | None, principal: Princ
     return principal
 
 
-# ── async detection ────────────────────────────────────────────
+# ── unwrapping ─────────────────────────────────────────────────
 
 
 def _unwrap_target(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -132,6 +170,56 @@ def _unwrap_target(fn: Callable[..., Any]) -> Callable[..., Any]:
             return target
         target = unwrapped
     return target
+
+
+# ── wrapper metadata (complete mediation) ────────────────────────────────
+
+# What a framework actually reads off a tool. LangChain also infers an argument
+# schema from the signature, which is pinned separately.
+_WRAPPER_METADATA = ("__module__", "__name__", "__qualname__", "__doc__")
+
+
+def _adopt_metadata(wrapper: Any, tool: Any, tool_name: str) -> None:
+    """Give ``wrapper`` the tool's identity without giving away the tool itself.
+
+    ``functools.wraps`` is the idiomatic way to do this and is exactly wrong for a
+    security wrapper, on two counts. It publishes ``__wrapped__`` — a documented,
+    public pointer at the *ungated* callable that ``inspect.unwrap``,
+    ``inspect.signature(follow_wrapped=True)`` and every decorator-aware framework
+    follow — and its ``WRAPPER_UPDATES`` step copies the target's whole instance
+    ``__dict__``, so gating a callable object holding ``self.func = raw_tool``
+    republishes the raw tool as ``wrapper.func``. Popping ``__wrapped__`` afterwards
+    closes the first hole and not the second.
+
+    So nothing is copied wholesale: the metadata attributes are set by name, and the
+    signature is pinned explicitly because losing ``__wrapped__`` is what would
+    otherwise cost a framework its inferred arg schema.
+    """
+    for attr in _WRAPPER_METADATA:
+        value = getattr(tool, attr, None)
+        if value is not None:
+            setattr(wrapper, attr, value)
+    if getattr(tool, "__name__", None) is None:
+        # A partial or a callable object carries no __name__; the gate knows the name.
+        wrapper.__name__ = tool_name
+        wrapper.__qualname__ = tool_name
+    with contextlib.suppress(TypeError, ValueError):  # a C callable has no signature
+        wrapper.__signature__ = inspect.signature(tool)
+    # Defence in depth at the one chokepoint every wrapping path funnels through: if a
+    # later edit puts `functools.wraps` back above this call, the pointer it publishes
+    # still does not survive.
+    wrapper.__dict__.pop("__wrapped__", None)
+    # Set last, so nothing above can overwrite it. This is the one attribute a caller
+    # can interrogate on the *object* they are about to hand a framework, which is the
+    # only way to catch a `protect()` result that was computed and then dropped — the
+    # Gate records that `wrap()` was called, never what the caller did with the return
+    # value. `guard_callable` copies it onto the adapter's own wrapper for the same
+    # reason. It publishes a name, never a callable: nothing here is reachable through
+    # it. See :meth:`Gate.ungated_tools`.
+    wrapper.__gate_name__ = tool_name
+
+
+# ── async / streaming detection ────────────────────────────────
 
 
 def _is_coroutine_callable(fn: Any) -> bool:
@@ -162,6 +250,104 @@ def _detect_async(tool: Callable[..., Any], tool_name: str) -> bool:
     return False
 
 
+def _streaming_kind(fn: Any) -> str | None:
+    """``"generator"`` / ``"async generator"`` if calling ``fn`` yields, else ``None``."""
+    # Same reason as `_is_coroutine_callable`: this needs the `__call__` *descriptor*
+    # to ask whether it is a generator function, which `callable()` cannot answer.
+    for candidate in (fn, _unwrap_target(fn), getattr(type(fn), "__call__", None)):  # noqa: B004
+        if candidate is None:
+            continue
+        if inspect.isasyncgenfunction(candidate):
+            return "async generator"
+        if inspect.isgeneratorfunction(candidate):
+            return "generator"
+    return None
+
+
+def _uninspectable_kind(result: Any) -> str | None:
+    """What kind of un-post-gateable thing ``result`` is, if it is one.
+
+    The post chain traverses str/bytes/dict/list/tuple/set. A coroutine, generator or
+    async generator carries its payload *behind* an iteration the gate never performs,
+    so every output control — canary redaction, projection, secret scanning — would
+    report ``allow`` on content nothing inspected.
+    """
+    if inspect.isasyncgen(result):
+        return "async generator"
+    if inspect.isgenerator(result):
+        return "generator"
+    if inspect.isawaitable(result):
+        return "coroutine"
+    return None
+
+
+def _is_control_flow(exc: BaseException) -> bool:
+    """True for the ``BaseException``\\ s that are host control flow, not tool output.
+
+    Substituting a redacted exception for one of these would turn a cancellation into
+    a hang and a Ctrl-C into a silent no-op, so they always propagate as themselves.
+    ``asyncio`` is looked up in ``sys.modules`` rather than imported: importing it
+    costs most of this package's cold start, and no ``CancelledError`` instance can
+    exist before something else has imported it.
+    """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+        return True
+    asyncio = sys.modules.get("asyncio")
+    return asyncio is not None and isinstance(exc, asyncio.CancelledError)
+
+
+# ── asking an object whether it is gated ─────────────────────────────────
+
+# Where a framework keeps the callable it will actually invoke. LangChain's
+# `StructuredTool` splits sync and async across `func`/`coroutine`; a plain callable
+# is itself. Kept to a short, named list rather than a search of `__dict__`: a probe
+# that hunts for *any* attribute holding a gated callable would report "gated" for a
+# tool object that merely stores one next to the ungated one it actually calls.
+_TOOL_CALLABLE_ATTRS = ("func", "coroutine")
+
+
+def _gate_stamp(tool: Any) -> str | None:
+    """The tool name this object is gated under, or None if nothing here is gated."""
+    for attr in (None, *_TOOL_CALLABLE_ATTRS):
+        candidate = tool if attr is None else getattr(tool, attr, None)
+        stamp = getattr(candidate, "__gate_name__", None)
+        if isinstance(stamp, str):
+            return stamp
+    return None
+
+
+def _exposed_name(tool: Any) -> str:
+    """The name the agent sees this tool under.
+
+    ``name`` first, because that is the framework's name for the tool and the one the
+    model calls; ``__name__`` is the plain-callable case. A tool that answers to
+    neither cannot be reported on at all, so it is refused rather than skipped —
+    skipping is how an ungated tool ends up absent from the report that exists to find
+    ungated tools.
+    """
+    for attr in ("name", "__name__"):
+        value = getattr(tool, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    raise PolicyError(
+        f"cannot determine the exposed name of {tool!r}: it has neither `name` nor `__name__`. "
+        "Pass the tool objects the agent will be handed, or their names as strings."
+    )
+
+
+def _schema_constrains(schema: Schema) -> bool:
+    """Whether an inferred schema can actually reject a call.
+
+    A signature with unannotated parameters yields ``any``-typed fields and ``**kwargs``
+    yields ``allow_extra``; either way the "schema" accepts every argument of every
+    type. Standing that in for the ``no_arg_schema`` deny would replace a refusal with
+    the appearance of validation.
+    """
+    if schema.allow_extra:
+        return False
+    return all(f.type != "any" for f in schema.fields.values())
+
+
 # ── protect() result ─────────────────────────────────────────────────────
 
 
@@ -175,7 +361,11 @@ class ProtectResult:
     :class:`~histos.review.PolicyReview` for the resulting policy.
 
     Iterating the result yields the wrapped tools, so
-    ``agent.tools = list(protect(tools, policy=p))`` reads naturally.
+    ``agent.tools = list(protect(tools, policy=p))`` reads naturally — and reads
+    naturally is the point. These are **new** objects; the originals stay alive and
+    ungated, so a result that is computed and dropped protects nothing while every
+    name-based report stays green. :meth:`Gate.ungated_tools` is the assertion that
+    catches it, and it has to be asked of the objects the agent is handed.
     """
 
     tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
@@ -209,29 +399,45 @@ class Gate:
         audit: AuditSink | None = None,
         limits: LimitStore | None = None,
         confirm: Callable[[GateRequest], Any] | None = None,
+        confirm_suspends: tuple[type[BaseException], ...] = (),
         content_rules: ContentRules | None = None,
         resource_resolver: ResourceResolver | None = None,
+        escalate: EscalationTier | None = None,
         mode: str | None = None,
         enforcement: str | None = None,
         audit_key: bytes | None = None,
         strict: bool = False,
     ) -> None:
         self.enforcement = _resolve_mode(mode, enforcement)
-        self.policy = _coerce_policy(policy)
+        # The setter takes a `PolicySource` and coerces it; mypy type-checks the
+        # assignment against the *getter*, which is narrower by design.
+        self.policy = policy  # type: ignore[assignment]
         if strict:
             issues = self.policy.validate()
             if issues:
                 raise PolicyError("invalid policy: " + "; ".join(issues))
         self.limits = limits if limits is not None else LimitStore()
-        self.engine = Engine(self.policy, self.limits, content_rules=content_rules, resource_resolver=resource_resolver)
+        self.engine = Engine(
+            self.policy,
+            self.limits,
+            content_rules=content_rules,
+            resource_resolver=resource_resolver,
+            escalate=escalate,
+        )
         self.audit = audit if audit is not None else InMemoryAuditSink()
         self._enforce = self.enforcement == "enforce"
         self._confirm = confirm
+        self._confirm_suspends = confirm_suspends
         # Per-Gate HMAC key so audit digests resist brute-forcing low-entropy args
         # . Pass a stable key to correlate digests across processes.
         self._audit_key = audit_key if audit_key is not None else os.urandom(32)
         self._decision_seq = 0
+        self._seq_lock = threading.Lock()
         self._wrapped_tools: set[str] = set()
+        # The wrappers this Gate handed back, by identity. Weak, so a Gate does not keep
+        # every tool it ever wrapped alive, and identity-compared rather than hashed —
+        # a framework's tool object is often an unhashable model instance.
+        self._wrappers: list[weakref.ReferenceType[Any]] = []
         self._refresh_policy_hash()
 
     @property
@@ -239,8 +445,28 @@ class Gate:
         """The public spelling of :attr:`enforcement`."""
         return self.enforcement
 
+    @property
+    def policy(self) -> Policy:
+        return self._policy
+
+    @policy.setter
+    def policy(self, policy: PolicySource) -> None:
+        """Swap the ruleset, and make the swap actually take effect.
+
+        ``Engine`` holds its own reference, so plain attribute assignment used to be a
+        silent no-op: ``gate.policy = tightened`` read like a revocation and enforced
+        the old ruleset forever. It also has to re-hash, because ``policy_hash`` is
+        what ties an audit record to the ruleset that produced it — a stale hash is a
+        record that names a policy which did not decide.
+        """
+        self._policy = _coerce_policy(policy)
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            engine.policy = self._policy
+        self._refresh_policy_hash()
+
     def _refresh_policy_hash(self) -> None:
-        self._policy_hash = self.policy.content_hash()
+        self._policy_hash = self._policy.content_hash()
 
     # ── coverage / "no silent bypass" ─────
 
@@ -248,20 +474,90 @@ class Gate:
         """Tools the policy declares that were never actually wrapped."""
         return set(self.policy.tools) - self._wrapped_tools
 
-    def coverage(self, tool_names: Iterable[str]) -> dict[str, list[str]]:
+    def _mediates(self, tool: Any, exposed_name: str) -> bool:
+        """Whether a call to ``tool`` goes through this Gate's decision.
+
+        Two questions, because neither answers the whole thing:
+
+        * **identity** — is this object one *this* Gate produced? Exact, and the only
+          form that separates "gated" from "gated by the strict gate CI is asserting
+          against" when a process builds more than one.
+        * **the stamp** — every wrapper carries ``__gate_name__``, and an adapter that
+          re-wraps one (``guard_callable``) copies it onto the object it hands the
+          framework. Identity cannot see through that extra layer; the stamp can. The
+          exposed name has to match it: a tool published as ``wire_transfer`` whose
+          callable was gated as ``read_balance`` is enforcing the wrong contract.
+
+        A tool that answers neither is reported ungated. That direction is deliberate:
+        a false alarm costs a CI run, a false all-clear costs the whole gate.
+        """
+        if any(ref() is tool for ref in self._wrappers):
+            return True
+        return _gate_stamp(tool) == exposed_name
+
+    def ungated_tools(self, tools: Iterable[Any]) -> list[str]:
+        """Names of the tools in ``tools`` whose execution this Gate does not mediate.
+
+        The check :meth:`coverage` cannot make from names alone. ``protect()`` and
+        ``wrap()`` return **new** objects and leave the originals alive, so a caller who
+        drops the return value hands the agent the ungated tools while every name-based
+        report stays green — the Gate knows ``wrap()`` was called and nothing about what
+        the caller did with the result. Ask the objects instead::
+
+            tools = protect_tools(tools, gate=g)      # ← keep the return value
+            assert not g.ungated_tools(tools), "handed the framework ungated tools"
+
+        Put that next to where the agent is constructed rather than in a lint step;
+        the failure it catches is a missing assignment on the line above it.
+
+        A string raises rather than passing: a name cannot answer this question, and a
+        check that silently degrades to "clean" for the input somebody reaches for
+        first is worse than no check.
+        """
+        ungated: list[str] = []
+        for tool in tools:
+            if isinstance(tool, str):
+                raise PolicyError(
+                    f"ungated_tools() needs the live tool objects, got the name {tool!r}. "
+                    "A name cannot say whether the object the agent will be handed is the "
+                    "wrapped one — that is the whole question. Use coverage() for names."
+                )
+            name = _exposed_name(tool)
+            if not self._mediates(tool, name):
+                ungated.append(name)
+        return sorted(ungated)
+
+    def coverage(self, tools: Iterable[Any]) -> dict[str, list[str]]:
         """Compare the tools exposed to the agent against the policy (Phase 0.1).
 
-        ``undeclared`` — exposed to the agent but **not** in the policy: a silent gap
-        (a forgotten tool the agent can call ungated at the framework layer). This is
-        what ``histos coverage`` fails CI on. ``unwrapped`` — declared but never
-        wrapped by this Gate.
+        Accepts the live tool objects **or** their names. The first three keys are the
+        same question as ever, answered from names:
+
+        ``covered`` — exposed and declared. ``undeclared`` — exposed to the agent but
+        **not** in the policy: a silent gap (a forgotten tool the agent can call ungated
+        at the framework layer). This is what ``histos coverage`` fails CI on.
+        ``unwrapped`` — declared but never wrapped by this Gate.
+
+        Two keys answer the question names cannot, and they are the reason to pass
+        objects:
+
+        ``ungated`` — exposed, and this Gate does not mediate it (see
+        :meth:`ungated_tools`). This is what catches a discarded ``protect()`` result,
+        where all three name-based keys report clean while every call runs unchecked.
+        ``unchecked`` — passed as a name, so that question could not be asked at all.
+        It exists so a name-based report cannot be *read* as an all-clear it never gave.
         """
-        exposed = set(tool_names)
+        entries = list(tools)  # materialised: a generator would be consumed by the split
+        names = [entry for entry in entries if isinstance(entry, str)]
+        objects = [entry for entry in entries if not isinstance(entry, str)]
+        exposed = set(names) | {_exposed_name(obj) for obj in objects}
         declared = set(self.policy.tools)
         return {
             "covered": sorted(exposed & declared),
             "undeclared": sorted(exposed - declared),
             "unwrapped": sorted(declared - self._wrapped_tools),
+            "ungated": self.ungated_tools(objects),
+            "unchecked": sorted(names),
         }
 
     # ── shared per-call steps (identical on the sync and async paths) ──
@@ -332,14 +628,42 @@ class Gate:
         tool_name = name or getattr(tool, "__name__", None)
         if not tool_name:
             raise PolicyError("cannot determine tool name; pass name=...")
+
+        # A streaming tool is refused here rather than wrapped. Calling one returns a
+        # generator immediately, so the post-gate would scan the *iterator object* and
+        # report `allow` while every value the tool actually yields — the canary, the
+        # secret, the field the policy projects away — flows past untouched. Refusing
+        # loudly at wrap time is the only honest option: a gate that silently inspects
+        # nothing is worse than no gate, because the coverage report calls it covered.
+        streaming = _streaming_kind(tool)
+        if streaming is not None:
+            raise PolicyError(
+                f"tool {tool_name!r} is a {streaming} and cannot be gated: the output half of the gate "
+                "can only inspect a materialised value. Wrap a function that returns the collected "
+                "result, and gate that."
+            )
+
         bound = _resolve_fixed_principal(fixed_principal, principal)
         self._wrapped_tools.add(tool_name)
 
         run_async = is_async if is_async is not None else _detect_async(tool, tool_name)
-        return self._wrap_async(tool, tool_name, bound) if run_async else self._wrap_sync(tool, tool_name, bound)
+        wrapper = self._wrap_async(tool, tool_name, bound) if run_async else self._wrap_sync(tool, tool_name, bound)
+        self._register(wrapper)
+        return wrapper
+
+    def _register(self, wrapper: Any) -> None:
+        """Remember a wrapper by identity, so :meth:`coverage` can be asked about objects.
+
+        Dead references are dropped on the way in rather than by a callback: an ``id``
+        the interpreter has already recycled would otherwise answer "yes, I produced
+        that" for an entirely unrelated object, and a recycled-id false *positive* in
+        this particular check is a silent all-clear.
+        """
+        self._wrappers = [ref for ref in self._wrappers if ref() is not None]
+        with contextlib.suppress(TypeError):  # a wrapper that cannot be weak-referenced
+            self._wrappers.append(weakref.ref(wrapper))
 
     def _wrap_sync(self, tool: Callable[..., Any], tool_name: str, bound: Principal | None) -> Callable[..., Any]:
-        @functools.wraps(tool)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             if args:
                 raise PolicyError(f"gated tool {tool_name!r} must be called with keyword arguments only")
@@ -370,19 +694,36 @@ class Gate:
             # Human/operator confirmation resolved via a host callback (never a tool
             # the agent can call) — an injected agent cannot self-approve.
             if pre.effect is Effect.REQUIRE_CONFIRMATION and self._confirm is not None:
-                outcome = self._confirm(req)
-                if inspect.isawaitable(outcome):
-                    closer = getattr(outcome, "close", None)
-                    if callable(closer):
-                        closer()
-                    pre = GateDecision(
-                        Effect.DENY,
-                        "confirm_error",
-                        f"confirm callback for {tool_name!r} is async but the tool is sync — "
-                        "an async confirm can only be awaited on the async path",
-                    )
+                # Guarded exactly like the async path. An approvals UI that raises —
+                # its queue is down, the operator's session expired — used to escape
+                # the gate as its own exception, with no audit record for a call the
+                # policy had already decided needed a human. Fail closed and record it.
+                try:
+                    outcome = self._confirm(for_callback(req))
+                except self._confirm_suspends:
+                    # The host is suspending the run, not failing. A checkpointing
+                    # approval (LangGraph's `interrupt()`, a queue that parks the
+                    # request) signals by raising, and turning that into a denial made
+                    # the gate refuse the legitimate work it had just approved — the
+                    # false positive this library names as its own worst outcome.
+                    # Propagating is safe precisely because the tool has NOT run: a
+                    # suspension is "no decision yet", never "allow".
+                    raise
+                except Exception as exc:  # noqa: BLE001 — a raising confirm fails closed
+                    pre = GateDecision(Effect.DENY, "confirm_error", f"confirm callback raised: {exc!r}")
                 else:
-                    pre = self._confirmed(pre, req, outcome)
+                    if inspect.isawaitable(outcome):
+                        closer = getattr(outcome, "close", None)
+                        if callable(closer):
+                            closer()
+                        pre = GateDecision(
+                            Effect.DENY,
+                            "confirm_error",
+                            f"confirm callback for {tool_name!r} is async but the tool is sync — "
+                            "an async confirm can only be awaited on the async path",
+                        )
+                    else:
+                        pre = self._confirmed(pre, req, outcome)
 
             if pre.effect is Effect.ALLOW:
                 raced = self._consume_limit(tool_name, active)
@@ -390,11 +731,15 @@ class Gate:
                     pre = raced
 
             self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre))
-            if self._enforce:
-                if pre.effect is Effect.DENY:
-                    raise GateDenied(pre)
+            if self._enforce and pre.effect is not Effect.ALLOW:
+                # Deny-by-default over the *effect space*, not a list of the effects
+                # that block. Written the other way round, an effect this branch has
+                # not been taught — a member added to `Effect` later, or one a host
+                # constructs itself — falls through to the tool body: a fail-open
+                # reached by adding a value to an enum. ALLOW is the only word for yes.
                 if pre.effect is Effect.REQUIRE_CONFIRMATION:
                     raise GateConfirmationRequired(pre)
+                raise GateDenied(pre)
 
             redacted: BaseException | None = None
             try:
@@ -412,10 +757,10 @@ class Gate:
                 raise redacted from None
             return self._finish(tool_name, call_args, active, started, result)
 
+        _adopt_metadata(wrapped, tool, tool_name)
         return wrapped
 
     def _wrap_async(self, tool: Callable[..., Any], tool_name: str, bound: Principal | None) -> Callable[..., Any]:
-        @functools.wraps(tool)
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
             if args:
                 raise PolicyError(f"gated tool {tool_name!r} must be called with keyword arguments only")
@@ -444,9 +789,18 @@ class Gate:
 
             if pre.effect is Effect.REQUIRE_CONFIRMATION and self._confirm is not None:
                 try:
-                    outcome = self._confirm(req)
+                    outcome = self._confirm(for_callback(req))
                     if inspect.isawaitable(outcome):
                         outcome = await outcome
+                except self._confirm_suspends:
+                    # The host is suspending the run, not failing. A checkpointing
+                    # approval (LangGraph's `interrupt()`, a queue that parks the
+                    # request) signals by raising, and turning that into a denial made
+                    # the gate refuse the legitimate work it had just approved — the
+                    # false positive this library names as its own worst outcome.
+                    # Propagating is safe precisely because the tool has NOT run: a
+                    # suspension is "no decision yet", never "allow".
+                    raise
                 except Exception as exc:  # noqa: BLE001 — a raising confirm fails closed
                     pre = GateDecision(Effect.DENY, "confirm_error", f"confirm callback raised: {exc!r}")
                 else:
@@ -459,11 +813,15 @@ class Gate:
                     pre = raced
 
             self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre))
-            if self._enforce:
-                if pre.effect is Effect.DENY:
-                    raise GateDenied(pre)
+            if self._enforce and pre.effect is not Effect.ALLOW:
+                # Deny-by-default over the *effect space*, not a list of the effects
+                # that block. Written the other way round, an effect this branch has
+                # not been taught — a member added to `Effect` later, or one a host
+                # constructs itself — falls through to the tool body: a fail-open
+                # reached by adding a value to an enum. ALLOW is the only word for yes.
                 if pre.effect is Effect.REQUIRE_CONFIRMATION:
                     raise GateConfirmationRequired(pre)
+                raise GateDenied(pre)
 
             redacted: BaseException | None = None
             try:
@@ -479,6 +837,7 @@ class Gate:
                 raise redacted from None
             return self._finish(tool_name, call_args, active, started, result)
 
+        _adopt_metadata(wrapped, tool, tool_name)
         return wrapped
 
     def _finish(
@@ -552,10 +911,22 @@ class Gate:
 
             contract = self.policy.contract_for(tool_name)
             has_policy = contract is not None
+            # An inferred schema is a convenience, never a grant, and never a stand-in
+            # for one that can reject something. A signature with unannotated
+            # parameters or `**kwargs` infers to a schema that accepts every argument
+            # of every type; installing that where the policy had none replaced the
+            # documented `unknown_tool` / `no_arg_schema` denial with a check that
+            # cannot fail — a fail-open reached by the DEFAULT argument, while the
+            # coverage report still said "needs-policy" about a tool that just ran.
+            # So it is only installed when it actually constrains.
             if contract is None and infer_missing:
-                self.policy.tools[tool_name] = infer_contract(tool)
+                inferred = infer_contract(tool)
+                if inferred.args is not None and _schema_constrains(inferred.args):
+                    self.policy.tools[tool_name] = inferred
             elif contract is not None and contract.args is None and infer_missing:
-                self.policy.tools[tool_name] = replace(contract, args=infer_schema(tool))
+                schema = infer_schema(tool)
+                if _schema_constrains(schema):
+                    self.policy.tools[tool_name] = replace(contract, args=schema)
 
             granted = any(tool_name in self.policy.allowed_tools(role) for role in self.policy.permissions)
             if has_policy and granted:
@@ -586,10 +957,15 @@ class Gate:
         principal: Principal | None,
         executed: bool,
     ) -> None:
-        self._decision_seq += 1
+        # `+= 1` is a read-modify-write, so two threads sharing a Gate could stamp the
+        # same `decision_id` on two different decisions — and `decision_id` is what an
+        # investigator uses to say "this call, not that one". Cheap to make atomic.
+        with self._seq_lock:
+            self._decision_seq += 1
+            decision_id = self._decision_seq
         record = AuditRecord(
             ts=time.time(),
-            decision_id=self._decision_seq,
+            decision_id=decision_id,
             phase=phase,
             tool=tool,
             role=principal.role if principal is not None else "<none>",
@@ -624,6 +1000,7 @@ def gate(
     confirm: Callable[[GateRequest], Any] | None = None,
     content_rules: ContentRules | None = None,
     resource_resolver: ResourceResolver | None = None,
+    escalate: EscalationTier | None = None,
     mode: str | None = None,
     enforcement: str | None = None,
     name: str | None = None,
@@ -642,6 +1019,7 @@ def gate(
         confirm=confirm,
         content_rules=content_rules,
         resource_resolver=resource_resolver,
+        escalate=escalate,
         mode=mode,
         enforcement=enforcement,
         strict=strict,
@@ -659,6 +1037,7 @@ def protect(
     confirm: Callable[[GateRequest], Any] | None = None,
     content_rules: ContentRules | None = None,
     resource_resolver: ResourceResolver | None = None,
+    escalate: EscalationTier | None = None,
     mode: str | None = None,
     enforcement: str | None = None,
     strict: bool = False,
@@ -678,6 +1057,7 @@ def protect(
         confirm=confirm,
         content_rules=content_rules,
         resource_resolver=resource_resolver,
+        escalate=escalate,
         mode=mode,
         enforcement=enforcement,
         strict=strict,
