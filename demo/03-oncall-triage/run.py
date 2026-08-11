@@ -25,15 +25,16 @@ import sys
 from dataclasses import dataclass, field
 
 from agent import MAX_STEPS, Run, schemas_for, triage
+from gatereport import gate_report
 from llm import MODEL, TEMPERATURE, USAGE
 from ops.store import connect, reset
 from probe import Damage, Triage, inspect, outcome, state
 from wiring import (
     Wiring,
     coverage_report,
-    half_protected,
     half_protected_wiring,
     protected,
+    protected_wiring,
     triage_principal,
     unprotected,
 )
@@ -82,13 +83,16 @@ class Result:
     damage: Damage
     triage: Triage
     end_state: tuple[str, ...]
+    #: The gate that decided, or None when there was none. A run that records only
+    #: whether harm occurred cannot say whether the policy is the reason it did not.
+    gate: object = None
     #: Tokens this wiring spent, not the process total. `USAGE` accumulates across
     #: both wirings in one `compare`, so reading it directly attributed the
     #: unprotected column's spend to the protected one as well.
     usage: dict = field(default_factory=dict)
 
 
-def _execute(alert_id: int, dispatch, *, gated: bool) -> Result:
+def _execute(alert_id: int, dispatch, *, gated: bool, gate=None) -> Result:
     """One run, measured, printing nothing.
 
     Split out of `_run` so the same run can be rendered for a human or serialised
@@ -107,7 +111,9 @@ def _execute(alert_id: int, dispatch, *, gated: bool) -> Result:
         run = triage(task, dispatch)
     end_state = tuple(state())
     spent = {key: USAGE[key] - before.get(key, 0) for key in USAGE}
-    return Result(run=run, damage=inspect(), triage=outcome(alert_id), end_state=end_state, usage=spent)
+    return Result(
+        run=run, damage=inspect(), triage=outcome(alert_id), end_state=end_state, gate=gate, usage=spent
+    )
 
 
 def _record(result: Result, wiring: str) -> dict:
@@ -143,12 +149,16 @@ def _record(result: Result, wiring: str) -> dict:
         "model": MODEL,
         "temperature": TEMPERATURE,
         "max_steps": MAX_STEPS,
+        # `null` on the ungated side is the honest value: there is no gate, so there is
+        # no trail. An empty one would let the two columns be compared as though both
+        # had been audited and one simply decided nothing.
+        "gate": None if result.gate is None else gate_report(result.gate, run.steps),
         "usage": result.usage,
     }
 
 
-def _run(alert_id: int, dispatch, *, gated: bool, wiring: str = "") -> Result:
-    result = _execute(alert_id, dispatch, gated=gated)
+def _run(alert_id: int, dispatch, *, gated: bool, wiring: str = "", gate=None) -> Result:
+    result = _execute(alert_id, dispatch, gated=gated, gate=gate)
     run, damage, triaged = result.run, result.damage, result.triage
 
     for name, args in run.calls:
@@ -173,6 +183,17 @@ def _run(alert_id: int, dispatch, *, gated: bool, wiring: str = "") -> Result:
         print(f"    {DIM}· {line}{OFF}")
     mark = GREEN if triaged.healthy else (RED if triaged.false_all_clear else DIM)
     print(f"    {mark}· triage: {triaged.line()}{OFF}")
+    if result.gate is not None:
+        report = gate_report(result.gate, run.steps)
+        print(
+            f"    {DIM}▤ gate: {report['decisions']} decisions, {len(report['stopped'])} stopped, "
+            f"{report['rebindings']} args rebound, policy {report['policy_hash'][:23]}{OFF}"
+        )
+        if not report["complete_mediation"]:
+            print(
+                f"    {RED}{BOLD}▤ INCOMPLETE MEDIATION: {report['model_calls']} tool calls, "
+                f"{report['pre_decisions']} gate decisions — a call reached its function unseen{OFF}"
+            )
     print(f"    {DIM}· {run.steps} tool calls, loop ended: {run.stopped}{OFF}")
     if run.error:
         print(f"    {RED}{BOLD}! the model never answered: {run.error[:160]}{OFF}")
@@ -213,21 +234,23 @@ def cmd_schemas(_: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
+    guarded = protected_wiring(args.alert_id)
     wirings = [
-        (f"{RED}WITHOUT histos{OFF}", "unprotected", unprotected(), False),
-        (f"{GREEN}WITH histos{OFF}", "protected", protected(args.alert_id), True),
+        (f"{RED}WITHOUT histos{OFF}", "unprotected", unprotected(), False, None),
+        (f"{GREEN}WITH histos{OFF}", "protected", guarded.dispatch, True, guarded.gate),
     ]
     if args.half:
+        half = half_protected_wiring(args.alert_id)
         wirings.append(
-            (f"{RED}WITH histos, one tool left ungated{OFF}", "half_protected", half_protected(args.alert_id), True)
+            (f"{RED}WITH histos, one tool left ungated{OFF}", "half_protected", half.dispatch, True, half.gate)
         )
 
     _banner()
     print(f"{BOLD}alert {args.alert_id}{OFF}")
     failed = False
-    for label, wiring, dispatch, gated in wirings:
+    for label, wiring, dispatch, gated, gate in wirings:
         print(f"\n  {label}")
-        failed |= bool(_run(args.alert_id, dispatch, gated=gated, wiring=wiring).run.error)
+        failed |= bool(_run(args.alert_id, dispatch, gated=gated, wiring=wiring, gate=gate).run.error)
     # A run the model never answered is not a run with no damage, and the exit code is
     # the one signal a harness gets for free. Returning 0 here is how a dead provider
     # became forty-five well-formed data points saying the gate changed nothing.
@@ -235,10 +258,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_triage(args: argparse.Namespace) -> int:
-    dispatch = protected(args.alert_id) if args.histos else unprotected()
+    guarded = protected_wiring(args.alert_id) if args.histos else None
+    dispatch = guarded.dispatch if guarded else unprotected()
     _banner()
     print(f"policy {'ON' if args.histos else 'OFF'}")
-    _run(args.alert_id, dispatch, gated=args.histos)
+    _run(args.alert_id, dispatch, gated=args.histos, gate=guarded.gate if guarded else None)
     return 0
 
 
@@ -255,7 +279,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     print(f"\n  {RED}WITHOUT histos{OFF}")
     plain = _run(args.alert_id, unprotected(), gated=False)
     print(f"\n  {GREEN}WITH histos{OFF}")
-    gated = _run(args.alert_id, protected(args.alert_id), gated=True)
+    guarded = protected_wiring(args.alert_id)
+    gated = _run(args.alert_id, guarded.dispatch, gated=True, gate=guarded.gate)
 
     print()
     failures = []

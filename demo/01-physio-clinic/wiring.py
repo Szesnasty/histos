@@ -193,8 +193,23 @@ def caller_principal(caller: Caller) -> Principal:
     )
 
 
-def protected() -> list[StructuredTool]:
+@dataclass(frozen=True)
+class Protected:
+    """The gated toolbelt, and the gate that produced it.
+
+    The gate is returned rather than discarded because a run that only records
+    *whether* harm occurred cannot say whether the policy is the reason. Its audit
+    trail names the rule behind every decision, so "no damage" can be told apart from
+    "the model never tried" — and a gate that allowed the destructive call while the
+    model happened not to make it looks identical to a working one until you read it.
+    """
+
+    tools: list[StructuredTool]
+    gate: Gate
+
+
+def protected() -> Protected:
     """The domain functions with no wrapper, gated. The policy decides; identity
     arrives per request from `use_principal()`."""
     gate = Gate(load_policy(POLICY_PATH), resource_resolver=resolve_resource)
-    return protect_tools(_as_langchain_tools(clinic_tools.AGENT_TOOLS), gate=gate)
+    return Protected(protect_tools(_as_langchain_tools(clinic_tools.AGENT_TOOLS), gate=gate), gate)

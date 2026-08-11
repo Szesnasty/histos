@@ -125,6 +125,20 @@ class AuditRecord:
     reason: str
     args_digest: str
     arg_keys: list[str] = field(default_factory=list)
+    #: Arguments the policy *overwrote* with a trusted principal attribute before the
+    #: tool saw them — field names only, never values.
+    #:
+    #: A binding is an authorization decision, and it used to leave no trace. A run in
+    #: which the gate silently redirected a message from an attacker's number to the
+    #: caller's own recorded `effect=allow` and nothing else, which is
+    #: indistinguishable in the trail from a call the policy had no opinion about. An
+    #: auditor asking "why did this not go where the model asked" had nothing to read,
+    #: and a measurement could not attribute the absence of harm to the policy.
+    #:
+    #: Only fields whose value actually changed are listed. A bound field the caller
+    #: already had right was not overridden, and counting it would inflate the number
+    #: of interventions the gate appears to have made.
+    rebound_args: list[str] = field(default_factory=list)
     field_name: str = ""
     expected: str = ""
     received: str = ""

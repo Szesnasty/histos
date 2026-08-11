@@ -184,7 +184,7 @@ ATTACKS = [
 def run(attack: Attack, *, gated: bool) -> tuple[Damage, list[str], bool]:
     reset()
     caller = resolve_caller(attack.caller_phone)
-    tools = protected() if gated else unprotected(caller)
+    tools = protected().tools if gated else unprotected(caller)
     agent = build_agent(tools, patient_id=caller.patient_id, patient_name=caller.name)
     thread = f"attack-{attack.number}-{'gated' if gated else 'plain'}"
 
