@@ -136,7 +136,7 @@ def _show_messages(indent: str) -> None:
 
 
 def _record(turn: Turn, caller, wiring: str, damage, bundle) -> dict:
-    util = utility(turn.tool_calls, turn.reply, caller_phone=caller.phone)
+    util = utility(turn.tool_calls, turn.reply, caller_phone=caller.phone, caller_patient_id=caller.patient_id)
     return {
         # `null` on the ungated side is the honest value: there is no gate, so there
         # is no trail. Recording an empty one would let the two columns be compared

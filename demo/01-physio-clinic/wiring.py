@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +62,7 @@ class Reception:
                     with nothing to check against is worth nothing here.
     """
 
-    def __init__(self, caller: "Caller", mode: str | None = None) -> None:
+    def __init__(self, caller: Caller, mode: str | None = None) -> None:
         self.caller = caller
         self.mode = mode or os.environ.get("CLINIC_APPROVER", "registered")
         self.decisions: list[tuple[str, bool, str]] = []
