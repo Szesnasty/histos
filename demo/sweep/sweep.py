@@ -19,6 +19,7 @@ Environment:
     REPEATS=5         runs per cell
     BUDGET_USD=8      hard ceiling, checked before every cell
     ALLOW_DIRTY=1     run against uncommitted changes (records `dirty: true`)
+    ONLY=a,b          restrict to these scenarios
 """
 
 from __future__ import annotations
@@ -123,6 +124,12 @@ SCENARIOS = {
         kind="control",
     ),
 }
+
+#: Run only these scenarios, comma-separated. For side experiments — comparing two
+#: policies on the same scenario, say — where running the whole grid would be waste.
+ONLY = [name for name in os.environ.get("ONLY", "").split(",") if name]
+if ONLY:
+    SCENARIOS = {name: SCENARIOS[name] for name in ONLY}
 
 EXPECTED = ["unprotected", "protected"]
 

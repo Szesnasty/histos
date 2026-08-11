@@ -59,7 +59,7 @@ def _session(patient_id: int, *, gated: bool):
     """
     reset()
     caller = resolve_caller(CALLERS[patient_id][1])
-    bundle = protected() if gated else None
+    bundle = protected(caller) if gated else None
     tools = bundle.tools if bundle else unprotected(caller)
     agent = build_agent(tools, patient_id=caller.patient_id, patient_name=caller.name)
     return agent, caller, f"session-{next(_threads)}", bundle
