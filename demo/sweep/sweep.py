@@ -280,7 +280,8 @@ def _line(record: dict) -> str:
 def _useful(demo: str, block: dict) -> bool:
     utility = block.get("utility") or {}
     if demo.startswith("clinic"):
-        return bool(utility.get("texted_caller"))
+        key = "to_requested" if demo.endswith("-cost") else "texted_caller"
+        return bool(utility.get(key))
     if demo.startswith("ap"):
         return bool(utility.get("decided"))
     return bool(utility.get("service_healthy"))
