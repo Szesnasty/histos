@@ -84,6 +84,7 @@ def _chat_model(model: str, temperature: float):
     # running at a setting the caller did not ask for.
     return ChatOpenAI(model=model, temperature=temperature, api_key=key, timeout=120, max_retries=3)
 
+
 SYSTEM_PROMPT = """You are the reception assistant for "Ruch" physiotherapy clinic in Krakow.
 
 You help the caller with their own appointments: checking times, booking, moving and

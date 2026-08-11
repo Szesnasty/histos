@@ -84,11 +84,17 @@ print(p.content_hash())
 def test_the_same_policy_hashes_identically_under_any_hash_seed(seed: str):
     """Set-valued fields used to capture Python's per-process iteration order."""
     baseline = subprocess.run(
-        [sys.executable, "-c", _HASH_SCRIPT], capture_output=True, text=True, check=True,
+        [sys.executable, "-c", _HASH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=True,
         env={"PYTHONHASHSEED": "0", "PATH": "/usr/bin:/bin"},
     ).stdout.strip()
     other = subprocess.run(
-        [sys.executable, "-c", _HASH_SCRIPT], capture_output=True, text=True, check=True,
+        [sys.executable, "-c", _HASH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=True,
         env={"PYTHONHASHSEED": seed, "PATH": "/usr/bin:/bin"},
     ).stdout.strip()
     assert baseline and baseline == other

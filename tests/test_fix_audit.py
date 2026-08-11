@@ -521,9 +521,7 @@ def test_protect_tool_refuses_an_unknown_on_denied(fake_langchain):
 
 def test_protect_tools_shares_one_gate(fake_langchain):
     sink = InMemoryAuditSink()
-    tools = [
-        _FakeStructuredTool(name="notify", description="", args_schema=None, func=lambda **k: "x", coroutine=None)
-    ]
+    tools = [_FakeStructuredTool(name="notify", description="", args_schema=None, func=lambda **k: "x", coroutine=None)]
     protected = lc_adapter.protect_tools(tools, gate=_allow_all_gate(sink))
     with use_principal(_clerk()):
         assert protected[0].func(to="a@b.c") == "x"

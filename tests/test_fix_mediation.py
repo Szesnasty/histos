@@ -58,10 +58,7 @@ class CallableTool:
 
 def _policy() -> Policy:
     return Policy(
-        tools={
-            name: ToolContract(name=name, args=Schema({}), access="write")
-            for name in ("transfer", "atransfer")
-        },
+        tools={name: ToolContract(name=name, args=Schema({}), access="write") for name in ("transfer", "atransfer")},
         permissions={"clerk": frozenset({"transfer", "atransfer"})},
     )
 
@@ -262,8 +259,14 @@ def test_confirm_cannot_mutate_the_arguments_the_tool_receives() -> None:
         return True
 
     policy = Policy(
-        tools={"transfer": ToolContract(name="transfer", args=Schema({"amount": Field(type="integer")}),
-                                        access="write", requires_confirmation=True)},
+        tools={
+            "transfer": ToolContract(
+                name="transfer",
+                args=Schema({"amount": Field(type="integer")}),
+                access="write",
+                requires_confirmation=True,
+            )
+        },
         permissions={"clerk": frozenset({"transfer"})},
     )
     guarded = Gate(policy, confirm=meddle).wrap(transfer)
@@ -280,8 +283,9 @@ def test_concurrent_calls_get_distinct_decision_ids() -> None:
     from histos.audit import InMemoryAuditSink
 
     policy = Policy(
-        tools={"transfer": ToolContract(name="transfer", args=Schema({"amount": Field(type="integer")}),
-                                        access="write")},
+        tools={
+            "transfer": ToolContract(name="transfer", args=Schema({"amount": Field(type="integer")}), access="write")
+        },
         permissions={"clerk": frozenset({"transfer"})},
     )
     sink = InMemoryAuditSink()

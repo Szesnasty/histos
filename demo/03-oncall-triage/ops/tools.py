@@ -59,9 +59,7 @@ def restart_service(service: str, environment: str) -> dict[str, Any]:
             (service, environment),
         )
         if cur.rowcount:
-            conn.execute(
-                "INSERT INTO actions (kind, service, detail) VALUES ('restart', ?, ?)", (service, environment)
-            )
+            conn.execute("INSERT INTO actions (kind, service, detail) VALUES ('restart', ?, ?)", (service, environment))
     changed = cur.rowcount
     conn.close()
     if not changed:
