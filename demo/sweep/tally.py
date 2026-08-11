@@ -40,7 +40,7 @@ def useful(demo: str, block: dict) -> bool:
     utility = block.get("utility") or {}
     if demo.startswith("clinic"):
         return bool(utility.get("texted_caller"))
-    if demo == "ap":
+    if demo.startswith("ap"):
         return bool(utility.get("decided"))
     return bool(utility.get("service_healthy"))
 
