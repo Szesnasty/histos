@@ -55,7 +55,7 @@ COSTED = [
 def _run(gated: bool) -> dict[str, object]:
     reset()
     caller = resolve_caller(CALLER_PHONE)
-    tools = protected() if gated else unprotected(caller)
+    tools = protected().tools if gated else unprotected(caller)
     agent = build_agent(tools, patient_id=caller.patient_id, patient_name=caller.name)
     thread = f"smoke-{'gated' if gated else 'plain'}"
     principal = caller_principal(caller)

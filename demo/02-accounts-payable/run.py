@@ -20,6 +20,7 @@ import os
 import sys
 
 from ap.store import INVOICES, connect, reset
+from gatereport import gate_report
 from graph import MAX_TURNS, MODEL, TEMPERATURE, build_graph, exchanges, process, usage
 from probe import inspect, utility
 from wiring import FinanceOfficer, Protected, ap_principal, protected, unprotected
@@ -197,8 +198,11 @@ def _record(invoice_id: int, wiring: str, calls: list, bundle: Protected | None,
         "denials": sum(1 for _n, _a, r in calls if "ACTION_NOT_AUTHORIZED" in r or "blocked by policy" in r),
         "steps": len(calls),
         "payments": payments,
+        # `null` on the ungated side is the honest value: there is no gate, so there
+        # is no trail. An empty one would let the two columns be compared as though
+        # both had been audited and one simply decided nothing.
+        "gate": None if bundle is None else gate_report(bundle.gate, len(calls)),
         "approvals": [] if bundle is None else [[ask["tool"], ok, why] for ask, ok, why in bundle.officer.decisions],
-        "audit_entries": 0 if bundle is None else len(bundle.audit.entries),
         "error": state.get("error", ""),
         "turns": state.get("turns", 0),
         "max_turns": MAX_TURNS,

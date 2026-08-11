@@ -565,12 +565,24 @@ class Gate:
     def _no_principal(self) -> GateDecision:
         return GateDecision(Effect.DENY, "no_principal", "no trusted principal set; identity must be bound out-of-band")
 
-    def _apply_bindings(self, tool_name: str, active: Principal, call_args: dict[str, Any]) -> GateDecision | None:
+    def _apply_bindings(
+        self, tool_name: str, active: Principal, call_args: dict[str, Any], rebound: list[str] | None = None
+    ) -> GateDecision | None:
         """Overwrite bound args with trusted principal attributes (Phase 0.1).
 
         The bound value is what the tool and every check see, so a hijacked model
         passing ``tenant_id="attacker"`` simply has it replaced. Fail closed if the
         principal lacks the attribute — never inject a missing/None trusted value.
+
+        ``rebound`` collects the fields that were actually *changed*, and it exists
+        because a rewrite is an authorization decision that used to leave no trace.
+        A run where the gate silently redirected an SMS from the attacker's number to
+        the caller's own recorded `effect=allow` and nothing else, so an auditor —
+        and a measurement — could not tell it apart from a call the policy simply had
+        no opinion about. Fields whose value already matched are not listed: nothing
+        was overridden, and reporting one would inflate the count of interventions.
+
+        The value itself never reaches the record. Only the field name does.
         """
         contract = self.engine.policy.contract_for(tool_name)
         if contract is None or not contract.bindings:
@@ -583,7 +595,10 @@ class Gate:
                     f"principal is missing trusted attribute {b.principal_attr!r} for arg {b.field!r}",
                     field=b.field,
                 )
-            call_args[b.field] = active.attributes[b.principal_attr]
+            trusted = active.attributes[b.principal_attr]
+            if rebound is not None and (b.field not in call_args or call_args[b.field] != trusted):
+                rebound.append(b.field)
+            call_args[b.field] = trusted
         return None
 
     def _consume_limit(self, tool_name: str, active: Principal) -> GateDecision | None:
@@ -679,10 +694,18 @@ class Gate:
                     raise GateDenied(decision)
                 return tool(**call_args)
 
-            binding_denial = self._apply_bindings(tool_name, active, call_args)
+            rebound: list[str] = []
+            binding_denial = self._apply_bindings(tool_name, active, call_args, rebound)
             if binding_denial is not None:
                 self._emit(
-                    tool_name, call_args, binding_denial, "pre", started, active, self._will_execute(binding_denial)
+                    tool_name,
+                    call_args,
+                    binding_denial,
+                    "pre",
+                    started,
+                    active,
+                    self._will_execute(binding_denial),
+                    rebound,
                 )
                 if self._enforce:
                     raise GateDenied(binding_denial)
@@ -730,7 +753,7 @@ class Gate:
                 if raced is not None:
                     pre = raced
 
-            self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre))
+            self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre), rebound)
             if self._enforce and pre.effect is not Effect.ALLOW:
                 # Deny-by-default over the *effect space*, not a list of the effects
                 # that block. Written the other way round, an effect this branch has
@@ -775,10 +798,18 @@ class Gate:
                     raise GateDenied(decision)
                 return await tool(**call_args)
 
-            binding_denial = self._apply_bindings(tool_name, active, call_args)
+            rebound: list[str] = []
+            binding_denial = self._apply_bindings(tool_name, active, call_args, rebound)
             if binding_denial is not None:
                 self._emit(
-                    tool_name, call_args, binding_denial, "pre", started, active, self._will_execute(binding_denial)
+                    tool_name,
+                    call_args,
+                    binding_denial,
+                    "pre",
+                    started,
+                    active,
+                    self._will_execute(binding_denial),
+                    rebound,
                 )
                 if self._enforce:
                     raise GateDenied(binding_denial)
@@ -812,7 +843,7 @@ class Gate:
                 if raced is not None:
                     pre = raced
 
-            self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre))
+            self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre), rebound)
             if self._enforce and pre.effect is not Effect.ALLOW:
                 # Deny-by-default over the *effect space*, not a list of the effects
                 # that block. Written the other way round, an effect this branch has
@@ -956,6 +987,7 @@ class Gate:
         started: float,
         principal: Principal | None,
         executed: bool,
+        rebound: list[str] | None = None,
     ) -> None:
         # `+= 1` is a read-modify-write, so two threads sharing a Gate could stamp the
         # same `decision_id` on two different decisions — and `decision_id` is what an
@@ -975,6 +1007,7 @@ class Gate:
             reason=decision.reason,
             args_digest=digest_args(args, self._audit_key),
             arg_keys=sorted(args),
+            rebound_args=sorted(rebound or ()),
             field_name=decision.field,
             expected=decision.expected,
             received=decision.received,

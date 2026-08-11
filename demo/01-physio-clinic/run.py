@@ -26,6 +26,7 @@ import sys
 
 from agent import MODEL, TEMPERATURE, Turn, ask, build_agent, usage
 from clinic.store import PATIENTS, connect, reset, use_private_db
+from gatereport import gate_report
 from probe import attempts, inspect, utility
 from wiring import caller_principal, protected, resolve_caller, unprotected
 
@@ -49,12 +50,19 @@ _threads = itertools.count()
 
 
 def _session(patient_id: int, *, gated: bool):
-    """A fresh clinic, a caller resolved from the calling line, and one wiring."""
+    """A fresh clinic, a caller resolved from the calling line, and one wiring.
+
+    The gate comes back with the rest of it. A run that records only whether harm
+    occurred cannot say whether the policy is the reason it did not: "the gate denied
+    the destructive call" and "the model never made one" produce the same clean
+    verdict, and only the audit trail separates them.
+    """
     reset()
     caller = resolve_caller(CALLERS[patient_id][1])
-    tools = protected() if gated else unprotected(caller)
+    bundle = protected() if gated else None
+    tools = bundle.tools if bundle else unprotected(caller)
     agent = build_agent(tools, patient_id=caller.patient_id, patient_name=caller.name)
-    return agent, caller, f"session-{next(_threads)}"
+    return agent, caller, f"session-{next(_threads)}", bundle
 
 
 def _speak(agent, message: str, *, gated: bool, caller, thread_id: str) -> Turn:
@@ -64,7 +72,7 @@ def _speak(agent, message: str, *, gated: bool, caller, thread_id: str) -> Turn:
         return ask(agent, message, thread_id=thread_id)
 
 
-def _render(turn: Turn, *, caller, indent: str = "  ", wiring: str = "") -> None:
+def _render(turn: Turn, *, caller, indent: str = "  ", wiring: str = "", bundle=None) -> None:
     for name, args in turn.tool_calls:
         rendered = ", ".join(f"{k}={v!r}" for k, v in args.items())
         print(f"{indent}{DIM}↳ {name}({rendered}){OFF}")
@@ -94,8 +102,23 @@ def _render(turn: Turn, *, caller, indent: str = "  ", wiring: str = "") -> None
     if turn.error:
         print(f"{indent}{RED}{BOLD}! the model never answered: {turn.error[:160]}{OFF}")
 
+    if bundle is not None:
+        report = gate_report(bundle.gate, len(turn.tool_calls))
+        print(
+            f"{indent}{DIM}▤ gate: {report['decisions']} decisions, {len(report['stopped'])} stopped, "
+            f"{report['rebindings']} args rebound, {len(report['redacted_fields'])} fields redacted, "
+            f"policy {report['policy_hash'][:23]}{OFF}"
+        )
+        for stop in report["stopped"]:
+            print(f"{indent}  {DIM}▤ {stop['effect']} {stop['tool']} — {stop['rule']}{OFF}")
+        if not report["complete_mediation"]:
+            print(
+                f"{indent}{RED}{BOLD}▤ INCOMPLETE MEDIATION: {report['model_calls']} tool calls, "
+                f"{report['pre_decisions']} gate decisions{OFF}"
+            )
+
     if RESULT_LINES and wiring:
-        print("RESULT " + json.dumps(_record(turn, caller, wiring, damage), default=str))
+        print("RESULT " + json.dumps(_record(turn, caller, wiring, damage, bundle), default=str))
 
 
 def _show_messages(indent: str) -> None:
@@ -112,9 +135,13 @@ def _show_messages(indent: str) -> None:
         print(f"{indent}{DIM}✉ sms to {row['to_phone']}: {row['body'][:60]!r}{OFF}")
 
 
-def _record(turn: Turn, caller, wiring: str, damage) -> dict:
+def _record(turn: Turn, caller, wiring: str, damage, bundle) -> dict:
     util = utility(turn.tool_calls, turn.reply, caller_phone=caller.phone)
     return {
+        # `null` on the ungated side is the honest value: there is no gate, so there
+        # is no trail. Recording an empty one would let the two columns be compared
+        # as though both had been audited and one simply decided nothing.
+        "gate": None if bundle is None else gate_report(bundle.gate, len(turn.tool_calls)),
         "wiring": wiring,
         "damage": bool(damage),
         "damage_lines": damage.lines(),
@@ -149,9 +176,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         (f"{GREEN}WITH histos{OFF}", "protected", True),
     ):
         print(f"\n{label}")
-        agent, caller, thread = _session(args.as_patient, gated=gated)
+        agent, caller, thread, bundle = _session(args.as_patient, gated=gated)
         turn = _speak(agent, args.message, gated=gated, caller=caller, thread_id=thread)
-        _render(turn, caller=caller, indent="    ", wiring=wiring)
+        _render(turn, caller=caller, indent="    ", wiring=wiring, bundle=bundle)
         failed |= bool(turn.error)
     # A turn the model never answered is not a turn with no damage, and the exit code
     # is the one signal a harness gets for free.
@@ -165,7 +192,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     makes it worth typing an attack into rather than a single sentence.
     """
     gated = args.histos
-    agent, caller, thread = _session(args.as_patient, gated=gated)
+    agent, caller, thread, bundle = _session(args.as_patient, gated=gated)
     banner = f"{GREEN}policy ON{OFF}" if gated else f"{RED}policy OFF{OFF}"
     print(f"model: {MODEL}   caller: {caller.name} (patient {caller.patient_id})   {banner}")
     print(f"{DIM}/db shows the clinic · /reset reseeds it · empty line or Ctrl-D quits{OFF}\n")
@@ -179,14 +206,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if not message:
             return 0
         if message == "/reset":
-            agent, caller, thread = _session(args.as_patient, gated=gated)
+            agent, caller, thread, bundle = _session(args.as_patient, gated=gated)
             print(f"{DIM}clinic reseeded, conversation forgotten{OFF}\n")
             continue
         if message == "/db":
             _show_clinic()
             continue
         turn = _speak(agent, message, gated=gated, caller=caller, thread_id=thread)
-        _render(turn, caller=caller)
+        _render(turn, caller=caller, bundle=bundle)
         print()
 
 
@@ -221,7 +248,7 @@ def cmd_schemas(args: argparse.Namespace) -> int:
     reset()
     caller = resolve_caller(CALLERS[args.as_patient][1])
     raw = {t.name: t for t in unprotected(caller)}
-    gated = {t.name: t for t in protected()}
+    gated = {t.name: t for t in protected().tools}
 
     print(f"{BOLD}what each wiring advertises{OFF}\n")
     differing = []

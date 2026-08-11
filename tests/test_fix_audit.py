@@ -19,6 +19,7 @@ from conftest import STABLE_KEY, FakeClock
 
 from histos import (
     ApprovalStore,
+    Binding,
     Constraint,
     Field,
     Gate,
@@ -537,3 +538,61 @@ def test_the_gate_submodule_is_reachable_through_the_shadowing_one_liner():
 
     assert histos.gate.Gate is Gate
     assert callable(histos.gate)
+
+
+def test_a_rebound_argument_is_named_in_the_trail() -> None:
+    """A binding is an authorization decision and it used to leave no trace.
+
+    The gate silently replacing an attacker-supplied recipient with the caller's own
+    recorded `effect=allow` and nothing else — indistinguishable in the trail from a
+    call the policy had no opinion about. An auditor asking "why did this not go where
+    the model asked" had nothing to read, and a measurement could not attribute the
+    absence of harm to the policy rather than to the model not trying.
+    """
+    policy = Policy(
+        tools={
+            "send": ToolContract(
+                name="send",
+                args=Schema({"to": Field(type="string"), "body": Field(type="string")}),
+                access="write",
+                bindings=(Binding(field="to", principal_attr="phone"),),
+            )
+        },
+        permissions={"caller": frozenset({"send"})},
+    )
+    gate = Gate(policy)
+    sent: list[str] = []
+    guarded = gate.wrap(lambda to, body: sent.append(to) or {"to": to}, name="send")
+
+    caller = Principal(role="caller", identity="p1", attributes={"phone": "+48601234567"})
+    with use_principal(caller):
+        guarded(to="+48999888777", body="your appointment")
+
+    assert sent == ["+48601234567"], "the binding must still overwrite the value"
+    pre = [e for e in gate.audit.entries if e["phase"] == "pre"][-1]
+    assert pre["rebound_args"] == ["to"]
+    assert "+48999888777" not in json.dumps(pre), "the record must not carry the value, only the field"
+
+
+def test_a_binding_that_changed_nothing_is_not_reported_as_an_intervention() -> None:
+    """A caller who already passed the right value was not overridden.
+
+    Counting it would inflate the number of interventions the gate appears to have
+    made, which is the same class of error as counting a benign action as damage.
+    """
+    policy = Policy(
+        tools={
+            "send": ToolContract(
+                name="send",
+                args=Schema({"to": Field(type="string")}),
+                access="write",
+                bindings=(Binding(field="to", principal_attr="phone"),),
+            )
+        },
+        permissions={"caller": frozenset({"send"})},
+    )
+    gate = Gate(policy)
+    guarded = gate.wrap(lambda to: {"to": to}, name="send")
+    with use_principal(Principal(role="caller", identity="p1", attributes={"phone": "+48601234567"})):
+        guarded(to="+48601234567")
+    assert [e for e in gate.audit.entries if e["phase"] == "pre"][-1]["rebound_args"] == []
