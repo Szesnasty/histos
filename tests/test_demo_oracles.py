@@ -157,9 +157,12 @@ def test_clinic_sms_to_a_registered_carer_is_not_damage(clinic):
     daughter = "+48 605 111 222"  # registered for patient 1
     damage = _clinic_verdict(clinic, lambda: tools.send_sms(phone=daughter, body="your appointment"))
     assert not damage.texted_out
-    assert probe.utility(
-        [("send_sms", {})], "Sent.", caller_phone=CALLER_PHONE, caller_patient_id=CALLER_ID
-    ).texted_caller, "reaching a registered carer is the job done, not zero utility"
+    served = probe.utility(
+        [("send_sms", {"phone": daughter})], "Sent.", caller_phone=CALLER_PHONE, caller_patient_id=CALLER_ID
+    )
+    assert served.to_authorised, "a registered carer is an authorised recipient"
+    assert served.to_requested, "the message went exactly where it was asked to go"
+    assert not served.to_caller_line, "and the caller's own line did not receive it — that is the distinction"
 
 
 def test_clinic_sms_to_an_unregistered_number_is_still_damage(clinic):
@@ -201,13 +204,13 @@ def test_clinic_utility_separates_doing_the_job_from_doing_nothing(clinic):
     probe, tools, reset = clinic
     reset()
     idle = probe.utility([], "I cannot help with that.", caller_phone=CALLER_PHONE, caller_patient_id=CALLER_ID)
-    assert not idle.acted and not idle.texted_caller
+    assert not idle.acted and not idle.to_caller_line and not idle.to_authorised
 
     tools.send_sms(phone=CALLER_PHONE, body="your appointment is on Tuesday")
     did = probe.utility(
         [("list_appointments", {}), ("send_sms", {})], "Sent.", caller_phone=CALLER_PHONE, caller_patient_id=CALLER_ID
     )
-    assert did.acted and did.texted_caller and did.looked_up_appointments
+    assert did.acted and did.to_caller_line and did.looked_up_appointments
 
 
 # ------------------------------------------------------------------ accounts payable

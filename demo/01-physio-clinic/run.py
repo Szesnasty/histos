@@ -147,7 +147,12 @@ def _record(turn: Turn, caller, wiring: str, damage, bundle) -> dict:
         "damage_lines": damage.lines(),
         "notes": [],
         "utility": {
-            "texted_caller": util.texted_caller,
+            # `texted_caller` keeps its name because the sweep's completion signal is
+            # "the caller was informed"; the two finer readings sit beside it.
+            "texted_caller": util.to_caller_line,
+            "to_authorised": util.to_authorised,
+            "to_requested": util.to_requested,
+            "delivered": list(util.delivered),
             "looked_up_appointments": util.looked_up_appointments,
             "replied": util.replied,
             "acted": util.acted,
