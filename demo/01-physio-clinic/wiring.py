@@ -17,7 +17,9 @@ Read `README.md` for what survives.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,75 @@ from langchain_core.tools import StructuredTool
 from histos import Gate, Principal, ResourceNotFound, load_policy
 from histos.integrations.langchain import protect_tools
 
-POLICY_PATH = Path(__file__).resolve().parent / "security.policy.yaml"
+_HERE = Path(__file__).resolve().parent
+POLICY_PATH = _HERE / "security.policy.yaml"
+
+#: Which ruleset to load. `CLINIC_POLICY=confirm` selects the variant that replaces
+#: the silent recipient rewrite with a human approval — see `security.confirm.policy.yaml`.
+POLICY_PATHS = {"bind": POLICY_PATH, "confirm": _HERE / "security.confirm.policy.yaml"}
+
+
+def policy_path() -> Path:
+    return POLICY_PATHS.get(os.environ.get("CLINIC_POLICY", "bind"), POLICY_PATH)
+
+
+class Reception:
+    """The human the confirmation policy inserts, in three settings.
+
+    The setting is the experiment. A confirmation is only ever worth what the person
+    answering it can check, and the shipped `bind` rule exists precisely because *in
+    the request itself* there is nothing that separates a carer's number from an
+    attacker's. So this brackets the space rather than picking a winner:
+
+    ``registered``  approves the caller's own line, and any number the clinic
+                    verified out of band and wrote into `registered_contacts`. This
+                    is the only setting with a fact the attacker cannot supply.
+    ``strict``      approves only the caller's own line. Outcome-equivalent to `bind`
+                    on damage — but it *refuses* the carer request out loud instead
+                    of silently redirecting it, which is a different product.
+    ``credulous``   approves whatever was asked for. The upper bound on what a tired
+                    receptionist gives you, and the control that shows a confirmation
+                    with nothing to check against is worth nothing here.
+    """
+
+    def __init__(self, caller: "Caller", mode: str | None = None) -> None:
+        self.caller = caller
+        self.mode = mode or os.environ.get("CLINIC_APPROVER", "registered")
+        self.decisions: list[tuple[str, bool, str]] = []
+
+    def __call__(self, ask: Any) -> bool:
+        # The gate hands a `GateRequest` — tool name, a detached copy of the args, and
+        # the principal. Not a dict: reading it as one raised, and a raising confirm
+        # callback is a denial, so the first version of this refused every SMS and
+        # looked exactly like a very strict operator.
+        requested = _digits(ask.args.get("phone"))
+        own = _digits(self.caller.phone)
+        if requested == own:
+            return self._record(requested, True, "the number the caller is ringing from")
+        if self.mode == "credulous":
+            return self._record(requested, True, "approved as asked")
+        if self.mode == "strict":
+            return self._record(requested, False, "not the calling line")
+        registered = {_digits(p) for p in _registered_numbers(self.caller.patient_id)}
+        if requested in registered:
+            return self._record(requested, True, "registered at reception, verified out of band")
+        return self._record(requested, False, "not the calling line and not a registered contact")
+
+    def _record(self, phone: str, ok: bool, why: str) -> bool:
+        self.decisions.append((phone, ok, why))
+        return ok
+
+
+def _digits(phone: Any) -> str:
+    return re.sub(r"\D", "", "" if phone is None else str(phone))
+
+
+def _registered_numbers(patient_id: int) -> list[str]:
+    """Numbers reception verified out of band. Not writable by any tool in either wiring."""
+    conn = connect()
+    rows = conn.execute("SELECT phone FROM registered_contacts WHERE patient_id = ?", (patient_id,)).fetchall()
+    conn.close()
+    return [r["phone"] for r in rows]
 
 
 @dataclass(frozen=True)
@@ -211,12 +281,24 @@ class Protected:
     #: reaching a function is counted whichever path it took. This is what makes the
     #: mediation check mean what it says.
     executions: Executions
+    #: The human the confirmation variant inserts, or None under the shipped policy.
+    reception: Reception | None = None
 
 
-def protected() -> Protected:
+def protected(caller: Caller | None = None) -> Protected:
     """The domain functions with no wrapper, gated. The policy decides; identity
-    arrives per request from `use_principal()`."""
-    gate = Gate(load_policy(POLICY_PATH), resource_resolver=resolve_resource)
+    arrives per request from `use_principal()`.
+
+    `caller` is only needed by the confirmation variant, which has to ask somebody.
+    Under the shipped policy nothing is asked and it is ignored — the parameter is
+    optional so every existing call site keeps working unchanged.
+    """
+    reception = Reception(caller) if caller is not None and policy_path().name.endswith("confirm.policy.yaml") else None
+    gate = Gate(
+        load_policy(policy_path()),
+        resource_resolver=resolve_resource,
+        confirm=reception,
+    )
     executions = Executions()
     counted = _as_langchain_tools(executions.wrap_all(clinic_tools.AGENT_TOOLS))
-    return Protected(protect_tools(counted, gate=gate), gate, executions)
+    return Protected(protect_tools(counted, gate=gate), gate, executions, reception)
