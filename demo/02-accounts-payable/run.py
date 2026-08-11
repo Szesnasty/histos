@@ -15,16 +15,23 @@ delta printed at the end is what the policy adds on top of that.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 
 from ap.store import INVOICES, connect, reset
-from graph import MODEL, build_graph, exchanges, process
-from probe import inspect
+from graph import MAX_TURNS, MODEL, TEMPERATURE, build_graph, exchanges, process, usage
+from probe import inspect, utility
 from wiring import FinanceOfficer, Protected, ap_principal, protected, unprotected
 
 from histos import use_principal
 
 GREEN, RED, DIM, BOLD, OFF = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
+
+# One JSON object per wiring, straight from the probe. See the note in
+# `03-oncall-triage/run.py` — the sweep used to read its verdict by scanning stdout
+# for a damage glyph, and stdout carries prose the model wrote.
+RESULT_LINES = os.environ.get("HISTOS_DEMO_RESULT") == "1"
 
 LABELS = {
     1: "legitimate",
@@ -35,17 +42,23 @@ LABELS = {
 }
 
 
-def _settle(invoice_id: int, *, gated: bool, interactive: bool = False) -> tuple[list, Protected | None]:
+def _settle(invoice_id: int, *, gated: bool, interactive: bool = False) -> tuple[list, Protected | None, dict]:
+    """One invoice through one wiring. The state comes back too, not just the calls.
+
+    `exchanges()` alone cannot say whether the workflow ran or died: a failed run
+    returns a stub state with no tool calls, which renders identically to a model
+    that read the invoice and correctly did nothing.
+    """
     reset()
     if not gated:
         state = process(build_graph(unprotected()), invoice_id)
-        return exchanges(state), None
+        return exchanges(state), None, state
 
     bundle = protected(FinanceOfficer(interactive=interactive))
     graph = build_graph(bundle.tools)
     with use_principal(ap_principal()):
         state = process(graph, invoice_id, approver=bundle.officer)
-    return exchanges(state), bundle
+    return exchanges(state), bundle, state
 
 
 def _render(calls: list, bundle: Protected | None, indent: str = "    ") -> bool:
@@ -92,6 +105,11 @@ def _render(calls: list, bundle: Protected | None, indent: str = "    ") -> bool
             print(f"{indent}{RED}{BOLD}✗ {line}{OFF}")
     else:
         print(f"{indent}{GREEN}✓ no money went anywhere it should not{OFF}")
+    # Printed either way and never part of the verdict: mail off the supplier list is
+    # a real difference between the columns, but it is not money going astray, and
+    # counting it made an agent escalating to its own finance team score as fraud.
+    for line in damage.notes():
+        print(f"{indent}{DIM}· {line}{OFF}")
     return bool(damage)
 
 
@@ -150,14 +168,65 @@ def cmd_checks(_: argparse.Namespace) -> int:
     return checks.main()
 
 
+def _record(invoice_id: int, wiring: str, calls: list, bundle: Protected | None, state: dict) -> dict:
+    """Everything a later re-scoring could want, from the same objects `_render` prints.
+
+    `utility` is the control the damage column cannot supply on its own: a workflow
+    that never ran moves no money, and without a completion signal beside the harm
+    signal that is indistinguishable from a workflow that was correctly stopped.
+    """
+    damage = inspect()
+    tools_called = [name for name, _args, _result in calls]
+    util = utility(invoice_id, tools_called)
+    conn = connect()
+    payments = [dict(r) for r in conn.execute("SELECT invoice_id, iban, amount_pln FROM payments ORDER BY id")]
+    conn.close()
+    return {
+        "wiring": wiring,
+        "damage": bool(damage),
+        "damage_lines": damage.lines(),
+        "notes": damage.notes(),
+        "utility": {
+            "settled": util.settled,
+            "flagged": util.flagged,
+            "parked": util.parked,
+            "decided": util.decided,
+            "status": util.status,
+        },
+        "calls": [{"tool": name, "args": args} for name, args, _result in calls],
+        "denials": sum(1 for _n, _a, r in calls if "ACTION_NOT_AUTHORIZED" in r or "blocked by policy" in r),
+        "steps": len(calls),
+        "payments": payments,
+        "approvals": [] if bundle is None else [[ask["tool"], ok, why] for ask, ok, why in bundle.officer.decisions],
+        "audit_entries": 0 if bundle is None else len(bundle.audit.entries),
+        "error": state.get("error", ""),
+        "turns": state.get("turns", 0),
+        "max_turns": MAX_TURNS,
+        "model": MODEL,
+        "temperature": TEMPERATURE,
+        "usage": usage(state),
+    }
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     print(f"model: {MODEL}")
     print(f"\n{BOLD}invoice {args.invoice_id} — {LABELS.get(args.invoice_id, '?')}{OFF}")
-    for label, gated in ((f"{RED}WITHOUT histos{OFF}", False), (f"{GREEN}WITH histos{OFF}", True)):
+    failed = False
+    for label, wiring, gated in (
+        (f"{RED}WITHOUT histos{OFF}", "unprotected", False),
+        (f"{GREEN}WITH histos{OFF}", "protected", True),
+    ):
         print(f"\n  {label}")
-        calls, bundle = _settle(args.invoice_id, gated=gated)
+        calls, bundle, state = _settle(args.invoice_id, gated=gated)
         _render(calls, bundle)
-    return 0
+        if state.get("error"):
+            print(f"    {RED}{BOLD}! the workflow never ran: {str(state['error'])[:160]}{OFF}")
+            failed = True
+        if RESULT_LINES:
+            print("RESULT " + json.dumps(_record(args.invoice_id, wiring, calls, bundle, state), default=str))
+    # A run the model never answered is not a run where no money moved, and the exit
+    # code is the one signal a harness gets for free.
+    return 1 if failed else 0
 
 
 def cmd_all(_: argparse.Namespace) -> int:
@@ -168,7 +237,7 @@ def cmd_all(_: argparse.Namespace) -> int:
         print(f"{BOLD}invoice {invoice_id} — {LABELS[invoice_id]}{OFF}")
         for label, gated in ((f"{RED}WITHOUT histos{OFF}", False), (f"{GREEN}WITH histos{OFF}", True)):
             print(f"\n  {label}")
-            calls, bundle = _settle(invoice_id, gated=gated)
+            calls, bundle, _state = _settle(invoice_id, gated=gated)
             if _render(calls, bundle):
                 tally[gated] += 1
         print()
@@ -233,7 +302,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     print(f"model: {MODEL}   policy {'ON' if args.histos else 'OFF'}")
     if args.ask and not args.histos:
         print(f"{DIM}  (--ask needs --histos: without a policy nothing asks anyone){OFF}")
-    calls, bundle = _settle(args.invoice_id, gated=args.histos, interactive=args.ask)
+    calls, bundle, _state = _settle(args.invoice_id, gated=args.histos, interactive=args.ask)
     _render(calls, bundle, indent="  ")
     conn = connect()
     print(f"\n{DIM}  payments now on file:{OFF}")

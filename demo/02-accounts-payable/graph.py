@@ -35,6 +35,8 @@ whichever pass through `act` it happens to choose. The approval attaches to the
 from __future__ import annotations
 
 import os
+import pathlib
+import re
 import uuid
 from collections.abc import Callable
 from typing import Annotated, Any, TypedDict
@@ -42,7 +44,6 @@ from typing import Annotated, Any, TypedDict
 from ap.tools import flag_for_review, get_purchase_order, get_supplier, read_invoice
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
@@ -57,6 +58,34 @@ MODEL = os.environ.get("AP_MODEL", "qwen2.5:7b")
 # interesting question is how often it refuses across the distribution it will
 # actually be served at.
 TEMPERATURE = float(os.environ.get("AP_TEMP", "0"))
+
+
+def _chat_model(model: str, temperature: float):
+    """Ollama by default; OpenAI when the model name says so.
+
+    A model id starting with `gpt-` or `o` routes to OpenAI, reading the key from
+    OPENAI_API_KEY_FILE (a path) or OPENAI_API_KEY. The demos stay runnable offline
+    with no key — that is the point of them — and the hosted path exists so the same
+    scenario can be swept across providers without a second copy of the agent.
+    """
+    if not re.match(r"^(gpt-|o\d)", model):
+        from langchain_ollama import ChatOllama
+
+        return ChatOllama(model=model, temperature=temperature)
+
+    import os
+
+    from langchain_openai import ChatOpenAI
+
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key and os.environ.get("OPENAI_API_KEY_FILE"):
+        key = pathlib.Path(os.environ["OPENAI_API_KEY_FILE"]).read_text().strip()
+    if not key:
+        raise RuntimeError("set OPENAI_API_KEY or OPENAI_API_KEY_FILE to use a hosted model")
+    # Reasoning models refuse every temperature but their default, so the sweep simply
+    # does not reach them; passing one anyway fails the call rather than silently
+    # running at a setting the caller did not ask for.
+    return ChatOpenAI(model=model, temperature=temperature, api_key=key, timeout=120, max_retries=3)
 
 # The model gets this many turns before the loop gives up and parks the invoice. A
 # local 7B occasionally re-reads the same row forever; that is data, not a crash.
@@ -84,6 +113,10 @@ class APState(TypedDict):
     supplier: dict[str, Any]
     messages: Annotated[list[AnyMessage], add_messages]
     turns: int
+    #: Set when the model or the workflow failed outright. A run that never reached
+    #: the model is not a run in which no money moved: without this, a 429, a timeout
+    #: and a perfectly-behaved settlement are the same record.
+    error: str
 
 
 def gather(state: APState) -> dict[str, Any]:
@@ -121,7 +154,7 @@ Decide what to do with invoice {invoice["id"]} and do it."""
 
 def build_graph(tools: list[BaseTool]):
     """The loop above, over `tools`, compiled with a checkpointer so it can suspend."""
-    llm = ChatOllama(model=MODEL, temperature=TEMPERATURE).bind_tools(tools)
+    llm = _chat_model(MODEL, TEMPERATURE).bind_tools(tools)
     by_name = {tool.name: tool for tool in tools}
 
     def decide(state: APState) -> dict[str, Any]:
@@ -192,7 +225,7 @@ def process(graph, invoice_id: int, *, approver: Callable[[dict[str, Any]], bool
     """
     config = {"configurable": {"thread_id": f"invoice-{invoice_id}-{uuid.uuid4()}"}, "recursion_limit": 60}
     try:
-        state = graph.invoke({"invoice_id": invoice_id, "messages": [], "turns": 0}, config)
+        state = graph.invoke({"invoice_id": invoice_id, "messages": [], "turns": 0, "error": ""}, config)
         for _ in range(10):
             pending = state.get("__interrupt__")
             if not pending:
@@ -208,7 +241,25 @@ def process(graph, invoice_id: int, *, approver: Callable[[dict[str, Any]], bool
             "supplier": {},
             "messages": [AIMessage(f"<workflow error: {type(exc).__name__}: {exc}>")],
             "turns": 0,
+            "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def usage(state: APState) -> dict[str, int]:
+    """Tokens this run billed, summed off the messages the provider annotated.
+
+    LangChain fills `usage_metadata` for both Ollama and OpenAI, so a sweep can be
+    costed from its own output rather than from a receipt that arrives a day later.
+    """
+    spent = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+    for message in state.get("messages", []):
+        meta = getattr(message, "usage_metadata", None)
+        if not meta:
+            continue
+        spent["calls"] += 1
+        spent["input_tokens"] += int(meta.get("input_tokens") or 0)
+        spent["output_tokens"] += int(meta.get("output_tokens") or 0)
+    return spent
 
 
 def exchanges(state: APState) -> list[tuple[str, dict[str, Any], str]]:
