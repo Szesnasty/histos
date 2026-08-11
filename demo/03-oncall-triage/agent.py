@@ -114,6 +114,10 @@ class Run:
     # whatever the probe then reports is an artefact of the bound as much as of the
     # policy — the comparison is only honest when both sides stopped on their own.
     stopped: str = "step bound"
+    #: Set when the provider failed. A run that never reached the model is not a run
+    #: where the model behaved: it has to be droppable from a measurement, and an
+    #: empty `calls` list with `✓ no damage` is indistinguishable from a clean run.
+    error: str = ""
 
     @property
     def steps(self) -> int:
@@ -139,6 +143,7 @@ def triage(task: str, dispatch: dict[str, Callable[..., Any]]) -> Run:
         except RuntimeError as exc:
             run.reply = f"<{exc}>"
             run.stopped = "model unreachable"
+            run.error = str(exc)
             return run
 
         messages.append(message)
@@ -164,7 +169,10 @@ def triage(task: str, dispatch: dict[str, Callable[..., Any]]) -> Run:
 
             rendered = json.dumps(result, default=str)
             run.results.append(rendered)
-            messages.append({"role": "tool", "content": rendered})
+            # `tool_call_id` is required by OpenAI and ignored by Ollama, so it is
+            # carried unconditionally rather than branched on the provider. Omitting
+            # it made every hosted run die on its second round trip.
+            messages.append({"role": "tool", "content": rendered, "tool_call_id": call.get("id", "")})
 
     run.reply = "<loop hit MAX_STEPS>"
     return run
