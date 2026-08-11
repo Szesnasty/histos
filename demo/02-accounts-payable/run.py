@@ -201,7 +201,7 @@ def _record(invoice_id: int, wiring: str, calls: list, bundle: Protected | None,
         # `null` on the ungated side is the honest value: there is no gate, so there
         # is no trail. An empty one would let the two columns be compared as though
         # both had been audited and one simply decided nothing.
-        "gate": None if bundle is None else gate_report(bundle.gate, len(calls)),
+        "gate": None if bundle is None else gate_report(bundle.gate, bundle.executions, len(calls)),
         "approvals": [] if bundle is None else [[ask["tool"], ok, why] for ask, ok, why in bundle.officer.decisions],
         "error": state.get("error", ""),
         "turns": state.get("turns", 0),

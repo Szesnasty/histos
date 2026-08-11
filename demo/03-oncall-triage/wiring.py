@@ -21,10 +21,11 @@ answer "is this dispatch entry still gated?" — see `ungated_entries`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gatereport import Executions
 from ops import tools as ops_tools
 from ops.store import connect
 
@@ -65,6 +66,11 @@ class Wiring:
     gate: Gate
     guarded: dict[str, Callable[..., Any]]
     dispatch: dict[str, Callable[..., Any]]
+    #: Counts tool bodies that actually ran. The counters wrap the raw functions
+    #: *before* the gate does, so a dispatch entry pointing straight at a raw
+    #: function — the bug `half_protected` plants — is still counted. That is what
+    #: lets the mediation check see a call the policy never did.
+    executions: Executions = field(default_factory=Executions)
 
 
 def protected(alert_id: int | None = None) -> dict[str, Callable[..., Any]]:
@@ -79,8 +85,10 @@ def protected(alert_id: int | None = None) -> dict[str, Callable[..., Any]]:
 
 def protected_wiring(alert_id: int | None = None) -> Wiring:
     gate = build_gate(alert_id)
-    guarded = gate.protect(ops_tools.ALL_TOOLS).tools
-    return Wiring(gate=gate, guarded=guarded, dispatch=dict(guarded))
+    executions = Executions()
+    counted = executions.wrap_all(ops_tools.ALL_TOOLS)
+    guarded = gate.protect(counted).tools
+    return Wiring(gate=gate, guarded=guarded, dispatch=dict(guarded), executions=executions)
 
 
 def half_protected(alert_id: int | None = None) -> dict[str, Callable[..., Any]]:
@@ -94,7 +102,9 @@ def half_protected(alert_id: int | None = None) -> dict[str, Callable[..., Any]]
 
 def half_protected_wiring(alert_id: int | None = None) -> Wiring:
     wiring = protected_wiring(alert_id)
-    wiring.dispatch["deploy_service"] = ops_tools.deploy_service  # ← the whole bug
+    # The raw function, reached through the counter rather than the gate — which is
+    # exactly the shape of the accident, and is what makes the bypass observable.
+    wiring.dispatch["deploy_service"] = wiring.executions.wrap(ops_tools.deploy_service)  # ← the whole bug
     return wiring
 
 
@@ -109,9 +119,7 @@ def triage_principal() -> Principal:
 def _open_alert_for(service: Any) -> bool:
     conn = connect()
     try:
-        row = conn.execute(
-            "SELECT 1 FROM alerts WHERE service = ? AND resolved = 0 LIMIT 1", (service,)
-        ).fetchone()
+        row = conn.execute("SELECT 1 FROM alerts WHERE service = ? AND resolved = 0 LIMIT 1", (service,)).fetchone()
     finally:
         conn.close()
     return row is not None
@@ -220,9 +228,7 @@ def ungated_entries(wiring: Wiring) -> list[str]:
     ungated — including the gated ones. Nothing readable off the object is load
     bearing. Keep the mapping `protect()` returned and compare against it.
     """
-    return sorted(
-        name for name, fn in wiring.dispatch.items() if wiring.guarded.get(name) is not fn
-    )
+    return sorted(name for name, fn in wiring.dispatch.items() if wiring.guarded.get(name) is not fn)
 
 
 def coverage_report(wiring: Wiring) -> dict[str, Any]:

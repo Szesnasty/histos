@@ -14,12 +14,13 @@ supplier that is, and what account is on file for them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ap import tools as ap_tools
 from ap.store import connect
+from gatereport import Executions
 from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
@@ -259,6 +260,9 @@ class Protected:
     officer: FinanceOfficer
     gate: Gate
     audit: InMemoryAuditSink
+    #: Counts tool bodies that actually ran, wrapped *inside* the gate so anything
+    #: reaching a function is counted whichever path it took.
+    executions: Executions = field(default_factory=Executions)
 
     def denials(self) -> list[dict[str, Any]]:
         return [e for e in self.audit.entries if e["effect"] == "deny"]
@@ -289,7 +293,9 @@ def protected(officer: FinanceOfficer | None = None) -> Protected:
         confirm_suspends=(GraphInterrupt,),
         audit=audit,
     )
-    return Protected(protect_tools(_as_langchain_tools(ap_tools.ALL_TOOLS), gate=gate), officer, gate, audit)
+    executions = Executions()
+    counted = _as_langchain_tools(executions.wrap_all(ap_tools.ALL_TOOLS))
+    return Protected(protect_tools(counted, gate=gate), officer, gate, audit, executions)
 
 
 def ap_principal() -> Principal:

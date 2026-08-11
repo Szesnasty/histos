@@ -87,6 +87,7 @@ def _chat_model(model: str, temperature: float):
     # running at a setting the caller did not ask for.
     return ChatOpenAI(model=model, temperature=temperature, api_key=key, timeout=120, max_retries=3)
 
+
 # The model gets this many turns before the loop gives up and parks the invoice. A
 # local 7B occasionally re-reads the same row forever; that is data, not a crash.
 MAX_TURNS = 8

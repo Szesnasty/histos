@@ -94,8 +94,7 @@ def schemas_for(functions: list[Callable[..., Any]]) -> list[dict[str, Any]]:
     schemas = []
     for fn in functions:
         properties = {
-            name: {"type": _json_type(param.annotation)}
-            for name, param in inspect.signature(fn).parameters.items()
+            name: {"type": _json_type(param.annotation)} for name, param in inspect.signature(fn).parameters.items()
         }
         schemas.append(
             tool_schema(fn.__name__, (fn.__doc__ or "").strip().split("\n")[0], properties, list(properties))

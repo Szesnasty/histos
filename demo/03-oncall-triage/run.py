@@ -86,13 +86,15 @@ class Result:
     #: The gate that decided, or None when there was none. A run that records only
     #: whether harm occurred cannot say whether the policy is the reason it did not.
     gate: object = None
+    #: The execution counter belonging to that gate's wiring, or None when ungated.
+    executions: object = None
     #: Tokens this wiring spent, not the process total. `USAGE` accumulates across
     #: both wirings in one `compare`, so reading it directly attributed the
     #: unprotected column's spend to the protected one as well.
     usage: dict = field(default_factory=dict)
 
 
-def _execute(alert_id: int, dispatch, *, gated: bool, gate=None) -> Result:
+def _execute(alert_id: int, dispatch, *, gated: bool, gate=None, executions=None) -> Result:
     """One run, measured, printing nothing.
 
     Split out of `_run` so the same run can be rendered for a human or serialised
@@ -112,7 +114,13 @@ def _execute(alert_id: int, dispatch, *, gated: bool, gate=None) -> Result:
     end_state = tuple(state())
     spent = {key: USAGE[key] - before.get(key, 0) for key in USAGE}
     return Result(
-        run=run, damage=inspect(), triage=outcome(alert_id), end_state=end_state, gate=gate, usage=spent
+        run=run,
+        damage=inspect(),
+        triage=outcome(alert_id),
+        end_state=end_state,
+        gate=gate,
+        executions=executions,
+        usage=spent,
     )
 
 
@@ -152,13 +160,13 @@ def _record(result: Result, wiring: str) -> dict:
         # `null` on the ungated side is the honest value: there is no gate, so there is
         # no trail. An empty one would let the two columns be compared as though both
         # had been audited and one simply decided nothing.
-        "gate": None if result.gate is None else gate_report(result.gate, run.steps),
+        "gate": None if result.gate is None else gate_report(result.gate, result.executions, run.steps),
         "usage": result.usage,
     }
 
 
-def _run(alert_id: int, dispatch, *, gated: bool, wiring: str = "", gate=None) -> Result:
-    result = _execute(alert_id, dispatch, gated=gated, gate=gate)
+def _run(alert_id: int, dispatch, *, gated: bool, wiring: str = "", gate=None, executions=None) -> Result:
+    result = _execute(alert_id, dispatch, gated=gated, gate=gate, executions=executions)
     run, damage, triaged = result.run, result.damage, result.triage
 
     for name, args in run.calls:
@@ -184,15 +192,15 @@ def _run(alert_id: int, dispatch, *, gated: bool, wiring: str = "", gate=None) -
     mark = GREEN if triaged.healthy else (RED if triaged.false_all_clear else DIM)
     print(f"    {mark}· triage: {triaged.line()}{OFF}")
     if result.gate is not None:
-        report = gate_report(result.gate, run.steps)
+        report = gate_report(result.gate, result.executions, run.steps)
         print(
             f"    {DIM}▤ gate: {report['decisions']} decisions, {len(report['stopped'])} stopped, "
             f"{report['rebindings']} args rebound, policy {report['policy_hash'][:23]}{OFF}"
         )
         if not report["complete_mediation"]:
             print(
-                f"    {RED}{BOLD}▤ INCOMPLETE MEDIATION: {report['model_calls']} tool calls, "
-                f"{report['pre_decisions']} gate decisions — a call reached its function unseen{OFF}"
+                f"    {RED}{BOLD}▤ INCOMPLETE MEDIATION: {report['executions']} tool bodies ran, "
+                f"{report['permitted']} permitted by the policy — a call reached its function unseen{OFF}"
             )
     print(f"    {DIM}· {run.steps} tool calls, loop ended: {run.stopped}{OFF}")
     if run.error:
@@ -236,21 +244,29 @@ def cmd_schemas(_: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     guarded = protected_wiring(args.alert_id)
     wirings = [
-        (f"{RED}WITHOUT histos{OFF}", "unprotected", unprotected(), False, None),
-        (f"{GREEN}WITH histos{OFF}", "protected", guarded.dispatch, True, guarded.gate),
+        (f"{RED}WITHOUT histos{OFF}", "unprotected", unprotected(), False, None, None),
+        (f"{GREEN}WITH histos{OFF}", "protected", guarded.dispatch, True, guarded.gate, guarded.executions),
     ]
     if args.half:
         half = half_protected_wiring(args.alert_id)
         wirings.append(
-            (f"{RED}WITH histos, one tool left ungated{OFF}", "half_protected", half.dispatch, True, half.gate)
+            (
+                f"{RED}WITH histos, one tool left ungated{OFF}",
+                "half_protected",
+                half.dispatch,
+                True,
+                half.gate,
+                half.executions,
+            )
         )
 
     _banner()
     print(f"{BOLD}alert {args.alert_id}{OFF}")
     failed = False
-    for label, wiring, dispatch, gated, gate in wirings:
+    for label, wiring, dispatch, gated, gate, executions in wirings:
         print(f"\n  {label}")
-        failed |= bool(_run(args.alert_id, dispatch, gated=gated, wiring=wiring, gate=gate).run.error)
+        run = _run(args.alert_id, dispatch, gated=gated, wiring=wiring, gate=gate, executions=executions)
+        failed |= bool(run.run.error)
     # A run the model never answered is not a run with no damage, and the exit code is
     # the one signal a harness gets for free. Returning 0 here is how a dead provider
     # became forty-five well-formed data points saying the gate changed nothing.
@@ -262,7 +278,13 @@ def cmd_triage(args: argparse.Namespace) -> int:
     dispatch = guarded.dispatch if guarded else unprotected()
     _banner()
     print(f"policy {'ON' if args.histos else 'OFF'}")
-    _run(args.alert_id, dispatch, gated=args.histos, gate=guarded.gate if guarded else None)
+    _run(
+        args.alert_id,
+        dispatch,
+        gated=args.histos,
+        gate=guarded.gate if guarded else None,
+        executions=guarded.executions if guarded else None,
+    )
     return 0
 
 
@@ -280,7 +302,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     plain = _run(args.alert_id, unprotected(), gated=False)
     print(f"\n  {GREEN}WITH histos{OFF}")
     guarded = protected_wiring(args.alert_id)
-    gated = _run(args.alert_id, guarded.dispatch, gated=True, gate=guarded.gate)
+    gated = _run(args.alert_id, guarded.dispatch, gated=True, gate=guarded.gate, executions=guarded.executions)
 
     print()
     failures = []
@@ -307,8 +329,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     elif not failures:
         print(f"  {GREEN}{BOLD}✓ the legitimate alert is fixed identically with the policy on{OFF}")
     print(
-        f"  {DIM}cost of the policy on this alert: {gated.run.steps} tool calls "
-        f"against {plain.run.steps} ungated{OFF}"
+        f"  {DIM}cost of the policy on this alert: {gated.run.steps} tool calls against {plain.run.steps} ungated{OFF}"
     )
     return 1 if failures or inconclusive else 0
 

@@ -142,9 +142,35 @@ def _bypass_is_caught() -> str | None:
         with use_principal(wiring_mod.triage_principal()):
             w.dispatch["read_alert"](alert_id=2)
             w.dispatch["deploy_service"](service="checkout", environment="production", version="v5.0.0-hotfix")
-        v = report.gate_report(w.gate, model_calls=2)
+        v = report.gate_report(w.gate, w.executions, model_calls=2)
         assert not v["complete_mediation"], v
-        assert v["pre_decisions"] == 1, v
+        assert v["executions"] == 2 and v["permitted"] == 1, v
+        """,
+    )
+
+
+@case("gate", "a call the framework rejected is not reported as a bypass")
+def _rejected_call_is_not_a_bypass() -> str | None:
+    """The false positive this metric shipped with.
+
+    A malformed tool call never reaches the gate and never reaches the tool. Counting
+    it as a breach would report "mediation degrades with temperature" — because
+    malformed calls get commoner as temperature rises — from an artefact of the
+    metric's own definition, in the exact shape of a real finding.
+    """
+    return _in_demo(
+        "03-oncall-triage",
+        """
+        report, wiring_mod = load("gatereport"), load("wiring")
+        from ops.store import reset
+        from histos import use_principal
+        w = wiring_mod.protected_wiring(2)
+        reset()
+        with use_principal(wiring_mod.triage_principal()):
+            w.dispatch["read_alert"](alert_id=2)
+        v = report.gate_report(w.gate, w.executions, model_calls=3)
+        assert v["executions"] == 1 and v["model_calls"] == 3, v
+        assert v["complete_mediation"], v
         """,
     )
 
@@ -162,7 +188,7 @@ def _mediation_holds() -> str | None:
         with use_principal(wiring_mod.triage_principal()):
             w.dispatch["read_alert"](alert_id=2)
             w.dispatch["restart_service"](service="search", environment="production")
-        v = report.gate_report(w.gate, model_calls=2)
+        v = report.gate_report(w.gate, w.executions, model_calls=2)
         assert v["complete_mediation"], v
         assert v["policy_hash"].startswith("sha256:"), v
         """,
@@ -183,7 +209,7 @@ def _rebinding_is_visible() -> str | None:
         send = next(t for t in bundle.tools if t.name == "send_sms")
         with use_principal(wiring_mod.caller_principal(caller)):
             send.invoke({"phone": "+48 999 888 777", "body": "your appointment"})
-        v = report.gate_report(bundle.gate, model_calls=1)
+        v = report.gate_report(bundle.gate, bundle.executions, model_calls=1)
         assert v["rebound_args"] == ["phone"], v
         assert v["by_effect"].get("deny", 0) == 0, v
         """,
@@ -207,7 +233,7 @@ def _denial_is_attributed() -> str | None:
                 pay.invoke({"invoice_id": 2, "iban": FRAUD_IBAN, "amount_pln": 14200})
             except Exception:
                 pass
-        stopped = report.gate_report(bundle.gate, model_calls=1)["stopped"]
+        stopped = report.gate_report(bundle.gate, bundle.executions, model_calls=1)["stopped"]
         assert stopped, "the fraud payment was not stopped"
         assert stopped[0]["rule"] == "resource_constraint", stopped
         assert stopped[0]["field"] == "payee_matches_supplier_record", stopped

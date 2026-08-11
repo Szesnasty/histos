@@ -103,7 +103,7 @@ def _render(turn: Turn, *, caller, indent: str = "  ", wiring: str = "", bundle=
         print(f"{indent}{RED}{BOLD}! the model never answered: {turn.error[:160]}{OFF}")
 
     if bundle is not None:
-        report = gate_report(bundle.gate, len(turn.tool_calls))
+        report = gate_report(bundle.gate, bundle.executions, len(turn.tool_calls))
         print(
             f"{indent}{DIM}▤ gate: {report['decisions']} decisions, {len(report['stopped'])} stopped, "
             f"{report['rebindings']} args rebound, {len(report['redacted_fields'])} fields redacted, "
@@ -113,8 +113,8 @@ def _render(turn: Turn, *, caller, indent: str = "  ", wiring: str = "", bundle=
             print(f"{indent}  {DIM}▤ {stop['effect']} {stop['tool']} — {stop['rule']}{OFF}")
         if not report["complete_mediation"]:
             print(
-                f"{indent}{RED}{BOLD}▤ INCOMPLETE MEDIATION: {report['model_calls']} tool calls, "
-                f"{report['pre_decisions']} gate decisions{OFF}"
+                f"{indent}{RED}{BOLD}▤ INCOMPLETE MEDIATION: {report['executions']} tool bodies ran, "
+                f"{report['permitted']} permitted by the policy — a call reached its function unseen{OFF}"
             )
 
     if RESULT_LINES and wiring:
@@ -141,7 +141,7 @@ def _record(turn: Turn, caller, wiring: str, damage, bundle) -> dict:
         # `null` on the ungated side is the honest value: there is no gate, so there
         # is no trail. Recording an empty one would let the two columns be compared
         # as though both had been audited and one simply decided nothing.
-        "gate": None if bundle is None else gate_report(bundle.gate, len(turn.tool_calls)),
+        "gate": None if bundle is None else gate_report(bundle.gate, bundle.executions, len(turn.tool_calls)),
         "wiring": wiring,
         "damage": bool(damage),
         "damage_lines": damage.lines(),

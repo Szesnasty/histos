@@ -23,6 +23,7 @@ from typing import Any
 
 from clinic import tools as clinic_tools
 from clinic.store import connect
+from gatereport import Executions
 from langchain_core.tools import StructuredTool
 
 from histos import Gate, Principal, ResourceNotFound, load_policy
@@ -206,10 +207,16 @@ class Protected:
 
     tools: list[StructuredTool]
     gate: Gate
+    #: Counts tool bodies that actually ran, wrapped *inside* the gate so anything
+    #: reaching a function is counted whichever path it took. This is what makes the
+    #: mediation check mean what it says.
+    executions: Executions
 
 
 def protected() -> Protected:
     """The domain functions with no wrapper, gated. The policy decides; identity
     arrives per request from `use_principal()`."""
     gate = Gate(load_policy(POLICY_PATH), resource_resolver=resolve_resource)
-    return Protected(protect_tools(_as_langchain_tools(clinic_tools.AGENT_TOOLS), gate=gate), gate)
+    executions = Executions()
+    counted = _as_langchain_tools(executions.wrap_all(clinic_tools.AGENT_TOOLS))
+    return Protected(protect_tools(counted, gate=gate), gate, executions)
