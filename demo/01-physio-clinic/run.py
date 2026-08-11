@@ -20,14 +20,23 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
+import os
 import sys
 
-from agent import MODEL, Turn, ask, build_agent
+from agent import MODEL, TEMPERATURE, Turn, ask, build_agent, usage
 from clinic.store import PATIENTS, connect, reset, use_private_db
-from probe import attempts, inspect
+from probe import attempts, inspect, utility
 from wiring import caller_principal, protected, resolve_caller, unprotected
 
 from histos import use_principal
+
+# One JSON object per wiring, straight from the probe. See the note in
+# `03-oncall-triage/run.py`: the sweep used to read its verdict by scanning stdout for
+# a damage glyph, and this file is where that was worst — the model's reply is printed
+# here, so a model that formatted its answer with a `✗` bullet could put DAMAGE in the
+# column where the gate had just worked.
+RESULT_LINES = os.environ.get("HISTOS_DEMO_RESULT") == "1"
 
 # Derived from the seed rather than typed out again: the previous copy had patient
 # 2 as "Piotr Nowak" while the database said "Peter Novak", so the system prompt
@@ -55,7 +64,7 @@ def _speak(agent, message: str, *, gated: bool, caller, thread_id: str) -> Turn:
         return ask(agent, message, thread_id=thread_id)
 
 
-def _render(turn: Turn, *, caller, indent: str = "  ") -> None:
+def _render(turn: Turn, *, caller, indent: str = "  ", wiring: str = "") -> None:
     for name, args in turn.tool_calls:
         rendered = ", ".join(f"{k}={v!r}" for k, v in args.items())
         print(f"{indent}{DIM}↳ {name}({rendered}){OFF}")
@@ -74,20 +83,79 @@ def _render(turn: Turn, *, caller, indent: str = "  ") -> None:
     else:
         print(f"{indent}{GREEN}✓ no damage{OFF}")
 
+    _show_messages(indent)
+
     if turn.reply:
-        print(f'{indent}{DIM}assistant: "{turn.reply[:220]}"{OFF}')
+        # `!r` and not `"{...}"`. A model reply can contain newlines, and printing it
+        # raw put model-authored lines into the transcript indistinguishable from the
+        # probe's own verdict lines — which is exactly how a reply narrating the
+        # gate's refusal could be scored as the gate causing damage.
+        print(f"{indent}{DIM}assistant: {turn.reply[:220]!r}{OFF}")
+    if turn.error:
+        print(f"{indent}{RED}{BOLD}! the model never answered: {turn.error[:160]}{OFF}")
+
+    if RESULT_LINES and wiring:
+        print("RESULT " + json.dumps(_record(turn, caller, wiring, damage), default=str))
+
+
+def _show_messages(indent: str) -> None:
+    """Every SMS that really went out. Printed because it is the completion signal.
+
+    A correctly-defended run ends with the caller texted on their verified line, and
+    nothing used to print that: a successful, correctly-bound SMS produced no output
+    at all and was indistinguishable from the assistant doing nothing.
+    """
+    conn = connect()
+    rows = conn.execute("SELECT to_phone, body FROM sent_messages").fetchall()
+    conn.close()
+    for row in rows:
+        print(f"{indent}{DIM}✉ sms to {row['to_phone']}: {row['body'][:60]!r}{OFF}")
+
+
+def _record(turn: Turn, caller, wiring: str, damage) -> dict:
+    util = utility(turn.tool_calls, turn.reply, caller_phone=caller.phone)
+    return {
+        "wiring": wiring,
+        "damage": bool(damage),
+        "damage_lines": damage.lines(),
+        "notes": [],
+        "utility": {
+            "texted_caller": util.texted_caller,
+            "looked_up_appointments": util.looked_up_appointments,
+            "replied": util.replied,
+            "acted": util.acted,
+            "tools_called": list(util.tools_called),
+        },
+        "calls": [{"tool": name, "args": args} for name, args in turn.tool_calls],
+        "denials": sum(1 for r in turn.tool_results if "blocked by policy" in r),
+        "steps": len(turn.tool_calls),
+        "attempts": attempts(turn.tool_calls, caller_phone=caller.phone, caller_patient_id=caller.patient_id),
+        "error": turn.error,
+        "reply": turn.reply[:400],
+        "caller_patient_id": caller.patient_id,
+        "model": MODEL,
+        "temperature": TEMPERATURE,
+        "usage": usage(turn),
+    }
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
     """The same sentence, the same model, both wirings."""
     print(f"model: {MODEL}   caller: {CALLERS[args.as_patient][0]} (patient {args.as_patient})")
     print(f"\n{BOLD}> {args.message}{OFF}")
-    for label, gated in ((f"{RED}WITHOUT histos{OFF}", False), (f"{GREEN}WITH histos{OFF}", True)):
+    failed = False
+    for label, wiring, gated in (
+        (f"{RED}WITHOUT histos{OFF}", "unprotected", False),
+        (f"{GREEN}WITH histos{OFF}", "protected", True),
+    ):
         print(f"\n{label}")
         agent, caller, thread = _session(args.as_patient, gated=gated)
         turn = _speak(agent, args.message, gated=gated, caller=caller, thread_id=thread)
-        _render(turn, caller=caller, indent="    ")
-    return 0
+        _render(turn, caller=caller, indent="    ", wiring=wiring)
+        failed |= bool(turn.error)
+    # A turn the model never answered is not a turn with no damage, and the exit code
+    # is the one signal a harness gets for free.
+    return 1 if failed else 0
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
@@ -134,6 +202,53 @@ def _show_clinic() -> None:
     print(f"{DIM}  sms sent: {[(m['to_phone'], m['body'][:40]) for m in msgs] or 'none'}{OFF}\n")
 
 
+def cmd_schemas(args: argparse.Namespace) -> int:
+    """What each wiring actually tells the model. Declared, not left to be discovered.
+
+    The on-call demo asserts its two wirings advertise identical schemas, so its
+    comparison measures the policy and nothing else. This demo cannot make that claim
+    and should not imply it: `unprotected()` hand-writes closures that drop the
+    `patient_id` parameter, while `protected()` gates the raw domain functions and
+    lets the policy bind it. That is deliberate — see `wiring.unprotected` — because
+    the alternative is a straw man where the app knows the caller and declines to use
+    it. But it has a consequence worth stating in the open: on the cross-patient
+    channels the ungated side is floored at zero by construction rather than by
+    measurement, so only the `send_sms` recipient, the cancellation budget and the
+    redacted field are genuine two-sided comparisons.
+
+    No model is involved. This is a fact about the toolbelts.
+    """
+    reset()
+    caller = resolve_caller(CALLERS[args.as_patient][1])
+    raw = {t.name: t for t in unprotected(caller)}
+    gated = {t.name: t for t in protected()}
+
+    print(f"{BOLD}what each wiring advertises{OFF}\n")
+    differing = []
+    for name in sorted(set(raw) | set(gated)):
+        left, right = raw.get(name), gated.get(name)
+        left_args = sorted(left.args_schema.model_json_schema().get("properties", {})) if left else ["(absent)"]
+        right_args = sorted(right.args_schema.model_json_schema().get("properties", {})) if right else ["(absent)"]
+        same = left_args == right_args
+        mark = f"{DIM}same {OFF}" if same else f"{RED}DIFFERS{OFF}"
+        if not same:
+            differing.append(name)
+        print(f"  {mark} {name:<22} ungated({', '.join(left_args) or '—'})  gated({', '.join(right_args) or '—'})")
+
+    print(
+        f"\n  {RED}{len(differing)} of {len(set(raw) | set(gated))} tools differ{OFF}: {', '.join(differing)}"
+        if differing
+        else f"\n  {GREEN}✓ identical schemas gated vs ungated{OFF}"
+    )
+    print(
+        f"  {DIM}The ungated side cannot express a cross-patient call at all, so the demo's\n"
+        f"  cross-patient damage channels are zero on that side by construction. The\n"
+        f"  channels that do compare both sides are: the send_sms recipient, the\n"
+        f"  cancellation budget, and the redacted national identity number.{OFF}"
+    )
+    return 0
+
+
 def cmd_attacks(_: argparse.Namespace) -> int:
     import attacks
 
@@ -165,6 +280,9 @@ def main() -> int:
     t = sub.add_parser("chat", parents=[common], help="talk to the assistant yourself")
     t.add_argument("--histos", action="store_true", help="run it behind the policy")
     t.set_defaults(func=cmd_chat)
+
+    s = sub.add_parser("schemas", parents=[common], help="what each wiring tells the model, and where they differ")
+    s.set_defaults(func=cmd_schemas)
 
     a = sub.add_parser("attacks", help="the four scripted attacks, both wirings")
     a.set_defaults(func=cmd_attacks)

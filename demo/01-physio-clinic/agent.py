@@ -31,13 +31,14 @@ the call and tells the truth. It also changed what attack 2 does — see the REA
 from __future__ import annotations
 
 import os
+import pathlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import InMemorySaver
 
 # Not every small model can hold a system prompt *and* still emit tool calls, which
@@ -54,6 +55,34 @@ MODEL = os.environ.get("CLINIC_MODEL", "qwen2.5:7b")
 # interesting question is how often it refuses across the distribution it will
 # actually be served at.
 TEMPERATURE = float(os.environ.get("CLINIC_TEMP", "0"))
+
+
+def _chat_model(model: str, temperature: float):
+    """Ollama by default; OpenAI when the model name says so.
+
+    A model id starting with `gpt-` or `o` routes to OpenAI, reading the key from
+    OPENAI_API_KEY_FILE (a path) or OPENAI_API_KEY. The demos stay runnable offline
+    with no key — that is the point of them — and the hosted path exists so the same
+    scenario can be swept across providers without a second copy of the agent.
+    """
+    if not re.match(r"^(gpt-|o\d)", model):
+        from langchain_ollama import ChatOllama
+
+        return ChatOllama(model=model, temperature=temperature)
+
+    import os
+
+    from langchain_openai import ChatOpenAI
+
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key and os.environ.get("OPENAI_API_KEY_FILE"):
+        key = pathlib.Path(os.environ["OPENAI_API_KEY_FILE"]).read_text().strip()
+    if not key:
+        raise RuntimeError("set OPENAI_API_KEY or OPENAI_API_KEY_FILE to use a hosted model")
+    # Reasoning models refuse every temperature but their default, so the sweep simply
+    # does not reach them; passing one anyway fails the call rather than silently
+    # running at a setting the caller did not ask for.
+    return ChatOpenAI(model=model, temperature=temperature, api_key=key, timeout=120, max_retries=3)
 
 SYSTEM_PROMPT = """You are the reception assistant for "Ruch" physiotherapy clinic in Krakow.
 
@@ -79,9 +108,24 @@ class Turn:
     reply: str = ""
     tool_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     tool_results: list[str] = field(default_factory=list)
+    #: Set when the agent never ran. A turn that never reached the model is not a
+    #: turn in which nothing bad happened: without this, a 429, a timeout and a
+    #: perfectly-behaved refusal are the same record, and all three read as safe.
+    error: str = ""
+    #: Messages the provider annotated with token counts, kept so a sweep can be
+    #: costed from its own output rather than from a receipt.
+    billed: list[dict[str, int]] = field(default_factory=list)
 
     def called(self, name: str) -> list[dict[str, Any]]:
         return [args for called, args in self.tool_calls if called == name]
+
+
+def usage(turn: Turn) -> dict[str, int]:
+    spent = {"calls": len(turn.billed), "input_tokens": 0, "output_tokens": 0}
+    for meta in turn.billed:
+        spent["input_tokens"] += int(meta.get("input_tokens") or 0)
+        spent["output_tokens"] += int(meta.get("output_tokens") or 0)
+    return spent
 
 
 def build_agent(tools: list[BaseTool], patient_id: int, patient_name: str):
@@ -93,7 +137,7 @@ def build_agent(tools: list[BaseTool], patient_id: int, patient_name: str):
     premise over two turns, then cash it in) impossible to even attempt.
     """
     return create_agent(
-        ChatOllama(model=MODEL, temperature=TEMPERATURE),
+        _chat_model(MODEL, TEMPERATURE),
         tools,
         system_prompt=SYSTEM_PROMPT.format(patient_id=patient_id, patient_name=patient_name),
         checkpointer=InMemorySaver(),
@@ -114,6 +158,7 @@ def ask(agent, message: str, *, thread_id: str = "default", recursion_limit: int
         state = agent.invoke({"messages": [HumanMessage(message)]}, config=config)
     except Exception as exc:  # a local model can loop; that is data, not a crash
         turn.reply = f"<agent error: {type(exc).__name__}: {exc}>"
+        turn.error = f"{type(exc).__name__}: {exc}"
         return turn
 
     for msg in state["messages"][already:]:
@@ -122,6 +167,8 @@ def ask(agent, message: str, *, thread_id: str = "default", recursion_limit: int
                 turn.tool_calls.append((call["name"], call["args"]))
             if isinstance(msg.content, str) and msg.content.strip():
                 turn.reply = msg.content.strip()
+            if getattr(msg, "usage_metadata", None):
+                turn.billed.append(dict(msg.usage_metadata))
         elif isinstance(msg, ToolMessage):
             turn.tool_results.append(str(msg.content))
     return turn
