@@ -444,7 +444,12 @@ def _is_dot(body: Any) -> bool:
 
 
 def _backtracking_risk(
-    seq: Any, *, in_repeat: bool, at_tail: bool, neighbours: list[_Neighbour] | None = None
+    seq: Any,
+    *,
+    in_repeat: bool,
+    at_tail: bool,
+    neighbours: list[_Neighbour] | None = None,
+    held: list[_Edges | None] | None = None,
 ) -> str | None:
     """Describe the first runaway-backtracking shape in a parsed pattern, if any.
 
@@ -457,7 +462,14 @@ def _backtracking_risk(
         neighbours = []
     # the characters of a leaf that the repeats before it could also match, held until
     # the next repeat says whether it can match them too.
-    crossed: _Edges | None = None
+    #
+    # A one-element box rather than a local, for the same reason `neighbours` is a list
+    # the caller owns: a group has to be transparent to it. `^.+,\d+$` loaded and
+    # `^.+,(\d+)$` — the same pattern with one pair of parentheses — was refused,
+    # because the recursion into the group started with an empty hold and never learned
+    # that the comma before it was already spoken for.
+    if held is None:
+        held = [None]
     items = list(seq)
     # the last item that can occupy a character: an anchor after it is not "after" it in
     # any sense that matters, so `[a-z]+.*$` has `.*` in tail position just like `[a-z]+.*`.
@@ -494,7 +506,7 @@ def _backtracking_risk(
             # measured at 0.03 ms on 4 KiB. In `^.+,[^\n]+,[^\n]+$` both sides match a
             # comma, every comma is a free choice, and that is the 518 ms case.
             body_edges = _edges(av[2])
-            # A leaf the pending repeats could also match was held as `crossed`, and this
+            # A leaf the pending repeats could also match was held in `held`, and this
             # repeat decides what it meant. If this repeat cannot match it, the boundary
             # between the two is pinned — and *only* that boundary.
             #
@@ -509,12 +521,12 @@ def _backtracking_risk(
             # So a pinned repeat drops out of the run instead of emptying it, and the
             # repeats that can still absorb the separator stay in.
             pinned = False
-            if crossed is not None and body_edges is not None:
-                incoming, separator = body_edges[0], crossed[0]
+            if held[0] is not None and body_edges is not None:
+                incoming, separator = body_edges[0], held[0][0]
                 if incoming is not None and separator is not None and incoming.isdisjoint(separator):
                     pinned = True
                     neighbours[:] = [n for n in neighbours if n[1] is None or n[1][1] & separator]
-                crossed = None
+                held[0] = None
             neighbour = (
                 (_shape_key(av[2]), body_edges, dot_repeat)
                 if variable_repeat and _unbounded(av) and not pinned
@@ -566,7 +578,7 @@ def _backtracking_risk(
             # into a fresh one, so `([a-z]+)[a-z0-9]+` — the same quadratic pattern as
             # `[a-z]+[a-z0-9]+`, with one pair of parentheses — was invisible to the shape
             # screen and left to the timing probe, which decided it by wall clock.
-            risk = _backtracking_risk(av[3], in_repeat=in_repeat, at_tail=tail, neighbours=neighbours)
+            risk = _backtracking_risk(av[3], in_repeat=in_repeat, at_tail=tail, neighbours=neighbours, held=held)
         elif op in (_re_const.ASSERT, _re_const.ASSERT_NOT):
             # A lookaround runs its own match, so it starts a fresh analysis. It consumes
             # nothing, so it does not separate the repeats on either side of it either.
@@ -591,13 +603,13 @@ def _backtracking_risk(
             # away. Disjointness is the same test `_separates` applies to a repeat body.
             if _leaf_separates(op, av, neighbours):
                 neighbours.clear()
-                crossed = None
+                held[0] = None
             else:
                 # The leaf is inside the pending repeats' alphabet, so it does not end
                 # the ambiguity on its own — but it may still end it from the right. Held
                 # until the next repeat is known: if that one cannot match this
                 # character, the split point is forced and there is nothing to search.
-                crossed = _edges((op, av))
+                held[0] = _edges((op, av))
             risk = None  # every remaining opcode is a leaf (literal, class, backref)
         if risk is not None:
             return risk

@@ -658,3 +658,188 @@ def test_one_use_principal_instance_shared_across_tasks_does_not_leak_an_identit
     assert later == ["no_principal"] * 4, f"an identity leaked onto later tasks: {later}"
     assert ran == ["u2", "u1"], f"the wrong tool bodies ran: {ran}"
     assert _current_principal.get() is None
+
+
+# ── round three: the gate.py P2s ─────────────────────────────────────────
+
+
+def test_a_half_gated_tool_is_not_wrapped_again():
+    """`_gate_stamp` returns None both for "nothing is gated" and for "the handles
+    disagree", and `wrap()` read the second as permission — so a tool whose sync half
+    was already wrapped got it wrapped twice and consumed every limit twice."""
+
+    class DualMode:
+        def __init__(self, func, coroutine):
+            self.func = func
+            self.coroutine = coroutine
+
+    async def anotify(x: int) -> str:
+        return "a"
+
+    g = Gate(_policy())
+    tool = DualMode(g.wrap(_tool, name="t"), anotify)
+    with pytest.raises(PolicyError, match="already gated"):
+        g.wrap(tool, name="t")
+
+
+def test_wrap_refuses_the_lambda_protect_told_you_to_bring_here():
+    with pytest.raises(PolicyError, match="lambda"):
+        Gate(_policy()).wrap(lambda x: x, name=None)  # noqa: E731
+    # ...and accepts it the moment it is given a name, which is what the message says.
+    assert Gate(_policy()).wrap(lambda x: x, name="t")  # noqa: E731
+
+
+def test_two_tools_of_the_same_name_across_two_protect_calls_are_refused():
+    """The duplicate-name refusal looked in a dict local to one `protect()` call, so
+    building the tool set in two groups — the "two modules each defining `def
+    delete(...)`" case its own comment names — walked straight past it."""
+
+    def delete(x: int) -> str:
+        return "db"
+
+    def delete_api(x: int) -> str:
+        return "api"
+
+    delete_api.__name__ = "delete"
+    g = Gate(_policy())
+    g.protect([delete])
+    with pytest.raises(PolicyError, match="two different callables"):
+        g.protect([delete_api])
+
+
+def test_a_tool_wrap_refused_is_not_reported_as_wrapped():
+    """`_wrapped_tools.add` ran before `_detect_async` could refuse, so after the
+    refusal the Gate held no wrapper and `coverage()` still called the tool covered."""
+
+    import functools
+
+    async def atool(x: int) -> str:
+        return "a"
+
+    @functools.wraps(atool)
+    def sync_wrapper(x: int) -> str:  # a sync callable wrapping an async one
+        return "a"
+
+    g = Gate(_policy())
+    with pytest.raises(PolicyError, match="cannot tell whether"):
+        g.wrap(sync_wrapper, name="t")
+    assert "t" in g.coverage(["t"])["unwrapped"]
+    assert g.declared_but_unwrapped() == {"t"}
+
+
+def test_setting_the_mode_to_none_is_refused():
+    """Every typo was refused and the one value a config loader produces for a missing
+    key silently switched a calibrating gate into enforcement."""
+    g = Gate(_policy(), mode="observe")
+    with pytest.raises(PolicyError, match="None"):
+        g.mode = None
+    assert g.enforcement == "observe"
+
+
+def test_a_kwargs_entry_shadowing_a_positional_only_slot_is_refused_not_merged():
+    """PEP 570 makes the name free to reuse, so `f(1, record_id=2)` is two distinct
+    values. Flattening one dict over the other kept the keyword and threw the trusted
+    positional away, where the raw call raised a loud TypeError."""
+
+    def update(record_id: int, /, **fields: object) -> str:
+        return f"{record_id}:{fields}"
+
+    sink = InMemoryAuditSink()
+    policy = Policy(
+        tools={"u": ToolContract(name="u", args=Schema({}, allow_extra=True))},
+        permissions={"ok": frozenset({"u"})},
+    )
+    safe = gate(update, policy=policy, audit=sink, name="u")
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(GateDenied) as exc:
+        safe(1, record_id=2)
+    assert exc.value.decision.rule == "unnameable_args"
+    assert "record_id" in exc.value.decision.reason
+
+
+def test_a_hole_in_the_positional_only_run_is_filled_from_the_default():
+    """Stopping at the first missing positional-only parameter handed the later ones to
+    the tool as keywords, which a positional-only parameter cannot accept — the exact
+    defect this re-split was written to fix."""
+
+    def f(a: int = 1, b: int = 2, /) -> str:
+        return f"{a},{b}"
+
+    policy = Policy(
+        tools={"f": ToolContract(name="f", args=Schema({"b": Field(type="integer", required=False)}))},
+        permissions={"ok": frozenset({"f"})},
+    )
+    safe = gate(f, policy=policy, name="f")
+    with use_principal(Principal(role="ok", identity="i")):
+        assert safe(b=9) == "1,9"
+
+
+def test_observe_supplies_a_bound_argument_the_caller_never_sent():
+    """Observe must not rewrite what the caller sent — and must still supply what the
+    caller omitted, or it raises a TypeError on a call enforce serves. A dry run that
+    breaks the app teaches the team to skip the dry run."""
+
+    def read(tenants: list[str]) -> str:
+        return f"read {tenants}"
+
+    policy = Policy(
+        tools={
+            "read": ToolContract(
+                name="read",
+                args=Schema({"tenants": Field(type="array", item_type="string")}),
+                bindings=(Binding(field="tenants", principal_attr="tenants"),),
+            )
+        },
+        permissions={"ok": frozenset({"read"})},
+    )
+    who = Principal(role="ok", identity="i", attributes={"tenants": ["acme"]})
+    for mode in ("enforce", "observe"):
+        with use_principal(who):
+            assert gate(read, policy=policy, mode=mode, name="read")() == "read ['acme']"
+
+
+def test_observe_still_does_not_rewrite_what_the_caller_did_send():
+    def send(to: str) -> str:
+        return to
+
+    policy = Policy(
+        tools={
+            "send": ToolContract(
+                name="send",
+                args=Schema({"to": Field(type="string")}),
+                bindings=(Binding(field="to", principal_attr="phone"),),
+            )
+        },
+        permissions={"ok": frozenset({"send"})},
+    )
+    who = Principal(role="ok", identity="i", attributes={"phone": "+48111"})
+    seen = {}
+    for mode in ("enforce", "observe"):
+        with use_principal(who):
+            seen[mode] = gate(send, policy=policy, mode=mode, name="send")(to="+48999888777")
+    assert seen == {"enforce": "+48111", "observe": "+48999888777"}
+
+
+def test_an_enum_member_with_its_own_iter_is_not_waived():
+    """The blanket exemption said "everything an enum member can hold was written at
+    class-definition time". True of the enum machinery's own iteration; not true of a
+    member class that writes `__iter__` itself and yields whatever it likes."""
+    import enum as _enum
+
+    from histos.gate import _lazy_leaf_kind
+
+    class Sneaky(_enum.Enum):
+        A = 1
+
+        def __iter__(self):
+            yield "unscanned tool output"
+
+    class Ordinary(_enum.Enum):
+        A = 1
+
+    class Flags(_enum.Flag):
+        ONE = 1
+        TWO = 2
+
+    assert _lazy_leaf_kind(Ordinary.A) is None
+    assert _lazy_leaf_kind(Flags.ONE | Flags.TWO) is None
+    assert _lazy_leaf_kind(Sneaky.A) is not None
