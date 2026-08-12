@@ -76,13 +76,37 @@ def _snapshot(attributes: dict[str, Any]) -> dict[str, Any]:
     mutate into a different authorization answer anyway. Copy per value, so one
     uncopyable entry does not cost the snapshot on the others.
     """
-    snapshot: dict[str, Any] = {}
-    for key, value in attributes.items():
+    return {key: _snapshot_value(value) for key, value in attributes.items()}
+
+
+def _snapshot_value(value: Any) -> Any:
+    """Deep-copy ``value``, sharing by reference only the leaves that cannot be copied.
+
+    The fallback used to be per *attribute*: `deepcopy(value)`, and on any exception the
+    original object was stored whole. That reads as "one uncopyable entry does not cost
+    the snapshot on the others" and is true only at the top level. `deepcopy` of a
+    container raises if *any* descendant refuses — so a single `threading.Lock` (or an
+    open file, a socket, a DB session) anywhere inside `{"tenant": {"id": "acme",
+    "lock": Lock()}}` left the whole subtree aliased to the caller's live object,
+    including every authorization-relevant scalar in it. A host that then edited its own
+    dict flipped a constraint verdict from deny to allow on an already-bound Principal.
+
+    So the walk is structural: containers are rebuilt element by element, and only the
+    individual leaf that raises is shared. That leaf is, by the same argument as before,
+    one a tool could not mutate into a different authorization answer anyway.
+    """
+    if isinstance(value, dict):
+        return {_snapshot_value(k): _snapshot_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_snapshot_value(v) for v in value]
         try:
-            snapshot[key] = deepcopy(value)
-        except Exception:  # noqa: BLE001 — an uncopyable attribute must not fail the request
-            snapshot[key] = value
-    return snapshot
+            return type(value)(items)
+        except (TypeError, ValueError):
+            return type(value)(items) if type(value) in (list, tuple, set, frozenset) else items
+    try:
+        return deepcopy(value)
+    except Exception:  # noqa: BLE001 — an uncopyable leaf must not fail the request
+        return value
 
 
 @dataclass(frozen=True)
@@ -450,6 +474,13 @@ def _schema_fingerprint(schema: Schema | None) -> Any:
     return normalize_numbers(_schema_structure(schema))
 
 
+# A canary is a token planted to be conspicuous; anything this short is a fragment of
+# one, and matching it turns every ordinary argument into an exfiltration alert. Lives
+# here rather than in `bundle`, so the Python constructor and the file format cannot
+# come to different conclusions about the same policy.
+_MIN_CANARY_LENGTH = 6
+
+
 @dataclass(frozen=True)
 class Policy:
     """The static, developer-owned policy — the portable artifact.
@@ -472,6 +503,35 @@ class Policy:
     policy_version: str = "0"
     created_at: str | None = None  # ISO-8601, set by the exporter — not auto-stamped
     schema_version: str = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        """Coerce and check `canaries`, the twin of the `can_view` fix that missed it.
+
+        `Principal.can_view` learned that a bare string is one sensitivity class and not
+        a set of characters. `canaries` is annotated `frozenset[str]`, is set from the
+        same kind of constructor call, and had no check at all — so
+        `Policy(canaries="SECRET-TOKEN")` became eleven one-character canaries, every
+        one of which appears in ordinary text. The result is a policy that denies every
+        call and redacts every result, from one missing pair of brackets.
+
+        The file-format path has guarded exactly this typo all along (`bundle._canaries`);
+        this is the Python path agreeing with it, minimum length included.
+        """
+        canaries = self.canaries
+        if isinstance(canaries, str):
+            canaries = frozenset({canaries})
+        elif not isinstance(canaries, frozenset):
+            canaries = frozenset(canaries)
+        for token in canaries:
+            if not isinstance(token, str):
+                raise PolicyError(f"canary {token!r} is a {type(token).__name__}; canaries are string tokens")
+            if len(token) < _MIN_CANARY_LENGTH:
+                raise PolicyError(
+                    f"canary {token!r} is shorter than {_MIN_CANARY_LENGTH} characters — a token this short "
+                    "appears in ordinary text, so it would deny every call and redact every result"
+                )
+        if canaries is not self.canaries:
+            object.__setattr__(self, "canaries", canaries)
 
     def __getstate__(self) -> dict[str, Any]:
         """Materialise the read-only views so a Policy can be pickled and deep-copied.

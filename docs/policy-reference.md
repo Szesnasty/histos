@@ -74,19 +74,23 @@ The argument and return contracts. Deny-by-default on the way in: an argument no
 
 | key | type | required | what it does |
 |---|---|---|---|
-| `type` | `string` \| `integer` \| `number` \| `boolean` \| `array` \| `object` \| `any` | no | The declared type, checked before the tool runs. 'object' is checked only for BEING an object - inner fields are not validated (see SECURITY.md); validate those inside the tool or keep arguments flat. |
-| `required` | boolean | no | Whether the argument must be present. Default: true. A missing required argument is a denial, not a None passed through to the tool. |
 | `enum` | array of object | no | The complete set of permitted values. Anything else is denied - this is an allow-list, like every other construct in the format. |
-| `min_length` | integer | no | Minimum string length, inclusive. |
-| `max_length` | integer | no | Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls. |
-| `pattern` | string | no | Compiled at load, so an invalid regex fails loudly. NOT ReDoS-safe: treat patterns imported from third-party schemas as untrusted. |
-| `minimum` | number | no | Inclusive lower bound for a number. Expressed in the tool's own units - keep money in minor units so no implementation has to agree about floats. |
-| `maximum` | number | no | Inclusive upper bound for a number. This is the ceiling a hijacked model cannot raise, and it belongs here rather than in application code precisely so a reviewer can find it. |
-| `exclusive_minimum` | number | no | Exclusive lower bound for a number: the value must be strictly greater. |
 | `exclusive_maximum` | number | no | Exclusive upper bound for a number: the value must be strictly less. |
-| `multiple_of` | number | no | The number must be an exact multiple of this. Useful for step sizes and whole-unit amounts. |
+| `exclusive_minimum` | number | no | Exclusive lower bound for a number: the value must be strictly greater. |
+| `item_enum` | array of object | no | The complete set of permitted values for each *element* of an array. The element twin of `enum`: an array argument is denied if any element is outside this set. |
 | `item_type` | `string` \| `integer` \| `number` \| `boolean` \| `object` \| `any` | no | Element type for an array. String elements are bounded by the same length/pattern caps as a scalar string. |
+| `max_items` | integer | no | Maximum number of elements in an array, inclusive. Without it an array argument is unbounded, and the pre-gate's scan budget is the only thing standing between a manipulated model and a stalled worker. |
+| `max_length` | integer | no | Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls. |
+| `maximum` | number | no | Inclusive upper bound for a number. This is the ceiling a hijacked model cannot raise, and it belongs here rather than in application code precisely so a reviewer can find it. |
+| `min_items` | integer | no | Minimum number of elements in an array, inclusive. |
+| `min_length` | integer | no | Minimum string length, inclusive. |
+| `minimum` | number | no | Inclusive lower bound for a number. Expressed in the tool's own units - keep money in minor units so no implementation has to agree about floats. |
+| `multiple_of` | number | no | The number must be an exact multiple of this. Useful for step sizes and whole-unit amounts. |
+| `nullable` | boolean | no | Whether the argument may be null. A field that accepts null accepts something a field that does not accept null refuses, so this is part of the hashed argument shape. Inferred from `T \| None` and from `anyOf: [T, null]`. |
+| `pattern` | string | no | Compiled at load, so an invalid regex fails loudly. NOT ReDoS-safe: treat patterns imported from third-party schemas as untrusted. |
+| `required` | boolean | no | Whether the argument must be present. Default: true. A missing required argument is a denial, not a None passed through to the tool. |
 | `sensitive` | `pii` \| `secret` | no | Return schemas only: redacted on the way out unless the principal may view this field. |
+| `type` | `string` \| `integer` \| `number` \| `boolean` \| `array` \| `object` \| `any` | no | The declared type, checked before the tool runs. 'object' is checked only for BEING an object - inner fields are not validated (see SECURITY.md); validate those inside the tool or keep arguments flat. |
 
 ## `tools.<name>.resource`
 
