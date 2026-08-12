@@ -9,6 +9,8 @@ from __future__ import annotations
 import collections
 import dataclasses
 import enum
+import hashlib
+import hmac
 import json
 import os
 import pathlib
@@ -571,7 +573,57 @@ def test_a_rewrite_that_parses_the_same_but_reads_differently_is_caught(tmp_path
     raw = log.read_text(encoding="utf-8").strip()
     log.write_text('{"effect": "deny", ' + raw[1:] + "\n", encoding="utf-8")
     ok, detail = verify_chain(log)
-    assert not ok and "canonical form" in detail
+    assert not ok and "faithful serialisation" in detail
+
+
+def _write_legacy_tip(log, key: bytes, count: int, tip: str) -> None:
+    """The sidecar the writer of that era produced, so verification reaches the line
+    check instead of stopping at a missing tip."""
+    from histos.audit import _tip_body, tip_path_for
+
+    body = _tip_body(count, tip)
+    mac = hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    tip_path_for(log).write_text(json.dumps({"records": count, "hash": tip, "mac": mac}), encoding="utf-8")
+
+
+def test_an_untouched_pre_release_log_is_not_accused_of_being_rewritten(tmp_path):
+    """The byte check used to demand today's exact spelling, exempting a legacy line on
+    the theory that its canonical form is a different spelling by construction. That
+    holds only for a record with a non-ASCII field. For an ordinary ASCII record the two
+    bodies are identical, so the exemption never fired and `histos audit verify` told
+    the operator their untouched log had been rewritten — a false accusation about
+    evidence, which is worse than the rewrite it was looking for."""
+    log = tmp_path / "legacy.jsonl"
+    key = b"k" * 32
+    prev = ""
+    lines = []
+    for n in (1, 2):
+        # How the pre-0.1.0 writer spelled it: insertion order, ensure_ascii=False.
+        rec = {"ts": f"2026-01-0{n}", "effect": "allow", "rule": "allow", "n": n, "seq": n, "prev": prev}
+        body = json.dumps(rec, sort_keys=True, ensure_ascii=False)
+        rec["hash"] = prev = hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+        lines.append(json.dumps(rec, ensure_ascii=False))
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _write_legacy_tip(log, key, len(lines), prev)
+
+    ok, detail = verify_chain(log, key=key)
+    assert ok, detail
+
+
+def test_a_legacy_line_cannot_be_rewritten_either(tmp_path):
+    """The exemption was also a hole: a line the check skipped could be given a repeated
+    key and still authenticate. Running the check on every line closes it."""
+    log = tmp_path / "legacy.jsonl"
+    key = b"k" * 32
+    rec = {"ts": "2026-01-01", "effect": "deny", "rule": "rbac", "seq": 1, "prev": ""}
+    body = json.dumps(rec, sort_keys=True, ensure_ascii=False)
+    rec["hash"] = hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    raw = json.dumps(rec, ensure_ascii=False)
+    log.write_text('{"effect": "allow", ' + raw[1:] + "\n", encoding="utf-8")
+    _write_legacy_tip(log, key, 1, rec["hash"])
+
+    ok, detail = verify_chain(log, key=key)
+    assert not ok and "faithful serialisation" in detail
 
 
 def test_a_second_sink_on_the_same_path_shares_the_erasure_memory(tmp_path):

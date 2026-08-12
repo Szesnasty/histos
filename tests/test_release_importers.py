@@ -209,7 +209,6 @@ def test_a_dangling_openapi_parameter_ref_is_refused_rather_than_dropping_the_ar
         {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
         {"type": "array", "items": {"type": "string"}, "contains": {"const": "x"}},
         {"type": "array", "prefixItems": [{"type": "string"}]},
-        {"type": "object", "additionalProperties": False},
         {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
         {"type": "object", "propertyNames": {"maxLength": 3}},
         {"type": "object", "minProperties": 1},
@@ -390,21 +389,64 @@ def test_a_union_of_literals_that_disagree_on_type_is_refused():
 def test_the_honest_limit_of_the_projection_is_still_refused():
     """Where the projection stops, pinned so it stays a decision rather than a drift.
 
-    Two things moved out of this list deliberately. A nested object now projects to
+    Three things moved out of this list deliberately. A nested object now projects to
     `type: object` — which is exactly what the engine checks, and what
     docs/policy-reference.md has always said it checks — because refusing it cost every
-    pydantic model with a model inside it and 4 of the 19 Petstore operations. And a
+    pydantic model with a model inside it and 4 of the 19 Petstore operations. A
     recursive model follows: the bridge stops at `type: object` and never descends, so
-    there is no cycle left to hit.
+    there is no cycle left to hit. And `additionalProperties` below the root followed
+    both, one round later — see the test underneath this one for why.
     """
     for unprojectable in (
-        {"type": "object", "additionalProperties": {"type": "string"}},
         {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
         {"type": "object", "propertyNames": {"maxLength": 3}},
         {"anyOf": [{"type": "string"}, {"type": "integer"}]},
     ):
         with pytest.raises(PolicyError, match="does not carry"):
             _one(unprojectable)
+
+
+def test_a_nested_object_may_say_whether_it_is_closed():
+    """`additionalProperties` is not occasional extra shape — a generator writes it
+    whenever it writes a nested object. pydantic `extra="forbid"` emits `false`,
+    `dict[str, str]` emits a subschema, and OpenAI structured-output strict mode
+    *requires* `false` on every object. Refusing it below the root meant the importer
+    turned away the single most common real tool definition there is and told the
+    author to write the argument by hand. It projects to `type: object`, the same
+    honest limit `properties` and `required` already had."""
+    for closed in (
+        {"type": "object", "additionalProperties": False},
+        {"type": "object", "additionalProperties": True},
+        {"type": "object", "additionalProperties": {"type": "string"}},
+        {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False},
+    ):
+        assert _one(closed).type == "object"
+
+    # An OpenAI strict function definition, end to end.
+    strict = schema_from_json_schema(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["to"],
+            "properties": {
+                "to": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"email": {"type": "string"}},
+                    "required": ["email"],
+                }
+            },
+        }
+    )
+    assert strict.fields["to"].type == "object" and strict.fields["to"].required
+
+
+def test_the_root_still_decides_whether_extra_arguments_are_allowed():
+    """Projecting the keyword below the root must not disturb what it means at the root,
+    where it is the one switch that opens the argument surface."""
+    assert schema_from_json_schema({"type": "object", "additionalProperties": True}).allow_extra
+    assert not schema_from_json_schema({"type": "object", "additionalProperties": False}).allow_extra
+    assert not schema_from_json_schema({"type": "object"}).allow_extra
 
 
 def test_a_recursive_model_projects_as_an_object_and_does_not_hang():
