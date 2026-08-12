@@ -519,3 +519,53 @@ def test_a_value_the_projector_could_not_enter_is_named_in_the_record():
     with use_principal(Principal(role="ok", identity="i")):
         gate(lambda: {"public": Opaque("leak")}, policy=policy, audit=sink, name="t")()  # noqa: E731
     assert "output:uninspectable:Opaque" in sink.entries[-1]["redactions"]
+
+
+# ── the review of the hardening diff: audit.py ───────────────────────────
+
+
+def test_a_rewrite_that_parses_the_same_but_reads_differently_is_caught(tmp_path):
+    """A digest over the parsed record says nothing about the bytes a reader sees. A
+    repeated key is the sharp case: `json.loads` keeps the last, a human greps the
+    first, so the record verified as `allow` while the file said `deny`."""
+    log = tmp_path / "a.jsonl"
+    JSONLAuditSink(log).record({"effect": "deny", "rule": "rbac", "n": 1})
+    raw = log.read_text(encoding="utf-8").strip()
+    log.write_text('{"effect": "deny", ' + raw[1:] + "\n", encoding="utf-8")
+    ok, detail = verify_chain(log)
+    assert not ok and "canonical form" in detail
+
+
+def test_a_second_sink_on_the_same_path_shares_the_erasure_memory(tmp_path):
+    """The memory is the whole erasure defence, and it was per instance — so a second
+    sink on the same file wrote a fresh chain over a truncated one."""
+    log = tmp_path / "a.jsonl"
+    first = JSONLAuditSink(log)
+    for i in range(3):
+        first.record({"effect": "allow", "rule": "allow", "n": i})
+    log.unlink()
+    (tmp_path / "a.jsonl.tip").unlink()
+    JSONLAuditSink(log).record({"effect": "allow", "rule": "allow", "n": "after"})
+    assert not verify_chain(log)[0]
+
+
+def test_the_redactions_list_is_bounded_like_every_other_free_text_field():
+    """`drop:<key>` carries a raw return-value key, so a projected dict with ten
+    thousand undeclared keys wrote ten thousand of them into an append-only file."""
+    from histos import AuditRecord
+
+    record = AuditRecord(
+        ts=0.0,
+        decision_id=1,
+        phase="post",
+        tool="t",
+        role="r",
+        identity="i",
+        effect="redact",
+        rule="post_redaction",
+        reason="x",
+        args_digest="d",
+        redactions=[f"drop:key-{i}" for i in range(5000)],
+    )
+    assert len(record.redactions) < 100
+    assert record.redactions[-1] == "...[truncated]"

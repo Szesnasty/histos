@@ -235,6 +235,14 @@ class AuditRecord:
         self.reason = _cap_text(self.reason, _MAX_TEXT_LEN)
         self.expected = _cap_text(self.expected, _MAX_TEXT_LEN)
         self.received = _cap_text(self.received, _MAX_TEXT_LEN)
+        # `redactions` was missed by the cap pass that bounded every other free-text
+        # field, and it is the one built from the *output*: `drop:<key>` carries a raw
+        # return-value key, `output:uninspectable:<type>` a type name, and a projected
+        # dict with ten thousand undeclared keys writes ten thousand of them into an
+        # append-only file. Same budget, same visible marker.
+        self.redactions, clipped = _cap_arg_keys(list(self.redactions))
+        if clipped:
+            self.redactions.append("...[truncated]")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -282,6 +290,13 @@ class InMemoryAuditSink:
 # the same file cannot interleave, which a per-instance lock allowed.
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
+
+# The highest (seq, hash, inode) written to each log by this process. Per path rather
+# than per sink: the memory is the whole erasure defence, and a second `JSONLAuditSink`
+# on the same file — two Gates in one host, which the lock above exists for — started
+# with an empty one and happily wrote a fresh chain over a truncated file. Scoped like
+# the lock that protects it.
+_PATH_HIGH_WATER: dict[str, tuple[int, str, int]] = {}
 
 
 def tip_path_for(log: str | Path) -> Path:
@@ -356,8 +371,7 @@ class JSONLAuditSink:
         #
         # Cross-restart erasure is a real residual and is documented as one: ship the tip
         # somewhere the host cannot write.
-        self._high_water = 0
-        self._high_water_hash = ""
+
         # Owner-only by default. The trail records `identity` in the clear — that is
         # what makes it evidence — and the default umask created it 0644, so on any
         # shared host every local account could read who called what. Applied on
@@ -446,11 +460,18 @@ class JSONLAuditSink:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             if self.hash_chain:
                 seq, prev = self._tail(fh)
-                if seq < self._high_water:
-                    # The file went backwards under a running sink. Carry on from what
-                    # this process knows, so the resulting file cannot be read as an
-                    # intact chain by anyone.
-                    seq, prev = self._high_water, self._high_water_hash
+                key = str(self.path.resolve())
+                high_seq, high_hash, high_inode = _PATH_HIGH_WATER.get(key, (0, "", 0))
+                inode = os.fstat(fh.fileno()).st_ino
+                # A shrink under a live sink is flagged, and external log rotation looks
+                # exactly the same from in here — `rm` and `mv` both leave a fresh inode
+                # at the same path, so the inode cannot tell them apart either. Flagging
+                # is the direction to be wrong in: a rotated log reporting a broken chain
+                # costs an operator an explanation they already have, and a missed
+                # erasure costs the evidence. Rotate the `.tip` with the log, or point the
+                # sink at the new path, and the chain starts clean. SECURITY.md says so.
+                if seq < high_seq:
+                    seq, prev = high_seq, high_hash
                 payload["seq"] = seq + 1
                 payload["prev"] = prev
                 payload["hash"] = self._digest(json.dumps(payload, sort_keys=True, ensure_ascii=True))
@@ -476,8 +497,7 @@ class JSONLAuditSink:
             fh.write(line.encode("utf-8", "surrogatepass"))
             fh.flush()
             if self.hash_chain:
-                self._high_water = int(payload["seq"])
-                self._high_water_hash = str(payload["hash"])
+                _PATH_HIGH_WATER[key] = (int(payload["seq"]), str(payload["hash"]), inode)
                 self._write_tip(payload["seq"], payload["hash"])
 
     def verify(self) -> bool:
@@ -564,9 +584,25 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
             # the same parsed record, so accepting either forges nothing.
             body = json.dumps(rec, sort_keys=True, ensure_ascii=True)
             legacy_body = json.dumps(rec, sort_keys=True, ensure_ascii=False)
-            matched = hmac.compare_digest(_chain_digest(body, key), str(stored)) or (
+            canonical = hmac.compare_digest(_chain_digest(body, key), str(stored))
+            matched = canonical or (
                 legacy_body != body and hmac.compare_digest(_chain_digest(legacy_body, key), str(stored))
             )
+            # A digest over the *parsed* record says nothing about the bytes a reader
+            # sees. Two lines can parse to one dict and read differently — a repeated
+            # key, where `json.loads` keeps the last and a human greps the first, is the
+            # sharp case: the record verifies as `allow` while the file says `deny`. For
+            # a line this version wrote the canonical form is the form on disk, so the
+            # two can simply be required to agree. A legacy line is exempt because its
+            # canonical form is a different spelling by construction.
+            if canonical:
+                rec["hash"] = stored
+                if json.dumps(rec, sort_keys=True, ensure_ascii=True) != stripped:
+                    return False, (
+                        f"line {lineno}: the bytes on disk are not the canonical form of the record they "
+                        "parse to — the file was rewritten in a way a reader and the chain disagree about"
+                    )
+                rec.pop("hash")
             if not matched:
                 return False, f"line {lineno}: hash mismatch — record was altered after it was written"
             prev = str(stored)
