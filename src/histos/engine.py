@@ -73,11 +73,55 @@ def _callback_args(args: dict[str, Any]) -> dict[str, Any]:
     field) landed in the executed call *after* every check had passed, and the audit
     record digested the mutated values. The semantic tier is handed the same request
     and is a far more likely place for a callback to rewrite what it was given.
+
+    ``resource_resolver`` gets the same treatment, and it is the worst of the three to
+    leave live: it runs *after* argument validation, so anything it writes into the
+    dict reaches the tool having been checked against nothing. A resolver is ordinary
+    application code — an ORM lookup, a cache fill — and normalising an id in passing
+    is exactly the sort of thing it does.
     """
     try:
         return copy.deepcopy(args)
     except Exception:  # noqa: BLE001 — an uncopyable argument must not fail the call
         return dict(args)
+
+
+# How far up a `raise ... from ...` chain the scan walks. Deep enough for any real
+# wrapping (a driver error wrapped by an ORM wrapped by a repository), bounded because
+# `__context__` can be made to cycle.
+_MAX_EXCEPTION_CHAIN = 16
+
+
+def _exception_text(exc: BaseException) -> str:
+    """Everything a caller can read off a raised exception, as one string to scan.
+
+    ``f"{type(exc).__name__}: {exc}"`` covers only the outermost message, and that is
+    not where the secret usually is. A tool that catches a driver error and re-raises
+    its own leaves the original on ``__cause__`` (explicit ``raise ... from``) or
+    ``__context__` (an exception raised while handling another) — and Python prints
+    the whole chain, so `psycopg.OperationalError: password authentication failed for
+    user "svc:hunter2"` reached the model under a tidy ``RepositoryError`` that had
+    been scanned and passed. ``__notes__`` is the same story with less ceremony: it is
+    appended to the displayed traceback verbatim.
+
+    Scanned together, in one string, because the decision is binary — either something
+    had to be removed from what the caller can see, or nothing did — and the caller
+    gets :class:`~histos.errors.ToolErrorRedacted`, which carries no chain of its own.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    for _ in range(_MAX_EXCEPTION_CHAIN):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        notes = getattr(current, "__notes__", None)
+        if isinstance(notes, list):
+            parts.extend(str(note) for note in notes)
+        # `__cause__` first: an explicit `raise X from Y` is the one the author meant.
+        current = current.__cause__ or current.__context__
+    return "\n".join(parts)
 
 
 def for_callback(req: GateRequest) -> GateRequest:
@@ -124,7 +168,12 @@ def _stringify_args(args: dict[str, Any]) -> tuple[str, bool]:
     return " ".join(pieces), False
 
 
-def _text_blob(obj: Any) -> str:
+# The output-side twin of `_MAX_SCAN_CHARS`. Generous — a real tool result is orders of
+# magnitude smaller — because exceeding it costs the caller their result.
+_MAX_OUTPUT_SCAN_CHARS = 4_194_304
+
+
+def _text_blob(obj: Any) -> tuple[str, bool]:
     """Join every str/bytes leaf of ``obj``, the way the pre-gate joins arguments.
 
     Only *textual* leaves take part: calling ``str()`` on an arbitrary returned object
@@ -136,18 +185,30 @@ def _text_blob(obj: Any) -> str:
     values, and splicing a field name between two of them breaks exactly the adjacency
     it is looking for. Keys are still matched in both tiers leaf by leaf.
 
-    Unlike the argument blob this one is not budgeted. The pre-gate's budget refuses an
-    oversized *input* before anything runs; refusing an oversized output would drop a
-    result the tool already produced, and the scan it feeds costs ~5 ms per 4 MB against
-    the ~180 ms the secret detectors already spend on the same bytes.
+    Budgeted, and the budget is reported rather than silently applied. Tool output is
+    attacker-controlled — that is the whole premise of the outbound half — so a tool
+    that can be made to return tens of megabytes turns each call into hundreds of
+    milliseconds of scanning and several times that in resident memory, inside a
+    control advertised as microsecond-scale. Unlike the pre-gate, refusing outright is
+    not available: the tool has already run. So the caller is told the blob was cut and
+    decides; :meth:`Engine._post` treats a cut as a redact-all rather than scanning part
+    of the output and reporting `allow`, which is the fail-open this must not have.
     """
     pieces: list[str] = []
+    total = 0
+    truncated = False
 
     def walk(value: Any) -> None:
-        if isinstance(value, str):
-            pieces.append(value)
-        elif isinstance(value, bytes):
-            pieces.append(value.decode("utf-8", "surrogateescape"))
+        nonlocal total, truncated
+        if truncated:
+            return
+        if isinstance(value, (str, bytes)):
+            text = value if isinstance(value, str) else value.decode("utf-8", "surrogateescape")
+            if total + len(text) > _MAX_OUTPUT_SCAN_CHARS:
+                truncated = True
+                return
+            total += len(text)
+            pieces.append(text)
         elif isinstance(value, dict):
             for v in value.values():
                 walk(v)
@@ -156,7 +217,7 @@ def _text_blob(obj: Any) -> str:
                 walk(v)
 
     walk(obj)
-    return " ".join(pieces)
+    return " ".join(pieces), truncated
 
 
 def _with_ordinal(key: Any, n: int) -> Any:
@@ -417,7 +478,7 @@ class Engine:
                 if self.resource_resolver is None:
                     return self._no_resolver_decision(req.tool_name)
                 try:
-                    resolved = self.resource_resolver(req.tool_name, req.args)
+                    resolved = self.resource_resolver(req.tool_name, _callback_args(req.args))
                     if inspect.isawaitable(resolved):
                         resolved = await resolved
                 except ResourceNotFound as exc:
@@ -561,7 +622,10 @@ class Engine:
             req.principal.identity, req.tool_name, rate_limit=contract.rate_limit, budget=contract.budget
         )
         if limit_rule is not None:
-            return GateDecision(Effect.DENY, limit_rule, f"{limit_rule} exceeded for {req.tool_name!r}")
+            # See `Gate._consume_limit`: the window is not in the policy format, so the
+            # decision names it rather than leaving the reader of `rate_limit: 3` to guess.
+            window = f" (window: {self.limits.window_seconds:g}s)" if limit_rule == "rate_limit" else ""
+            return GateDecision(Effect.DENY, limit_rule, f"{limit_rule} exceeded for {req.tool_name!r}{window}")
 
         return None
 
@@ -703,7 +767,7 @@ class Engine:
             if self.resource_resolver is None:
                 return self._no_resolver_decision(req.tool_name)
             try:
-                resolved = self.resource_resolver(req.tool_name, req.args)
+                resolved = self.resource_resolver(req.tool_name, _callback_args(req.args))
             except ResourceNotFound as exc:
                 return GateDecision(Effect.DENY, "resource_not_found", f"resource not found: {exc}")
             except Exception as exc:  # noqa: BLE001 — a raising resolver fails closed, distinct from internal_error
@@ -775,7 +839,7 @@ class Engine:
 
     def _post_exception(self, req: GateRequest, exc: BaseException) -> tuple[GateDecision, str]:
         contract = self.policy.contract_for(req.tool_name)
-        text = f"{type(exc).__name__}: {exc}"
+        text = _exception_text(exc)
         redactions: list[str] = []
 
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
@@ -829,6 +893,32 @@ class Engine:
         #     any key not declared in `returns` (undeclared fields, where a secret can
         #     hide out of reach of name-based redaction, never egress).
         if contract is not None and contract.project_output and contract.returns is not None:
+            # An object return cannot be projected — the projector walks dicts and
+            # lists, and everything else it returns untouched. So `project_output=True`
+            # on a tool returning a dataclass or a Pydantic model dropped nothing,
+            # recorded nothing, and produced an audit line indistinguishable from one
+            # where there was nothing to drop. A knob that silently does not apply is
+            # worse than one that is off, because the policy says it is on. Treated as
+            # a projection failure and handled by `on_output_violation`, exactly like a
+            # return that fails its declared schema.
+            if not isinstance(out, (dict, list, tuple)):
+                if contract.on_output_violation == "deny":
+                    return GateDecision(
+                        Effect.DENY,
+                        "output_schema",
+                        f"project_output is set but a {type(out).__name__} return has no fields to project; "
+                        "return a mapping, or turn projection off for this tool",
+                    ), None
+                if contract.on_output_violation != "allow":
+                    return (
+                        GateDecision(
+                            Effect.REDACT,
+                            "output_schema",
+                            f"project_output is set but a {type(out).__name__} return has no fields to project",
+                            redactions=("output:redacted_all",),
+                        ),
+                        "[REDACTED: tool output could not be projected]",
+                    )
             out, dropped = _project_output(out, frozenset(contract.returns.fields))
             redactions.extend(f"drop:{k}" for k in dict.fromkeys(dropped))
 
@@ -843,7 +933,22 @@ class Engine:
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
             out, found = _redact_structure(out, self.policy.canaries)
             redactions.extend(f"canary:{tok}" for tok in found)
-            crossing = canary.find_normalized(_text_blob(out), self.policy.canaries)
+            blob, blob_truncated = _text_blob(out)
+            if blob_truncated:
+                # Scanning a prefix and reporting `allow` on the rest is exactly the
+                # fail-open the pre-gate's budget refuses an input to avoid. The tool
+                # has already run, so the honest answer is to keep the decision and
+                # drop the value.
+                return (
+                    GateDecision(
+                        Effect.REDACT,
+                        "post_redaction",
+                        "tool output exceeded the scan budget, so it could not be checked for a canary",
+                        redactions=("output:redacted_all",),
+                    ),
+                    "[REDACTED: tool output exceeded the scan budget and was not inspected]",
+                )
+            crossing = canary.find_normalized(blob, self.policy.canaries)
             if crossing:
                 redactions.extend(f"canary:{tok}" for tok in crossing)
                 redactions.append("output:redacted_all")
