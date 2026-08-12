@@ -6,11 +6,13 @@ matters is not obvious from the assertion alone.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import enum
 import json
 import os
 import pathlib
+import typing
 
 import pytest
 
@@ -426,9 +428,16 @@ def test_the_scan_budget_gates_every_pass_not_only_the_canary_one():
     assert time.perf_counter() - started < 0.5
 
 
+# `allow` used to be in this table and returned the payload untouched. It is not a
+# choice the policy gets to make any more: `on_output_violation` is malformed-output
+# policy, hosts set `allow` because a vendor's response *shape* drifts, and reusing it
+# for the size question meant those hosts had silently also switched off canary and
+# secret redaction for every oversized return — measured egressing a planted canary and
+# an AWS key under an ALLOW record. Over budget is now deny or redact-all; a host that
+# legitimately returns more raises the budget, which is the test below.
 @pytest.mark.parametrize(
     ("action", "expect"),
-    [("deny", "denied"), ("allow", "returned"), ("redact_all", "redacted")],
+    [("deny", "denied"), ("allow", "redacted"), ("redact_all", "redacted")],
 )
 def test_the_over_budget_action_is_the_policy_s_to_choose(action, expect):
     def big() -> dict:
@@ -445,6 +454,25 @@ def test_the_over_budget_action_is_the_policy_s_to_choose(action, expect):
             assert expect == "denied"
             return
     assert expect == ("returned" if isinstance(out, dict) else "redacted")
+
+
+def test_over_budget_never_switches_off_the_output_controls():
+    """The regression in its own right, not as a row in a table: a canary planted in an
+    oversized return must not reach the caller whatever `on_output_violation` says."""
+    canary = "CANARY-7f3a-SECRET"
+
+    def big() -> dict:
+        return {"rows": ["y" * 1_000_000 for _ in range(8)], "leak": canary}
+
+    for action in ("allow", "redact_all"):
+        policy = Policy(
+            tools={"t": ToolContract(name="t", args=Schema({}), on_output_violation=action)},
+            permissions={"ok": frozenset({"t"})},
+            canaries=frozenset({canary}),
+        )
+        with use_principal(Principal(role="ok", identity="i")):
+            out = Gate(policy).wrap(big, name="t")()
+        assert canary not in repr(out), f"the canary egressed under on_output_violation={action!r}"
 
 
 def test_a_host_can_raise_the_output_budget():
@@ -671,3 +699,112 @@ def test_the_vocabulary_hint_only_fires_where_it_is_right():
             }
         )
     assert "Understood here" in str(exc.value)
+
+
+# ── round three: the 779 lines the round-two fixes added ─────────────────
+
+
+def test_a_canary_inside_an_exception_group_does_not_egress():
+    """The chain walk followed `__cause__`/`__context__` and nothing else, so an
+    `ExceptionGroup` — how `asyncio.TaskGroup` and every fan-out tool report partial
+    failure — was scanned as its one summary line. Both payloads reached the caller
+    intact, while the identical canary on a `raise ... from` chain was caught."""
+
+    def shards() -> str:
+        raise ExceptionGroup(
+            "2 of 3 shards failed",
+            [ValueError(f"shard-1: {CANARY}"), RuntimeError("shard-2 creds AKIAIOSFODNN7EXAMPLE")],
+        )
+
+    safe = gate(shards, policy=_no_args_policy(), name="t")
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(ToolErrorRedacted) as exc:
+        safe()
+    assert CANARY not in str(exc.value)
+    assert "AKIAIOSFODNN7EXAMPLE" not in str(exc.value)
+
+
+def test_a_nested_exception_group_is_walked_too():
+    def nested() -> str:
+        raise ExceptionGroup("outer", [ExceptionGroup("inner", [ValueError(CANARY)])])
+
+    safe = gate(nested, policy=_no_args_policy(), name="t")
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(ToolErrorRedacted) as exc:
+        safe()
+    assert CANARY not in str(exc.value)
+
+
+def test_notes_that_are_not_a_sequence_are_still_scanned():
+    """CPython prints a non-Sequence `__notes__` as its repr, so skipping it entirely
+    left whatever it holds readable by the caller and invisible to the scan."""
+
+    def noted() -> str:
+        exc = ValueError("boom")
+        exc.__notes__ = {CANARY}  # a set: iterable, not a Sequence
+        raise exc
+
+    safe = gate(noted, policy=_no_args_policy(), name="t")
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(ToolErrorRedacted) as err:
+        safe()
+    assert CANARY not in str(err.value)
+
+
+def _projecting_policy() -> Policy:
+    return Policy(
+        tools={
+            "t": ToolContract(
+                name="t",
+                args=Schema({}),
+                returns=Schema({"public": Field(type="string")}),
+                project_output=True,
+            )
+        },
+        permissions={"ok": frozenset({"t"})},
+    )
+
+
+def test_a_namedtuple_one_level_down_is_not_projected_as_clean():
+    """The top-level guard refused a NamedTuple return. One level down — a list of
+    record rows, the most ordinary return there is — `isinstance(o, tuple)` won before
+    the leaf check, so it was rebuilt with every undeclared field intact and the audit
+    record read `redactions: []`: byte-identical to nothing-to-drop."""
+
+    class Row(typing.NamedTuple):
+        public: str
+        secret: str
+
+    for shape in ({"public": Row("fine", "leak")}, [Row("fine", "leak")]):
+
+        def tool(_shape=shape) -> object:
+            return _shape
+
+        sink = InMemoryAuditSink()
+        safe = Gate(_projecting_policy(), audit=sink).wrap(tool, name="t")
+        with use_principal(Principal(role="ok", identity="i")):
+            out = safe()
+        assert "leak" not in repr(out), f"the undeclared field egressed from {type(shape).__name__}"
+        assert any("uninspectable" in r for r in sink.entries[-1]["redactions"])
+
+
+def test_projection_still_enters_the_container_subclasses_a_real_tool_returns():
+    """`type(value) in (...)` was the overcorrection: `Counter`, `OrderedDict`,
+    `defaultdict` and list subclasses carry their data under keys or positionally, hide
+    nothing behind a name, and the projector rebuilds them correctly."""
+
+    class Rows(list):
+        pass
+
+    for value in (
+        collections.Counter({"public": 1, "secret": 2}),
+        collections.OrderedDict(public="fine", secret="leak"),
+        collections.defaultdict(str, public="fine", secret="leak"),
+        Rows([{"public": "fine", "secret": "leak"}]),
+    ):
+
+        def tool(_v=value) -> object:
+            return _v
+
+        safe = Gate(_projecting_policy()).wrap(tool, name="t")
+        with use_principal(Principal(role="ok", identity="i")):
+            out = safe()
+        assert "leak" not in repr(out) and "secret" not in repr(out), f"{type(value).__name__} was not projected"
+        assert "REDACTED" not in repr(out), f"{type(value).__name__} was refused, but the projector handles it"
