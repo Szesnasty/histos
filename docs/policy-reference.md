@@ -21,6 +21,19 @@ Two rules govern everything below, and they are why the tables are shorter than 
 - **Everything is an allow-list.** There are no deny rules anywhere in the format, because allow *and*
   deny needs a precedence rule, and precedence in authorization is where the CVEs live.
 
+## The Python names and the file names
+
+`Policy(...)` in code and a policy on disk are the same ruleset, and three things are spelled
+differently in each. The file format is the versioned, published one, so it is the spelling the loader
+accepts; the constructor keeps the names that read better as Python keyword arguments. Writing a Python
+name into a file is refused by name, with this table cited.
+
+| in `Policy(...)` | in the file |
+|---|---|
+| `permissions={"support": frozenset({"get_order"})}` | `roles: {support: {allow: [get_order]}}` |
+| `role_inherits={"admin": "support"}` | `roles: {admin: {inherits: support}}` |
+| `policy_version="3"` | `version: "3"` |
+
 ## Top level
 
 The document itself. `policy_id`, `version` and `created_at` are metadata: they identify a policy without changing what it decides, and they are excluded from `content_hash`.

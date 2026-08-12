@@ -29,6 +29,7 @@
             "min_length": null,
             "pattern": null,
             "sensitive": null,
+            "nullable": false,
             "item_type": null,
             "minimum": null,
             "maximum": null,
@@ -40,8 +41,8 @@
       },
       "returns": null
     },
-    "schema_sha256": "sha256:3c7c9d1142fed72e81da69de28ba1a0cdbc3a804ff70856efb50662921d40ef1",
+    "schema_sha256": "sha256:60f06dd21a433c8ea65be0301431bb27bd45a25bb60e6a5402d055b6eea03b07",
     "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
-    "contract_sha256": "sha256:f8b9b4e38e17cf125fb46f7cd9833a61a3cbccf5e9e88ac5e28a06b817ad1bb7"
+    "contract_sha256": "sha256:b5a886f2fc4cb28a3db05f668d4a3567caa6a23d5fc8bfcd46f8a374fb191249"
   }
 }

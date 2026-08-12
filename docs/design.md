@@ -102,6 +102,8 @@ otherwise have its escalation skipped the moment an approval arrived.
 **POST** — what may reach the model:
 
 ```
+0  materialised?          a generator/iterator/coroutine return is refused outright —
+                          every stage below reads a value, and there is nothing to read
 1  output schema          strict returns: deny or redact a non-conforming result
 2  projection             drop every field not declared in `returns`
 3  canary                 redact planted tokens anywhere in the structure
@@ -113,11 +115,24 @@ Projection matters more than it looks: name-based redaction cannot protect a sec
 that lands in an **undeclared** field, so deny-by-default is extended to the return
 surface too.
 
+Step 0 is deny-by-default applied to the *shape* of the return rather than its fields.
+A lazy value carries its payload behind an iteration the gate never performs, so every
+stage below it would report `allow` on content nothing inspected — see the honest limit
+in [`../SECURITY.md`](../SECURITY.md): the tool has already run by then, so the refusal
+stops the payload, not the call.
+
 ## Fail-closed, everywhere
 
 Any exception inside a check becomes DENY. No principal → DENY. A gated tool with no
 argument schema → DENY. A policy this engine only partly understands → refused at
-load. There is no fail-open mode and no "log and continue".
+load. No check has a permissive setting, and none of them can be made to warn instead
+of refuse.
+
+"Log and continue" exists exactly once, and only as a mode chosen for the whole gate:
+`mode="observe"`, below, which runs the tool after recording the denial. That is a
+calibration decision a person makes deliberately, not a state a failing check falls
+into — but this section used to say there was no fail-open mode at all, which read as a
+promise the next section contradicts.
 
 The consequence is accepted deliberately: a policy bug becomes an *availability*
 incident. That is why evaluation is small, pure, dependency-free and microsecond-
@@ -139,11 +154,17 @@ specific value or set that would let an agent walk the boundary is never handed 
 
 ## Observe before enforce
 
-`mode="observe"` evaluates and audits exactly as it would enforce, but blocks
-nothing and modifies nothing. Records are unmistakable —
+`mode="observe"` evaluates and audits exactly as it would enforce, then runs the tool
+regardless and hands back its result unredacted. Records are unmistakable —
 `effect=deny enforced=false executed=true` — so watching is never mistaken for
 protecting. The intended path is *import → review → fix warnings → observe → read
 the denied-but-executed decisions → enforce*.
+
+Two things to hold onto while a gate is in observe. It protects nothing in the
+meantime — not a denied call, not a canary, not a call with no principal bound. And it
+is not a perfectly transparent replay: `bind` still overwrites bound arguments before
+the tool runs, because binding precedes evaluation and is what the rest of the chain
+judges, so the tool executes with the trusted value rather than the model's.
 
 ## Audit
 

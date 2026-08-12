@@ -18,9 +18,11 @@ promise a response time nobody is on call for.
 its policy forbids, *leak* content its policy would redact, or *lose* an audit
 record — without the attacker already controlling the host process. A bypass of a
 limit that is documented below as a known residual (mechanical-only canary,
-per-process limits, the resource TOCTOU window, shallow nested-argument
-validation) is not a new vulnerability — but a *worse-than-documented* version of
-one is, and so is a case where the documentation is simply wrong.
+per-process limits and approvals, the resource TOCTOU window, shallow
+nested-argument validation, a payload parked on an opaque object's attributes,
+`mode="observe"` executing the call it denied) is not a new vulnerability — but a
+*worse-than-documented* version of one is, and so is a case where the documentation
+is simply wrong.
 
 Supported for fixes: the latest released version, on the Python versions in
 `pyproject.toml`. Nothing is backported.
@@ -95,7 +97,11 @@ secure console) calls `store.grant(request_fingerprint(tool, args, principal))`
 Approvals are **single-use** and **bound to the exact (tool, args, principal)**, so
 one cannot be replayed to a different action, and the agent — which cannot write to
 the store — cannot approve itself. Confirmation must always originate outside the
-model; never from a boolean the model can influence.
+model; never from a boolean the model can influence. Build the store **with the
+policy** (`ApprovalStore(policy)`) if you rely on `confirmation.expires_in`: that is
+where the declared window comes from, and a store built bare holds a grant until it is
+consumed or revoked. The store is also per-process — see *"Limits and approvals are
+per-process"*.
 
 ### Malformed / non-conforming output
 Name-based field redaction cannot save a secret that lands in an **undeclared**
@@ -138,9 +144,67 @@ not reached. Output projection, strict returns and sensitive-field redaction do
 **not** apply here: all three key on a declared return shape, which an exception
 does not have.
 
+### A lazy return does not escape the post-gate either
+Every output control — projection, canary redaction, sensitive-field redaction, secret
+scanning — reads a **materialised** value. A tool that returns a generator, an iterator
+(`map`, `filter`, `iter(rows)`, a file handle, a `csv` reader), a coroutine, an async
+generator, or any other object the post chain can only walk *past* rather than into,
+hands back a payload behind an iteration nothing performed. So the post-gate refuses
+it: DENY, rule **`uninspectable_output`**, with a message telling the author to return
+the collected result. The check walks the same containers the post chain walks — dict
+keys and values, list, tuple, set, frozenset — so `{"rows": (r for r in hits)}`, the
+most ordinary MCP result there is, is refused too, and so is a structure nested deeper
+than that walk follows. The same check reads a raising tool's `exc.args`, because
+`raise ToolError(rows_iterator)` hides a payload from `str(exc)` exactly as a lazy
+return hides one from the post chain.
+
+A *streaming tool* — one written with `yield` — is refused earlier, at wrap time. This
+case cannot be: `def search(q): return (row for row in rows)` looks like an ordinary
+function until it has run, and so does an async tool forced onto the sync path with
+`is_async=False`. Until an audit found it, the post chain scanned the iterator *object*,
+found no strings in it and recorded `allow` with `redactions: []` — a clean line in the
+log underneath a canary, a secret and a projected-away field on their way to the model.
+
+**The tool has already run when this fires.** That is the shape of the control and not
+a defect in it: the denial stops the unscanned payload reaching the model, it cannot
+undo the call, the row it wrote or the money it moved. Anything whose *side effect* must
+be bounded has to be bounded in the PRE phase, by policy. What the gate can still do at
+the return, it does: a refused generator or coroutine is closed rather than left to the
+collector holding a cursor open, though an iterator found *inside* a refused structure
+is not — it may be the tool's own long-lived handle sitting next to the rows.
+
+**The cost of this one is paid by honest tools**, and it is worth naming: an iterable
+that is not one of the containers above is refused even when it holds nothing secret —
+a `deque`, a `dict.values()` view, a lazy result wrapper with an `__iter__`. The remedy
+is one call (`list(...)`, `dict(...)`) and the refusal names it, but this lands at the
+tool's first call rather than at deploy, on a tool that worked yesterday. It was
+chosen over the alternative screen — "an object that says it is iterable is probably
+fine" — because that one cannot tell a `deque` of rows from the wrapper an ORM hands
+back one lazy page at a time, and being wrong in that direction is silent.
+
+**Residual: an opaque object.** Detection reaches exactly as far as redaction does. A
+generator parked on an *attribute* — `Page(rows=<generator>)`, a Pydantic model, any
+custom class that does not advertise itself as iterable — is not seen, for the same
+reason a canary in a dataclass field is not: the post chain does not read attributes,
+and one that did would be executing arbitrary `@property` code inside a security check
+(see [`docs/tech-debt.md`](docs/tech-debt.md) D7). A legacy `__getitem__`-only sequence
+is likewise left alone, because every client object with subscript access defines one.
+An object return is therefore inert to the whole output half of the gate — refusal
+included — which is what `strict_returns=True` plus a declared `returns` shape exists
+to rule out: an object does not match a declared field map, so `on_output_violation`
+handles it instead of the traversal.
+
 ### Fail-closed
 Any exception inside a check becomes DENY. No principal → DENY. A gated tool with
-no argument schema → DENY. There is no fail-open mode in the gate.
+no argument schema → DENY. No individual check ever fails *open*: there is no
+permissive default, no `on_missing`, and no toggle that turns a denial into a warning.
+
+The **gate as a whole** does have a dry run — `mode="observe"`, below — and this
+document used to claim "there is no fail-open mode in the gate", which is false in the
+only reading a reader cares about: in observe mode a call the policy denies executes.
+It is a mode you select for the gate, deliberately and once, not a state a failing
+check can reach; but it is the thing that sentence denied existed, so the sentence is
+gone.
 
 ## Where it stops (honest limits)
 
@@ -176,6 +240,34 @@ Do not read this as "then it is worthless there". Narrowing what a compromised a
 can reach is worth doing at every layer. Read it as: **if you can only afford one
 control and your agent can execute code, this is not the one to buy first.**
 
+### `mode="observe"` executes the call it denies
+
+The second thing that decides whether any of the above applies to your deployment,
+after the question of whether the agent can go around the tools: which mode the gate is
+in. Observe is a **whole-gate dry run**, and it is a deliberate feature, not a fallback
+— the calibration step that lets a team point a policy at real traffic before a denial
+can break somebody's workflow.
+
+**What it does:** everything the enforcing gate does, up to the verdict. Same checks in
+the same order, the same limit slot consumed by an allowed call and none by a denied
+one, and the same audit record — carrying `effect=deny enforced=false executed=true`,
+three fields that only appear together here. Reading them is the point: they are the
+list of calls this policy would have refused, drawn from real traffic.
+
+**What it does not do:** block a denied call, redact an output, withhold a canary or a
+detected secret, or stop a call with **no principal bound at all** — every one of those
+runs the tool and returns its result to the model untouched, including a lazy return,
+which observe passes through unread rather than refuse (closing it would destroy the
+very data the run exists to observe). An audit record is not a control. A gate left in
+observe protects nothing; it measures.
+
+One thing it *does* change, so do not read observe as a transparent replay: `bind`
+still overwrites bound arguments before the tool runs, because binding happens before
+evaluation and is what the rest of the chain then judges. The tool therefore executes
+with the trusted `tenant_id`, not the one the model asked for — an intervention, in the
+mode that promises none. Everything else the tool sees is what it would have seen with
+no gate at all.
+
 ### Canary is a mechanical control + an oracle — NOT exfil prevention
 The pre-gate DENYs a canary token in an argument and the post-gate REDACTs it from
 output, **at runtime** (not test-only). Matching is two-tier on both sides: verbatim,
@@ -200,9 +292,14 @@ other controls (or a semantic tier, if one is wired) failed. Do not sell it as e
 prevention.
 
 ### There is no run or session scope
-`budget` counts calls per `(principal, tool)` **for the life of the store**, and
-`rate_limit` per rolling window on the same key. Neither has a notion of an *agent
-run*. So "at most 20 refunds" means twenty for that identity until the process
+`budget` counts calls per `(principal.identity, tool)` **for the life of the store**,
+and `rate_limit` per rolling window on the same key. The key is `identity` **alone** —
+not the role, not the attributes — so two callers sharing an identity share one
+allowance, a caller whose identity changes gets a fresh one, and a `Principal` built
+with no `identity` at all lands in a single shared `<anonymous>` bucket with every
+other, where one tenant's traffic exhausts another's budget. [`docs/identity.md`](docs/identity.md)
+says so at the point where the field is introduced. Neither limit has a notion of an
+*agent run*. So "at most 20 refunds" means twenty for that identity until the process
 restarts — not twenty per run, and not twenty across a fleet. A long-lived server
 therefore exhausts a principal's budget permanently rather than per invocation,
 which is correct for a worker or a single-run script and surprising anywhere else.
@@ -212,7 +309,7 @@ needs a scope key the format does not yet have (`limit_scope` on the roadmap). U
 it does, the honest claim is per-call least privilege plus a per-identity ceiling,
 not "the agent cannot loop".
 
-### Limits are per-process
+### Limits and approvals are per-process
 `check` + `consume` are **atomic within a process** (a lock closes the
 check→consume race, so concurrent calls cannot both pass a `budget=1`). But the
 counters live in memory: across processes/replicas, "max 5" becomes "5 per
@@ -220,6 +317,17 @@ instance", and injection fanned across processes exceeds the intended global cap
 A true global limit needs shared state (e.g. Redis) — opt-in infra, in tension
 with zero-dependency. The stateless core (RBAC / schema / constraint / canary) is
 unaffected.
+
+`ApprovalStore` is in-memory on the same terms, and the consequence points the other
+way — towards refusing, not allowing. A grant written by a trusted host into worker 3's
+store does not exist in workers 1, 2 and 4, so on a multi-worker deployment the
+approved retry only proceeds if it happens to land back on worker 3; anywhere else the
+human approves again, or the call never completes. Nothing is *widened* by this — an
+approval cannot be replayed into a process that never received it — but the
+grant-then-retry flow described above assumes one process, and running four gunicorn
+workers is enough to break it. Carrying an approval between processes needs the signed
+protocol in [`docs/tech-debt.md`](docs/tech-debt.md) (D4); until then, route
+confirmation-required tools through a single worker or a single-process service.
 
 ### Resource-state TOCTOU (check-time vs execute-time)
 A `source="resource"` constraint reads the resource's state via the resolver **at

@@ -99,6 +99,33 @@ incident here.
 **What resolves it:** `nested_schema` and `cross_field_rules`, both demand-pulled and
 both needing a shape that does not turn the format into an expression language.
 
+## D7 — The post-gate cannot see inside an object return
+
+The outbound half traverses str/bytes/dict/list/tuple/set/frozenset. A return that is a
+dataclass, a Pydantic model or any other opaque object is walked *around*, never into,
+so canary redaction, sensitive-field redaction, projection and the lazy-return refusal
+all stop at its boundary: a canary — or a whole generator — held on an attribute
+reaches the model with `redactions: []` in the record. This is D6's shape on the way
+out, and the same residual is stated in [`../SECURITY.md`](../SECURITY.md).
+
+**Why tolerated:** reading attributes means executing whatever the class put behind
+them. A `@property` runs author code inside a security check, can raise, can be
+expensive, and can return something different on the second read than the redactor
+inspected on the first — a TOCTOU inside the redactor. Putting the object back together
+afterwards is not generally possible either: the constructor may validate, be frozen, or
+not accept the fields it exposes.
+
+**What mitigates it:** `strict_returns=True` with a declared `returns` shape. An object
+return does not match a declared field map, so it is handled by `on_output_violation`
+— `redact_all` by default, which replaces the whole value. That is a blunt answer, but
+it means the unscanned case is reachable only with strict returns off.
+
+**What resolves it:** a declared way to materialise an object return — `returns`
+already names the fields, so a mapping seam (`asdict`, a `to_dict` hook the contract
+points at) would let the existing chain run over it — or making an undeclared object
+return refusable by default. Demand-pulled: nobody has asked yet, and the mitigation
+above is one policy flag away.
+
 ---
 
 ## Resolved — kept for the trail
