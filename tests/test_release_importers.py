@@ -206,7 +206,6 @@ def test_a_dangling_openapi_parameter_ref_is_refused_rather_than_dropping_the_ar
         {"allOf": [{"type": "string", "maxLength": 3}]},
         {"not": {"type": "string"}},
         {"if": {"type": "string"}, "then": {"maxLength": 3}},
-        {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
         {"type": "array", "items": {"type": "string"}, "contains": {"const": "x"}},
         {"type": "array", "prefixItems": [{"type": "string"}]},
         {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
@@ -784,3 +783,97 @@ def test_a_content_block_this_projection_cannot_read_is_refused():
     }
     with pytest.raises(PolicyError):
         contracts_from_openapi(spec)
+
+
+# ── round three: the importer and schema P2s ─────────────────────────────
+
+
+def test_a_union_of_value_types_is_refused_in_either_spelling():
+    """`type: ["string", "integer"]` returned the first member and dropped the rest, so
+    the policy denied the integer the document allows. The `anyOf` spelling of the same
+    statement was already refused."""
+    with pytest.raises(PolicyError, match="single type"):
+        _one({"type": ["string", "integer"]})
+    # ...and the spellings that mean one type still work.
+    assert _one({"type": ["string", "null"]}).nullable
+    assert _one({"type": "string"}).type == "string"
+
+
+@pytest.mark.parametrize("bad", ["read", 7, True, {}, []])
+def test_a_malformed_enum_is_refused_rather_than_dropped(bad):
+    """The one malformed value this module dropped in silence, against its own stated
+    invariant. `enum: "read"` is the ordinary slip."""
+    with pytest.raises(PolicyError, match="enum"):
+        _one({"type": "string", "enum": bad})
+
+
+def test_a_union_inside_items_is_collapsed_like_one_outside_it():
+    """`list[str | None]` — a union the projection handles perfectly one level up —
+    refused the whole tool, because `_collapse_union` was applied to the property and
+    not to the element schema beside it."""
+    field = _one({"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}]}})
+    assert (field.type, field.item_type) == ("array", "string")
+
+
+def test_unique_items_is_carried_and_enforced():
+    """The same case `max_items` was rescued from, left behind in the same pass:
+    `uniqueItems` is what every pydantic `set[T]` emits, and refusing a bound a real
+    source writes cost the whole tool rather than the bound."""
+    from histos.schema import validate
+
+    schema = schema_from_json_schema(
+        {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": True}}}
+    )
+    assert schema.fields["tags"].unique_items
+    assert not validate(schema, {"tags": ["a", "b"]})
+    assert validate(schema, {"tags": ["a", "a"]})
+    # By equality, not by hash: a `set[Model]` is a list of dicts once it is JSON.
+    objects = schema_from_json_schema(
+        {"type": "object", "properties": {"rows": {"type": "array", "items": {"type": "object"}, "uniqueItems": True}}}
+    )
+    assert validate(objects, {"rows": [{"x": 1}, {"x": 1}]})
+
+
+def test_a_ref_sibling_intersects_with_its_target_rather_than_replacing_it():
+    """2020-12 §8.2.3.1 applies the target *in addition to* the keywords beside it. A
+    plain merge is only equivalent when the sibling narrows — and a sibling that widens
+    threw the shared definition's bound away, which reads as "this schema narrows a
+    shared definition" and does the opposite."""
+    doc = {
+        "type": "object",
+        "$defs": {"Short": {"type": "string", "maxLength": 8}},
+        "properties": {
+            "widening": {"$ref": "#/$defs/Short", "maxLength": 4096},
+            "narrowing": {"$ref": "#/$defs/Short", "maxLength": 4},
+        },
+    }
+    fields = schema_from_json_schema(doc).fields
+    assert fields["widening"].max_length == 8
+    assert fields["narrowing"].max_length == 4
+
+
+def test_a_ref_sibling_that_contradicts_its_target_is_refused():
+    doc = {
+        "type": "object",
+        "$defs": {"S": {"type": "string"}},
+        "properties": {"x": {"$ref": "#/$defs/S", "type": "integer"}},
+    }
+    with pytest.raises(PolicyError, match="in addition to"):
+        schema_from_json_schema(doc)
+
+
+@pytest.mark.parametrize("attr", ["max_items", "min_items", "item_type"])
+def test_an_element_bound_on_a_non_array_is_refused(attr):
+    """All three are consulted only inside `if spec.type == "array"`, so on anything
+    else they read as a bound and enforce nothing."""
+    from histos import Field
+
+    with pytest.raises(PolicyError, match=attr):
+        Field(type="string", **{attr: 3 if attr != "item_type" else "string"})
+
+
+def test_min_items_greater_than_max_items_is_refused():
+    from histos import Field
+
+    with pytest.raises(PolicyError, match="min_items"):
+        Field(type="array", min_items=5, max_items=2)

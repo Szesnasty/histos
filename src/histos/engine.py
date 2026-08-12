@@ -40,7 +40,7 @@ from typing import Any
 from histos import canary, detectors
 from histos.content_rules import ContentRules
 from histos.contracts import Effect, GateDecision, GateRequest, Policy, ToolContract
-from histos.errors import ResourceNotFound
+from histos.errors import PolicyError, ResourceNotFound
 from histos.limits import LimitStore
 from histos.schema import sensitive_fields, validate
 
@@ -242,14 +242,40 @@ _MAX_OUTPUT_SCAN_CHARS = 4_194_304
 
 
 def _over_output_budget(obj: Any, budget: int) -> bool:
-    """Whether the textual leaves of ``obj`` exceed ``budget`` characters.
+    """Whether ``obj`` is too large for the post-gate passes to walk.
 
     Stops at the first character over, so the check costs the size of the budget rather
     than the size of the payload — the point is to refuse before anything expensive
     walks it, not to measure exactly how oversized it was.
+
+    Counts *nodes* as well as characters, because the passes it bounds walk and rebuild
+    the whole structure and not only its text. Measuring textual leaves alone meant a
+    return of twenty million integers cost zero budget and was reported under it, while
+    the secret pass then traversed and reconstructed every one of them.
     """
     _, truncated = _text_blob(obj, budget)
-    return truncated
+    return truncated or _node_count_over(obj, budget)
+
+
+def _node_count_over(obj: Any, budget: int) -> bool:
+    """Whether ``obj`` holds more values than the budget allows, stopping at the bound."""
+    remaining = budget
+
+    def walk(value: Any) -> bool:
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0:
+            return True
+        if isinstance(value, dict):
+            return any(walk(k) or walk(v) for k, v in value.items())
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(walk(v) for v in value)
+        return False
+
+    try:
+        return walk(obj)
+    except RecursionError:  # too deep to walk is too deep to scan
+        return True
 
 
 def _text_blob(obj: Any, budget: int) -> tuple[str, bool]:
@@ -561,6 +587,12 @@ class Engine:
         escalate: EscalationTier | None = None,
         output_budget: int = _MAX_OUTPUT_SCAN_CHARS,
     ) -> None:
+        # Validated like every other policy knob. `0` and negatives were accepted in
+        # silence and turned every textual return into a redact-all: the post-gate
+        # reports "output exceeded the scan budget" for a two-character string, which
+        # reads as a tool fault and is a typo in the host's configuration.
+        if not isinstance(output_budget, int) or isinstance(output_budget, bool) or output_budget < 1:
+            raise PolicyError(f"output_budget must be a positive number of characters, got {output_budget!r}")
         self.policy = policy
         self.limits = limits
         self.content_rules = content_rules
@@ -964,7 +996,15 @@ class Engine:
         contract = self.policy.contract_for(req.tool_name)
         text, incomplete = _exception_text(exc, self._output_budget)
         redactions: list[str] = []
-        if incomplete:
+        # Only where a pass was going to read it. The check used to run before any
+        # contract field was consulted, so a contract with the canary scan and the
+        # secret detectors both off — nothing that touches the text at all — still had a
+        # sixteen-link exception replaced by a redaction string. A recursive-descent
+        # parser annotating each frame reaches sixteen links honestly.
+        will_read = contract is not None and (
+            (contract.scan_output_for_canary and self.policy.canaries) or contract.redact_secret_output
+        )
+        if incomplete and will_read:
             return (
                 GateDecision(
                     Effect.REDACT,
@@ -983,6 +1023,36 @@ class Engine:
         if contract is not None and contract.redact_secret_output:
             text, kinds = detectors.redact_string(text)
             redactions.extend(f"secret:{k}" for k in dict.fromkeys(kinds))
+
+        # `_next_link` stops at `__suppress_context__` because what Python will not
+        # display is not something the caller can read — true of the *text*, and not of
+        # the object. `raise X from None` leaves the suppressed exception attached to
+        # `X.__context__`, and a caller that logs `exc.__context__` or hands the
+        # exception to an error reporter reads exactly the secret the scan agreed not to
+        # look at. So the hidden branch is scanned separately, and a hit detaches it
+        # rather than redacting text nobody sees.
+        if will_read and exc.__suppress_context__ and exc.__context__ is not None:
+            hidden, _ = _exception_text(exc.__context__, self._output_budget)
+            found = list(canary.find(hidden, self.policy.canaries)) if self.policy.canaries else []
+            kinds = (
+                [d.kind for d in detectors.scan_string(hidden)] if contract and contract.redact_secret_output else []
+            )
+            if found or kinds:
+                exc.__context__ = None
+                detached = [
+                    *(f"canary:{tok}" for tok in dict.fromkeys(found)),
+                    *(f"secret:{k}" for k in dict.fromkeys(kinds)),
+                    "exception:suppressed_context_detached",
+                ]
+                if not redactions:
+                    # Nothing the caller can *read* changed: the message is untouched and
+                    # so is the exception type, which `raise X from None` deliberately
+                    # chose. What changed is that the hidden branch no longer hangs off
+                    # the object for an error reporter to pick up. An ALLOW with a note,
+                    # not a redaction — swapping the type would punish a leak that never
+                    # reached the text.
+                    return GateDecision(Effect.ALLOW, "allow", redactions=tuple(detached)), text
+                redactions.extend(detached)
 
         if redactions:
             return (

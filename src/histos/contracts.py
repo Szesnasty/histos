@@ -25,7 +25,6 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
-from types import MappingProxyType
 from typing import Any
 
 from histos.canonical import canonical_json, normalize_numbers
@@ -62,6 +61,56 @@ class Sensitivity(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+class ReadOnlyDict(dict):  # type: ignore[type-arg]
+    """A mapping that refuses to be edited, and is still a `dict` to the stdlib.
+
+    `MappingProxyType` was the obvious choice and cost two things the stdlib does by
+    `isinstance(obj, dict)`. `dataclasses.asdict` recurses into exact dicts, lists and
+    dataclasses and falls back to `copy.deepcopy` for everything else — and a proxy
+    cannot be deep-copied, so `dataclasses.asdict(gate.policy)` raised. `pickle` has the
+    same hole, which `Policy.__getstate__` had to paper over. A `dict` subclass takes
+    those branches, and refusing every mutator keeps the guarantee the proxy was chosen
+    for: a ruleset a Gate owns cannot be edited under a `policy_hash` computed before
+    the edit.
+    """
+
+    __slots__ = ()
+
+    def _readonly(self, *_a: Any, **_k: Any) -> Any:
+        raise TypeError(
+            "this mapping is read-only: a Gate's ruleset cannot be edited in place, because every audit "
+            "record would keep naming the hash computed before the edit. Swap the whole policy with "
+            "`gate.policy = ...`, which re-hashes."
+        )
+
+    def __setitem__(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def __delitem__(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def pop(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def popitem(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def clear(self) -> None:
+        self._readonly()
+
+    def update(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def setdefault(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def __reduce__(self) -> Any:
+        return (self.__class__, (dict(self),))
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self)
 
 
 def _snapshot(attributes: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +193,7 @@ class Principal:
         # `args["tenants"].append(...)` edited what the *next* call would be authorized
         # against; and a host that kept its own dict could rewrite a bound principal
         # mid-request. A snapshot has to be a snapshot all the way down.
-        object.__setattr__(self, "attributes", MappingProxyType(_snapshot(dict(self.attributes))))
+        object.__setattr__(self, "attributes", ReadOnlyDict(_snapshot(dict(self.attributes))))
         # A list here is the natural thing to write and it silently half-worked: it
         # compared as a member of nothing, and it made `hash(principal)` raise, which
         # is the one thing `__hash__` below exists to allow. Coerce rather than refuse —
@@ -532,24 +581,6 @@ class Policy:
                 )
         if canaries is not self.canaries:
             object.__setattr__(self, "canaries", canaries)
-
-    def __getstate__(self) -> dict[str, Any]:
-        """Materialise the read-only views so a Policy can be pickled and deep-copied.
-
-        A gate holds its ruleset behind `MappingProxyType` so an in-place edit cannot
-        take effect against a `policy_hash` computed before it. `mappingproxy` has no
-        pickle support, so that quietly cost `pickle.dumps(gate.policy)` and
-        `copy.deepcopy(gate.policy)` — both of which worked before, and both of which a
-        host doing multiprocessing reaches for. The read-only guarantee is about the
-        live object; a copy of it is a new object and gets plain dicts.
-        """
-        state = dict(self.__dict__)
-        for name in ("tools", "permissions", "role_inherits"):
-            state[name] = dict(state[name])
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        self.__dict__.update(state)
 
     def contract_for(self, tool_name: str) -> ToolContract | None:
         return self.tools.get(tool_name)

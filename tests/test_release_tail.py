@@ -1017,3 +1017,126 @@ def test_erasure_without_that_declaration_is_still_caught(tmp_path):
 
     ok, _ = verify_chain(log, key=key)
     assert not ok, "an erased log restarted a clean chain"
+
+
+def test_a_twelve_digit_maestro_is_detected():
+    """The PAN table was widened for Maestro with `range(12, 20)` and the two length
+    gates in front of it were not, so the shortest Maestro that exists could never reach
+    the table."""
+    assert any(d.kind == "pan" for d in scan_string("501800000009")), "12-digit Maestro egressed unredacted"
+
+
+def test_a_policy_can_be_pickled_asdicted_and_deepcopied_off_a_live_gate():
+    """`MappingProxyType` gave the read-only guarantee and cost three stdlib operations
+    a host doing multiprocessing reaches for: `asdict` falls back to `deepcopy` for
+    anything that is not an exact dict, and a proxy cannot be deep-copied."""
+    import copy
+    import pickle
+
+    g = Gate(_policy())
+    assert dataclasses.asdict(g.policy)
+    assert copy.deepcopy(g.policy).content_hash() == g.policy.content_hash()
+    assert pickle.loads(pickle.dumps(g.policy)).content_hash() == g.policy.content_hash()
+
+    who = Principal(role="r", identity="i", attributes={"tenant": "acme"})
+    assert pickle.loads(pickle.dumps(who)) == who
+    assert copy.deepcopy(who) == who
+
+    # ...and the guarantee it was chosen for still holds.
+    with pytest.raises(TypeError):
+        g.policy.permissions["ok"] = frozenset()
+    with pytest.raises(TypeError):
+        who.attributes["tenant"] = "evil"
+
+
+def test_a_suppressed_context_holding_a_canary_is_detached_from_the_object():
+    """`raise X from None` hides the branch from what CPython *prints*, and leaves it on
+    `X.__context__` where an error reporter reads it. The scan skipping it was right;
+    leaving the object attached was the half that was not done. The caller's exception
+    type and message are untouched — swapping them would punish a leak that never
+    reached the text."""
+
+    def boom() -> str:
+        try:
+            raise ValueError(f"driver said {CANARY}")
+        except ValueError:
+            raise RuntimeError("repository error") from None
+
+    sink = InMemoryAuditSink()
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(RuntimeError) as exc:
+        Gate(_no_args_policy(), audit=sink).wrap(boom, name="t")()
+    assert type(exc.value) is RuntimeError
+    assert str(exc.value) == "repository error"
+    assert exc.value.__context__ is None, "the hidden branch is still reachable"
+    assert "exception:suppressed_context_detached" in sink.entries[-1]["redactions"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 3.5])
+def test_a_nonsense_output_budget_is_refused(bad):
+    """`0` turns every textual return into a redact-all, which reads as a tool fault and
+    is a typo in the host's configuration."""
+    with pytest.raises(PolicyError, match="output_budget"):
+        Gate(_policy(), output_budget=bad)
+
+
+def test_a_payload_with_no_text_still_meets_the_budget():
+    """The budget measured textual leaves only, so a return of millions of integers cost
+    zero budget and was reported under it — while the secret pass then walked and
+    rebuilt every one of them."""
+
+    def many() -> list[int]:
+        return list(range(6_000_000))
+
+    with use_principal(Principal(role="ok", identity="i")):
+        out = gate(many, policy=_no_args_policy(), name="t")()
+    assert isinstance(out, str) and "scan budget" in out
+
+
+def test_a_deep_chain_is_not_dropped_when_nothing_was_going_to_read_it():
+    """The `incomplete` check ran before any contract field was consulted, so a contract
+    with the canary scan and the secret detectors both off still had a sixteen-link
+    exception replaced by a redaction string."""
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), scan_output_for_canary=False, redact_secret_output=False)},
+        permissions={"ok": frozenset({"t"})},
+    )
+
+    def deep() -> str:
+        exc: BaseException = ValueError("root")
+        for n in range(30):
+            try:
+                raise RuntimeError(f"layer {n}") from exc
+            except RuntimeError as raised:
+                exc = raised
+        raise exc
+
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(RuntimeError) as caught:
+        gate(deep, policy=policy, name="t")()
+    assert "layer 29" in str(caught.value)
+
+
+def test_a_confirmation_window_without_required_survives_the_round_trip():
+    """`_tool_from_dict` reads the two halves independently, so this is a legal bundle —
+    and `dump_bundle` only wrote the block when `required` was true, so it came back
+    without its window and hashed differently."""
+    from histos import dump_bundle
+
+    bundle = {
+        "version": "histos.policy/0.1",
+        "tools": {"t": {"args": {}, "confirmation": {"expires_in": 300}}},
+        "roles": {"ok": {"allow": ["t"]}},
+    }
+    policy = load_bundle(bundle)
+    assert policy.tools["t"].confirmation_expires_in == 300
+    back = load_bundle(dump_bundle(policy))
+    assert back.tools["t"].confirmation_expires_in == 300
+    assert back.content_hash() == policy.content_hash()
+
+
+def test_a_source_authored_property_name_cannot_rewrite_the_drift_report():
+    """`_render` sanitised every diff *value* and the path was interpolated raw — and
+    the path is built from the source document's own JSON keys."""
+    from histos.lockfile import shape_diff
+
+    lines = shape_diff({"properties": {}}, {"properties": {"x\r\x1b[2KOK — no drift": {"type": "string"}}})
+    assert lines and all("\r" not in line and "\x1b" not in line for line in lines), lines

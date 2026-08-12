@@ -141,6 +141,7 @@ _FIELD_KEYS = frozenset(
         "required",
         "sensitive",
         "type",
+        "unique_items",
     }
 )
 _CONDITION_KEYS = frozenset({"field", "op", "principal_attr", "value"})
@@ -315,6 +316,7 @@ def _field_from_compact(where: str, spec: Any) -> Field:
         sensitive=spec.get("sensitive"),
         nullable=spec.get("nullable", False),
         item_enum=item_enum,
+        unique_items=spec.get("unique_items", False),
         item_type=spec.get("item_type"),
         max_items=spec.get("max_items"),
         min_items=spec.get("min_items"),
@@ -774,6 +776,8 @@ def _field_to_compact(field: Field) -> dict[str, Any]:
         # had just read off `anyOf: [T, null]` — a round trip that quietly tightened the
         # policy, and then denied the null the source explicitly allows.
         out["nullable"] = True
+    if field.unique_items:
+        out["unique_items"] = True
     if field.item_enum is not None:
         out["item_enum"] = list(field.item_enum)
     if field.item_type is not None:
@@ -857,8 +861,15 @@ def dump_bundle(policy: Policy) -> dict[str, Any]:
             entry["rate_limit"] = tool.rate_limit
         if tool.budget is not None:
             entry["budget"] = tool.budget
-        if tool.requires_confirmation:
-            entry["confirmation"] = {"required": True}
+        # Emitted whenever either half is set. The loader reads `required` and
+        # `expires_in` independently, so `confirmation: {expires_in: 300}` with no
+        # `required` is a legal bundle — and the dump only wrote the block when
+        # `required` was true, so that bundle came back without its window and hashed
+        # differently. `dump_bundle`'s own docstring states the round trip.
+        if tool.requires_confirmation or tool.confirmation_expires_in is not None:
+            entry["confirmation"] = {}
+            if tool.requires_confirmation:
+                entry["confirmation"]["required"] = True
             if tool.confirmation_expires_in is not None:
                 entry["confirmation"]["expires_in"] = tool.confirmation_expires_in
         if tool.requires_escalation:

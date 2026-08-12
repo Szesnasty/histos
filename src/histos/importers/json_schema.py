@@ -126,7 +126,6 @@ _UNPROJECTED_ASSERTIONS = frozenset(
         "contains",
         "minContains",
         "maxContains",
-        "uniqueItems",
         # single-value assertions with no `Field` equivalent
         "const",
         "divisibleBy",
@@ -293,10 +292,58 @@ def _resolve_refs(node: Any, documents: tuple[dict[str, Any], ...], *, where: st
                 "none of the bounds the reference was meant to supply.",
                 code="invalid_import",
             )
-        # 2020-12 lets keywords sit next to a `$ref`; the ones written here win over
-        # the target's, which is how a schema narrows a shared definition.
-        node = {**target, **{k: v for k, v in node.items() if k != "$ref"}}
+        # 2020-12 lets keywords sit next to a `$ref`, and §8.2.3.1 applies the target
+        # *in addition to* them — the intersection, not an override. A plain merge is
+        # only equivalent when the sibling narrows, and a sibling that widens then
+        # silently threw away the shared definition's bound: `{"$ref": "#/$defs/Short",
+        # "maxLength": 4096}` produced a field with no short bound at all, which reads
+        # as "this schema narrows a shared definition" and does the opposite.
+        node = _intersect(target, {k: v for k, v in node.items() if k != "$ref"}, where=where)
     return node
+
+
+# Bounds where the *tighter* of two values is the intersection, and which way tighter
+# runs. Anything not named here is an annotation or a shape the projection carries
+# whole, and the sibling simply wins.
+_TIGHTER = {
+    "maxLength": min,
+    "maxItems": min,
+    "maximum": min,
+    "exclusiveMaximum": min,
+    "minLength": max,
+    "minItems": max,
+    "minimum": max,
+    "exclusiveMinimum": max,
+}
+
+
+def _intersect(target: dict[str, Any], sibling: dict[str, Any], *, where: str) -> dict[str, Any]:
+    """Apply ``sibling`` on top of ``target`` the way a `$ref` composes: both must hold."""
+    merged = dict(target)
+    for key, value in sibling.items():
+        if key not in merged or merged[key] == value:
+            merged[key] = value
+            continue
+        tighter = _TIGHTER.get(key)
+        if tighter is not None:
+            try:
+                merged[key] = tighter(merged[key], value)
+                continue
+            except TypeError:
+                pass
+        if key in ("type", "pattern", "enum", "const", "format"):
+            # Two of these cannot both hold unless they agree, and guessing which the
+            # author meant is how a bound disappears. `type` is the sharp one: a `$ref`
+            # to a string definition with `"type": "integer"` beside it is a document
+            # that says two things.
+            raise _malformed(
+                f"{where} $ref sibling {key!r}",
+                value,
+                f"a value that agrees with the referenced definition ({merged[key]!r}) — a `$ref` applies "
+                "in addition to the keywords beside it, so two different values cannot both hold",
+            )
+        merged[key] = value
+    return merged
 
 
 def _type_of_value(value: Any) -> str | None:
@@ -461,6 +508,16 @@ def _resolve_type(js_type: Any, *, where: str = "an imported schema") -> tuple[s
         unknown = [t for t in concrete if t not in _JS_TYPES]
         if unknown:
             raise _malformed(f"{where} type", unknown[0], f"one of {', '.join(sorted(_JS_TYPES))}")
+        if len(concrete) > 1:
+            # `return concrete[0]` dropped every type after the first without a word, so
+            # a document declaring string-or-integer produced a policy that denies the
+            # integer. The `anyOf` spelling of the same union is refused; this is the
+            # same statement written the other way, and gets the same answer.
+            raise _malformed(
+                f"{where} type",
+                js_type,
+                "a single type, optionally with 'null' — a union of value types has no single Field to project onto",
+            )
         return concrete[0], nullable
     if js_type == "null":
         # A distinct answer, not `("any", True)`. Both spellings say the property admits
@@ -529,8 +586,14 @@ def _checked_enum(enum: Any, ftype: str, *, nullable: bool) -> tuple[Any, ...] |
     silent: the tool simply stops working, with nothing naming the source document
     that broke it. Catching it at import puts the failure where it can be fixed.
     """
-    if not isinstance(enum, list):
+    if enum is None:
         return None
+    # The one malformed value this module used to drop in silence, against its own
+    # stated invariant: a dropped bound leaves a policy that reads as constrained and
+    # enforces nothing. `enum: "read"` is the ordinary slip, and it iterated into one
+    # allowed value per character everywhere else it was written.
+    if not isinstance(enum, list) or not enum:
+        raise _malformed("enum", enum, "a non-empty list of allowed values")
     expected = _TYPE_OF.get(ftype)
     if expected is not None:
         for member in enum:
@@ -600,6 +663,11 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         resolved = _resolve_refs(raw_items, documents, where=f"{where} items")
         if not isinstance(resolved, dict):
             raise _malformed("items", raw_items, "a schema object")
+        # The element schema is collapsed the same way the property is. `_fold_const`
+        # and the element enum were applied here and `_collapse_union` was not, so
+        # `list[str | None]` — a union the projection handles perfectly one level up —
+        # refused the whole tool.
+        resolved, _ = _collapse_union(resolved, documents, where=f"{where} items")
         items = _fold_const(resolved, where=where, prefix="items.")
         _refuse_unprojected(items, _UNPROJECTED_IN_ITEMS, where=where, prefix="items.")
         item_type = _resolve_type(items.get("type"), where=f"{where} items")[0]
@@ -632,6 +700,7 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         pattern=pattern,
         sensitive=sensitive,
         item_enum=item_enum,
+        unique_items=bool(prop.get("uniqueItems", False)) if ftype == "array" else False,
         item_type=item_type,
         max_items=_length(*_bound(prop, None, "maxItems")),
         min_items=_length(*_bound(prop, None, "minItems")),

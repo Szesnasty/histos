@@ -235,7 +235,7 @@ def _cmd_drift(args: argparse.Namespace) -> int:
         if unverifiable and not args.allow_unverifiable:
             print(
                 f"FAIL — {len(unverifiable)} policy tool(s) were not checked at all: "
-                f"{', '.join(unverifiable)}. Import them so the lock covers them, or pass "
+                f"{', '.join(safe_text(t) for t in unverifiable)}. Import them so the lock covers them, or pass "
                 "--allow-unverifiable to accept the gap deliberately.",
                 file=sys.stderr,
             )

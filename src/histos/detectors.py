@@ -110,7 +110,11 @@ def looks_like_a_pan(digits: str) -> bool:
 
 def luhn_ok(digits: str) -> bool:
     """Luhn (mod-10) check over a run of digits."""
-    if not digits.isdigit() or not (13 <= len(digits) <= 19):
+    # 12, not 13. The PAN table was widened for Maestro with `range(12, 20)` and the
+    # comment "variable length by design (12-19)", and the two length gates in front of
+    # it were not widened with it — so the shortest Maestro that exists could never
+    # reach the table and egressed unredacted.
+    if not digits.isdigit() or not (12 <= len(digits) <= 19):
         return False
     total = 0
     parity = len(digits) % 2
@@ -172,7 +176,7 @@ _STRUCTURAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 # Candidate runs for the checksum detectors (validated before a Detection is emitted).
-_DIGIT_RUN = re.compile(r"\b[0-9][0-9 -]{11,21}[0-9]\b")
+_DIGIT_RUN = re.compile(r"\b[0-9][0-9 -]{10,21}[0-9]\b")  # 12 digits at the short end; see `luhn_ok`
 _IBAN_RUN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")
 _JWT_RUN = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 

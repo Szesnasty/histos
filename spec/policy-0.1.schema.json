@@ -261,6 +261,10 @@
             "any"
           ],
           "default": "string"
+        },
+        "unique_items": {
+          "description": "Whether every element of an array must be distinct. What a pydantic `set[T]` emits as `uniqueItems`. Compared by equality rather than by hash, so a list of objects is checked too.",
+          "type": "boolean"
         }
       }
     },
