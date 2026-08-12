@@ -47,6 +47,34 @@ class Detection:
 # ── checksums ────────────────────────────────────────────────────────────
 
 
+# The (prefix, length) combinations the card schemes actually issue. Luhn on its own
+# is a mod-10 checksum, which one number in ten passes by chance — so "13-19 digits and
+# Luhn-clean" also describes about 10% of every order number, meter reading, serial and
+# account reference a tool legitimately returns, and 100% of IMEIs, which are 15 digits
+# and Luhn by specification. Redacting those is not a conservative call: the tool
+# silently stops working and the audit record asserts a card number was removed. A real
+# PAN always carries an issuer prefix, so requiring one costs nothing against real cards
+# and removes the bulk of the false positives.
+_PAN_PREFIXES: tuple[tuple[str, tuple[int, ...]], ...] = (
+    ("4", (13, 16, 19)),                                    # Visa
+    *((str(n), (16,)) for n in range(51, 56)),              # Mastercard
+    *((str(n), (16,)) for n in range(2221, 2721)),          # Mastercard 2-series
+    ("34", (15,)), ("37", (15,)),                           # Amex
+    ("6011", (16,)), ("65", (16,)),                         # Discover
+    *((str(n), (16, 19)) for n in range(644, 650)),         # Discover
+    ("36", (14,)),                                          # Diners
+    *((str(n), (14,)) for n in range(300, 306)),            # Diners
+    ("3095", (14,)), ("38", (14,)), ("39", (14,)),          # Diners
+    *((str(n), (16, 19)) for n in range(3528, 3590)),       # JCB
+    ("62", (16, 17, 18, 19)),                               # UnionPay
+)
+
+
+def looks_like_a_pan(digits: str) -> bool:
+    """Whether a Luhn-clean run also carries an issuer prefix and a length to match."""
+    return any(digits.startswith(prefix) and len(digits) in lengths for prefix, lengths in _PAN_PREFIXES)
+
+
 def luhn_ok(digits: str) -> bool:
     """Luhn (mod-10) check over a run of digits."""
     if not digits.isdigit() or not (13 <= len(digits) <= 19):
@@ -122,7 +150,7 @@ def scan_string(text: str) -> list[Detection]:
 
     for m in _DIGIT_RUN.finditer(text):
         digits = re.sub(r"[ -]", "", m.group())
-        if luhn_ok(digits):
+        if luhn_ok(digits) and looks_like_a_pan(digits):
             found.append(Detection("pan", CHECKSUM, m.start(), m.end()))
 
     for m in _IBAN_RUN.finditer(text):

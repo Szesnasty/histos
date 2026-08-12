@@ -8,9 +8,11 @@ host can render the same structure itself. Deterministic and read-only.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from histos.contracts import Policy, Sensitivity, ToolContract
+from histos.display import safe_text
 from histos.importers.sources import UNREVIEWED_SENSITIVITY
 
 # Per-tool verdict for the import→review→protect journey.
@@ -32,6 +34,11 @@ _UNREVIEWED = (
 _NO_ROW_AUTHZ = (
     "no resource constraint — authorization is tool-level, not row-level, so a caller "
     "granted this tool may act on any resource of this type. Add `resource: {owns: ...}`"
+)
+
+_NO_CONTRACT = (
+    "handed to protect() but the policy declares no contract for it — every call denies "
+    "with `unknown_tool` until a human writes one"
 )
 
 
@@ -80,6 +87,19 @@ def _all_any(tool: ToolContract) -> bool:
     return tool.args is not None and bool(tool.args.fields) and all(f.type == "any" for f in tool.args.fields.values())
 
 
+def _untyped_fields(tool: ToolContract) -> list[str]:
+    """Arguments declaring no type, so no value of them is validated.
+
+    Named one by one, because the all-`any` check above only fires when *every* field
+    is untyped: a tool with four bounded arguments and one `payload: any` reviewed
+    clean, and `payload` is where the interesting value goes. One field is enough to
+    turn deny-by-default off for the thing an attacker controls.
+    """
+    if tool.args is None:
+        return []
+    return sorted(name for name, f in tool.args.fields.items() if f.type == "any")
+
+
 @dataclass
 class PolicyReview:
     tools_discovered: int = 0
@@ -91,6 +111,12 @@ class PolicyReview:
     unreviewed: list[str] = field(default_factory=list)  # still carrying an import's assumption
     callable_by: dict[str, list[str]] = field(default_factory=dict)  # tool -> roles
     warnings: list[str] = field(default_factory=list)
+    #: The subset of :attr:`warnings` that came from :meth:`Policy.validate` — a grant
+    #: for a tool that does not exist, a role inheriting itself. Structural, not
+    #: advisory, and separated so `histos review` can fail CI on exactly what `histos
+    #: validate` fails on without also failing on "this write tool could use a resource
+    #: constraint", which is good advice and not a broken policy.
+    structural_issues: list[str] = field(default_factory=list)
     # Import→review classification: tool -> (verdict, reasons)
     classification: dict[str, tuple[str, list[str]]] = field(default_factory=dict)
 
@@ -119,24 +145,41 @@ class PolicyReview:
             f"✕ {len(self.blocked)} cannot be safely gated",
             f"{self.roles_discovered} roles discovered",
         ]
+        # Tool names come from whoever wrote the MCP server or the OpenAPI document,
+        # and this is the report a human reads before granting the tool — so they are
+        # rendered as quoted data, never as something a terminal may act on.
         if self.unreviewed:
             lines.append(
                 f"{len(self.unreviewed)} tool(s) carry an unreviewed import assumption: "
-                + ", ".join(self.unreviewed)
+                + ", ".join(safe_text(n) for n in self.unreviewed)
             )
         for name in self.needs_review:
             reasons = "; ".join(self.classification[name][1])
-            lines.append(f"⚠ {name}: {reasons}")
+            lines.append(f"⚠ {safe_text(name)}: {reasons}")
         for name in self.blocked:
             reasons = "; ".join(self.classification[name][1])
-            lines.append(f"✕ {name}: {reasons}")
+            lines.append(f"✕ {safe_text(name)}: {reasons}")
         if not self.missing_return_schema:
             lines.append("return schema complete")
+        # Printed, not counted. A bare "3 policy warnings" is the same report whether
+        # the three are cosmetic or whether one of them is `role 'admin' grants unknown
+        # tool 'delete_user'` — the finding this whole report exists to surface. It also
+        # made `review` read as milder than `validate` on the same file, since
+        # `policy.validate()`'s own issues arrive here as warnings.
         lines.append(f"{len(self.warnings)} policy warning" + ("" if len(self.warnings) == 1 else "s"))
+        lines.extend(f"  ⚠ {safe_text(w)}" for w in self.warnings)
         return "\n".join(lines)
 
 
-def review_policy(policy: Policy) -> PolicyReview:
+def review_policy(policy: Policy, *, discovered: Iterable[str] = ()) -> PolicyReview:
+    """Report on ``policy``; ``discovered`` names tools that exist but the policy does not.
+
+    ``protect()`` passes the tools it was handed which the *authored* policy never
+    declares. They are, by definition, absent from ``policy.tools`` — that is the whole
+    finding — so every check below would look straight past them, and the review would
+    describe a smaller world than the one the agent was actually given. Naming them here
+    keeps the two halves of the report honest about the same set of tools.
+    """
     reachable: set[str] = set()
     callable_by: dict[str, list[str]] = {name: [] for name in policy.tools}
     for role in policy.permissions:
@@ -144,7 +187,8 @@ def review_policy(policy: Policy) -> PolicyReview:
             reachable.add(tool_name)
             callable_by.setdefault(tool_name, []).append(role)
 
-    warnings = list(policy.validate())
+    structural_issues = list(policy.validate())
+    warnings = list(structural_issues)
     for name, tool in sorted(policy.tools.items()):
         # Permissive argument schema (e.g. inferred from **kwargs) turns off
         # deny-by-default on the argument surface for this tool.
@@ -161,6 +205,11 @@ def review_policy(policy: Policy) -> PolicyReview:
             warnings.append(
                 f"tool {name!r} has an argument schema in which no field declares a type "
                 "(every field is `any`) — it names the arguments but validates none of them"
+            )
+        elif untyped := _untyped_fields(tool):
+            warnings.append(
+                f"tool {name!r} declares no type for {', '.join(repr(f) for f in untyped)} — "
+                "no value of those arguments is validated"
             )
         # A reachable high-risk tool with no resource constraint is authorized only
         # at the tool level — a caller granted it may act on any row.
@@ -189,12 +238,21 @@ def review_policy(policy: Policy) -> PolicyReview:
             reasons.append("permissive argument schema (accepts any argument)")
         if _all_any(tool):
             reasons.append("no field declares a type (every argument is `any`)")
+        elif untyped := _untyped_fields(tool):
+            reasons.append(f"no type declared for {', '.join(repr(f) for f in untyped)}")
         if _needs_row_authz(tool):
             reasons.append("no resource constraint (authorization is tool-level, not row-level)")
         classification[name] = (REVIEW, reasons) if reasons else (READY, [])
 
+    # A tool with no contract cannot be READY, and calling it BLOCKED would say the
+    # policy decided something it never mentions. It needs a human, which is what
+    # REVIEW means.
+    undeclared = sorted(set(discovered) - set(policy.tools))
+    for name in undeclared:
+        classification[name] = (REVIEW, [_NO_CONTRACT])
+
     return PolicyReview(
-        tools_discovered=len(policy.tools),
+        tools_discovered=len(policy.tools) + len(undeclared),
         roles_discovered=len(policy.permissions),
         destructive=sorted(name for name, t in policy.tools.items() if t.access == "write"),
         unreachable=sorted(name for name in policy.tools if name not in reachable),
@@ -203,5 +261,6 @@ def review_policy(policy: Policy) -> PolicyReview:
         unreviewed=sorted(name for name, t in policy.tools.items() if _is_unreviewed_import(t)),
         callable_by={k: sorted(v) for k, v in callable_by.items()},
         warnings=warnings,
+        structural_issues=structural_issues,
         classification=classification,
     )
