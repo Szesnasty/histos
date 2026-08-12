@@ -422,6 +422,8 @@ def _schema_structure(schema: Schema | None) -> Any:
                 "sensitive": f.sensitive,
                 "nullable": f.nullable,
                 "item_type": f.item_type,
+                "max_items": f.max_items,
+                "min_items": f.min_items,
                 "minimum": f.minimum,
                 "maximum": f.maximum,
                 "exclusive_minimum": f.exclusive_minimum,

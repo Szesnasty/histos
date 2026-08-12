@@ -283,15 +283,38 @@ def test_a_pattern_measured_expensive_is_refused(pattern):
 PYDANTIC_TOOLS = _load("pydantic_mcp_tools.json")["tools"]
 
 
-@pytest.mark.parametrize("tool", PYDANTIC_TOOLS, ids=lambda t: t["name"])
+# A `Union[int, str]` argument has no home in one flat field, and `any` is not a home:
+# it accepts everything, which is the silent widening the bridge exists to refuse. One
+# refused tool is the smaller loss, and pydantic emits value-type unions rarely — every
+# `Optional[T]` is `anyOf: [T, null]` and still collapses.
+UNPROJECTABLE = {"union"}
+PROJECTABLE = [t for t in PYDANTIC_TOOLS if t["name"] not in UNPROJECTABLE]
+
+
+@pytest.mark.parametrize("tool", PROJECTABLE, ids=lambda t: t["name"])
 def test_a_schema_pydantic_actually_emits_imports(tool):
     """Every MCP server built on FastMCP or the MCP Python SDK emits exactly these."""
     contracts_from_mcp([tool])
 
 
-def test_the_whole_pydantic_manifest_imports_as_one():
-    contracts = contracts_from_mcp(PYDANTIC_TOOLS)
-    assert len(contracts) == len(PYDANTIC_TOOLS), "a manifest lost tools it should have kept"
+@pytest.mark.parametrize("name", sorted(UNPROJECTABLE))
+def test_a_shape_one_flat_field_cannot_hold_is_refused_by_name(name):
+    tool = next(t for t in PYDANTIC_TOOLS if t["name"] == name)
+    with pytest.raises(PolicyError):
+        contracts_from_mcp([tool])
+
+
+def test_the_projectable_pydantic_manifest_imports_as_one():
+    contracts = contracts_from_mcp(PROJECTABLE)
+    assert len(contracts) == len(PROJECTABLE), "a manifest lost tools it should have kept"
+
+
+def test_a_bound_the_source_wrote_survives_the_import():
+    """`maxItems` had nowhere to go, so it was refused; not refusing it silently dropped
+    it, which is worse. It is carried."""
+    scopes = next(t for t in PYDANTIC_TOOLS if t["name"] == "scopes")
+    fields = contracts_from_mcp([scopes])[0].args.fields
+    assert fields["tags"].max_items == 10
 
 
 def test_the_real_petstore_document_imports_completely():

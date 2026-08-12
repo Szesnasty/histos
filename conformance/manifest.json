@@ -297,47 +297,47 @@
         {
           "case": "absent-description-is-not-an-empty-one",
           "file": "projection/absent-description-is-not-an-empty-one.json",
-          "sha256": "020c2d33c3b86a9b3bc2e2b8619ecd544de67d035504115349ef446b3be555a2"
+          "sha256": "c32192ea6a7f60416f189999a51f099c687130aba06e507ca9669b7fbb421568"
         },
         {
           "case": "argument-surface-is-closed-by-default",
           "file": "projection/argument-surface-is-closed-by-default.json",
-          "sha256": "db6960231a52f7e83853839b047aa21eec186666a23205477ea063f635918fe1"
+          "sha256": "f9783472122961fc6e6796e2af2a6d5bdbcb4854edd6015dbf1b3656bf08740e"
         },
         {
           "case": "draft4-boolean-exclusive-minimum-is-ignored",
           "file": "projection/draft4-boolean-exclusive-minimum-is-ignored.json",
-          "sha256": "0ec6b99cd2572607cc9f0febbf467e4396f292a29e15d2bf3a17bc538d3967de"
+          "sha256": "8d6cff9e7e482511065bffab1f9778c46114cb28490e533e65ba4bfb62cb7432"
         },
         {
           "case": "every-projected-keyword-survives",
           "file": "projection/every-projected-keyword-survives.json",
-          "sha256": "e95605ec06c9de5584bc65fbefeef33d3e98498a0c2dae4ade6db470d75a34c1"
+          "sha256": "cb6f6015a818b7b3e00b444b281c2090d3a52b61eb0f5b991fb395766849827a"
         },
         {
           "case": "integral-bounds-hash-the-same-whether-written-as-int-or-float",
           "file": "projection/integral-bounds-hash-the-same-whether-written-as-int-or-float.json",
-          "sha256": "b358737e248d456ff87754875679fe33b83b8fcd963bcb590360f25d91d33219"
+          "sha256": "e9ecce08be7345d3b958219dfb9eb3fd502451a4552547d6710afea39c84f94e"
         },
         {
           "case": "integral-bounds-written-as-int",
           "file": "projection/integral-bounds-written-as-int.json",
-          "sha256": "de30b2b2f1f8f0ac64b707679ecb2e66d1d72c7189c6b0172de0dd2faa70f6fe"
+          "sha256": "1c8a6c4d7b2029ceeae01560ca90ffb9aa28ad34a8af45cf79f66d365da7db8e"
         },
         {
           "case": "nullable-type-list-is-optional",
           "file": "projection/nullable-type-list-is-optional.json",
-          "sha256": "a0cd8d935e671370035bf4a534b1ce03a251ff0766c86557a0987276ad37d6ba"
+          "sha256": "a7454082839072ce6cc4fc65b6b2296628fbad542be29cb1040cbeffc428255c"
         },
         {
           "case": "openai-function-projects-like-mcp",
           "file": "projection/openai-function-projects-like-mcp.json",
-          "sha256": "1831867a2566403fe1117ab2cbc2320b7a66853918566f03adcdd6ab915be89b"
+          "sha256": "436bfa5126685b23472f465dc19d69bc88fff67756cff43c6588de473c762dd9"
         },
         {
           "case": "unprojected-keywords-do-not-move-the-contract-hash",
           "file": "projection/unprojected-keywords-do-not-move-the-contract-hash.json",
-          "sha256": "03588e98fd9e223b2de6d6f1d3fa1cfc6b02f0a86bb0bcb34b3833cbf040b654"
+          "sha256": "dbb596c25dec6af4e2ad67a6b2aee24cb182771f7fc3fdb4b77edd5f2ec68323"
         }
       ]
     }
