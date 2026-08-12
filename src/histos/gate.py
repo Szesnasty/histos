@@ -116,29 +116,65 @@ def reset_principal(token: Token[Principal | None]) -> None:
 _GENERATOR_FRAME = inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR
 
 
+def _strict_drivers() -> frozenset[str]:
+    """Source files whose frames drive a generator with strict enter/exit discipline.
+
+    `contextlib` is the one the documentation recommends. pytest is here because a
+    ``yield`` fixture is how a test suite scopes an identity, it is driven from
+    ``_pytest.fixtures`` rather than through ``contextlib``, and refusing it errors out
+    every test at setup — the first thing a team writes when they try the library.
+    Looked up in ``sys.modules`` rather than imported: this costs nothing when pytest is
+    not running, and a security library has no business importing a test framework.
+
+    Anything else driving a setup/teardown generator by hand — a DI container of one's
+    own, say — is still refused, and the refusal names the escape hatch.
+    """
+    files = {contextlib.__file__}
+    for name in ("_pytest.fixtures", "_pytest.python"):
+        path = getattr(sys.modules.get(name), "__file__", None)
+        if path:
+            files.add(path)
+    return frozenset(files)
+
+
 def _refuse_a_leaking_frame(caller: Any) -> None:
-    """Refuse to open in a generator the caller drives by hand.
+    """Refuse to open anywhere a binding would span somebody's ``yield``.
 
     Banning the frame *kind* outright was too broad: the two most ordinary ways to write
     a request scope — `@contextlib.contextmanager` and a generator-style test fixture —
-    are generator frames, and under `contextlib` the generator is driven with strict
-    enter/exit discipline in the consumer's own context, which is the safe case and the
-    one the documentation should be recommending. So the check asks who is driving.
-    A generator nobody is driving that way is still refused, and `__exit__` carries the
-    backstop for whatever this cannot see.
+    are generator frames, and under a strict driver the generator is bracketed in the
+    consumer's own context, which is the safe case and the one to recommend. So the
+    check asks who is driving.
+
+    It has to keep asking. Looking one frame up was the first attempt and it re-opened
+    the hole through the very spelling the refusal recommends: wrapping the producer in
+    `@contextlib.contextmanager` satisfied a one-step check, while the `with` block
+    still spanned the *consumer's* yields whenever that consumer was itself a generator.
+    Two interleaved streams still ran as each other, now with nothing raised anywhere.
+    So the whole resume chain is walked, and every generator in it has to be strictly
+    driven before the first ordinary frame ends the question. `__exit__` carries the
+    backstop for whatever this still cannot see — though not for this shape, where enter
+    and exit both happen in the consumer's context and the reset succeeds.
     """
-    if not caller.f_code.co_flags & _GENERATOR_FRAME:
-        return
-    driver = caller.f_back
-    if driver is not None and driver.f_code.co_filename == contextlib.__file__:
-        return
-    raise PolicyError(
-        f"use_principal() was opened inside the generator {caller.f_code.co_name!r}. A generator has no "
-        "context of its own — it runs in whichever context resumes it — so a binding that spans a `yield` "
-        "leaks into the consumer and two interleaved streams run as each other. Wrap the generator in "
-        "@contextlib.contextmanager, bind around whatever consumes it, or give the producer its own "
-        "context with contextvars.copy_context().run(...)."
-    )
+    frame, drivers = caller, None
+    while frame is not None and frame.f_code.co_flags & _GENERATOR_FRAME:
+        if drivers is None:
+            drivers = _strict_drivers()
+        driver = frame.f_back
+        if driver is None or driver.f_code.co_filename not in drivers:
+            where = (
+                f"was opened inside the generator {frame.f_code.co_name!r}"
+                if frame is caller
+                else f"is held open across a `yield` of the generator {frame.f_code.co_name!r} consuming it"
+            )
+            raise PolicyError(
+                f"use_principal() {where}. A generator has no context of its own — it runs in whichever "
+                "context resumes it — so a binding that spans a `yield` leaks into the consumer and two "
+                "interleaved streams run as each other. Wrap the generator in @contextlib.contextmanager, "
+                "bind around whatever consumes it, or give the producer its own context with "
+                "contextvars.copy_context().run(...)."
+            )
+        frame = driver.f_back
 
 
 class use_principal:  # noqa: N801 — it is spelled and used as a function

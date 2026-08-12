@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from typing import Any
@@ -123,26 +124,45 @@ def _exception_text(exc: BaseException) -> tuple[str, bool]:
     Scanned together, in one string, because the decision is binary — either something
     had to be removed from what the caller can see, or nothing did — and the caller
     gets :class:`~histos.errors.ToolErrorRedacted`, which carries no chain of its own.
+
+    A chain is a tree, not a line. ``__cause__``/``__context__`` alone missed every
+    member of an :class:`ExceptionGroup`, which is how ``asyncio.TaskGroup`` and every
+    fan-out tool report partial failure: ``ExceptionGroup("2 of 3 shards failed", [...])``
+    scanned as that one sentence, found nothing, and the gate re-raised the original
+    group with both sub-exceptions — and their secrets — intact, while the identical
+    payload on a ``raise ... from`` chain was caught. So the walk is breadth-first over
+    links *and* members.
     """
     parts: list[str] = []
     seen: set[int] = set()
-    current: BaseException | None = exc
+    pending: deque[BaseException] = deque([exc])
     for _ in range(_MAX_EXCEPTION_CHAIN):
-        if current is None or id(current) in seen:
+        if not pending:
             return "\n".join(parts), False
+        current = pending.popleft()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         parts.append(f"{type(current).__name__}: {current}")
         notes = getattr(current, "__notes__", None)
         # A Sequence, not a list: `add_note` builds a list, but the attribute is
         # writable and `traceback` prints whatever is iterable there. A `str` is a
         # Sequence too and would be printed one character per line, so it is excluded.
+        # Anything else iterable-but-not-Sequence, or not iterable at all, is printed by
+        # CPython as its `repr`, so that is what gets scanned rather than nothing.
         if isinstance(notes, Sequence) and not isinstance(notes, (str, bytes)):
             parts.extend(str(note) for note in notes)
-        current = _next_link(current)
-    # The bound was hit with links still to go. Saying "nothing to redact" about a chain
-    # that was not read to the end is the fail-open this walk exists to close, so the
-    # caller is told the text is incomplete and drops it whole.
-    return "\n".join(parts), current is not None
+        elif notes is not None:
+            parts.append(repr(notes))
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        link = _next_link(current)
+        if link is not None:
+            pending.append(link)
+    # The bound was hit with exceptions still to read. Saying "nothing to redact" about
+    # a chain that was not read to the end is the fail-open this walk exists to close,
+    # so the caller is told the text is incomplete and drops it whole.
+    return "\n".join(parts), bool(pending)
 
 
 def for_callback(req: GateRequest) -> GateRequest:
@@ -413,9 +433,15 @@ def _projectable(value: Any) -> bool:
     projector rebuilt the container, returned each non-dict element untouched, dropped
     nothing, and reported the clean result the guard was written to prevent. A tuple
     subclass carries its fields by *name*, which is exactly what the projector cannot
-    read, so it is asked by exact type.
+    read, so a tuple is asked by exact type.
+
+    Only a tuple. Answering *every* container by exact type was the overcorrection, and
+    it refused the shapes a real tool returns most often: `Counter`, `OrderedDict`,
+    `defaultdict` and any `list` subclass, all of which the projector enters and
+    rebuilds correctly, because a dict subclass still carries its data under keys and a
+    list subclass still carries it positionally. Neither hides a field behind a name.
     """
-    return type(value) in (dict, list, tuple, set, frozenset)
+    return isinstance(value, (dict, list, set, frozenset)) or type(value) is tuple
 
 
 def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], list[str]]:
@@ -437,7 +463,14 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], 
                 else:
                     dropped.append(str(k))
             return kept
-        if isinstance(o, (list, tuple)):
+        # Exactly the shapes `_projectable` vouches for, and asked the same way. A
+        # `NamedTuple` is a tuple subclass and passed `isinstance(o, tuple)`, so one
+        # level down — a list of record rows, the single most ordinary return there is —
+        # it was rebuilt field for field with every undeclared field intact, and because
+        # this branch won before the leaf check it was not even added to `opaque`. The
+        # audit record read `redactions: []`: byte-identical to "there was nothing
+        # undeclared to drop". The top-level guard refused that exact value.
+        if isinstance(o, (list, set, frozenset)) or type(o) is tuple:
             return _rebuild_container(o, [go(x) for x in o])
         # A value the projector cannot enter. It is returned as it came — there is
         # nothing else it can honestly do — but it is *named*, so the audit record can
@@ -955,30 +988,27 @@ class Engine:
                     f"tool output exceeds the {self._output_budget} character scan budget, so no output "
                     "control could read it",
                 ), None
-            if contract.on_output_violation != "allow":
-                # Scanning a prefix and reporting on the rest is the fail-open the
-                # pre-gate's budget refuses an input to avoid. The tool has already run,
-                # so the honest answer keeps the decision and drops the value.
-                return (
-                    GateDecision(
-                        Effect.REDACT,
-                        "post_redaction",
-                        "tool output exceeded the scan budget and was not inspected",
-                        redactions=("output:redacted_all",),
-                    ),
-                    "[REDACTED: tool output exceeded the scan budget and was not inspected]",
-                )
-            # `allow` is a deliberate choice to take an unscanned result, and it is
-            # recorded as one rather than passing silently.
-            redactions.append("output:unscanned_over_budget")
+            # Everything that is not `deny` redacts, including `allow`, and that arm is
+            # deliberately gone. `on_output_violation` is *malformed-output* policy —
+            # "the return did not match the declared schema" — and hosts set `allow`
+            # because a vendor's response shape drifts. Reusing it for the size question
+            # meant those hosts had also, silently, switched off canary and secret
+            # redaction for every oversized return: a planted canary and an AWS key both
+            # egressed under an ALLOW record. A host that legitimately returns more than
+            # the budget raises `Engine(output_budget=...)`, which enlarges what gets
+            # scanned; it does not get a switch that stops the scanning.
+            #
+            # Scanning a prefix and reporting on the rest is the fail-open the pre-gate's
+            # budget refuses an input to avoid. The tool has already run, so the honest
+            # answer keeps the decision and drops the value.
             return (
                 GateDecision(
-                    Effect.ALLOW,
-                    "allow",
-                    "tool output exceeded the scan budget; the policy allows an unscanned result",
-                    redactions=tuple(redactions),
+                    Effect.REDACT,
+                    "post_redaction",
+                    "tool output exceeded the scan budget and was not inspected",
+                    redactions=("output:redacted_all",),
                 ),
-                out,
+                "[REDACTED: tool output exceeded the scan budget and was not inspected]",
             )
 
         # 0. Malformed-output policy (strict returns). Name-based redaction cannot
@@ -1041,6 +1071,31 @@ class Engine:
             out, dropped, opaque = _project_output(out, frozenset(contract.returns.fields))
             redactions.extend(f"drop:{k}" for k in dict.fromkeys(dropped))
             redactions.extend(f"output:uninspectable:{name}" for name in dict.fromkeys(opaque))
+            # Named is not enough. `project_output` is deny-by-default on the output
+            # surface, and its whole reason for existing is the undeclared field a
+            # secret hides in, out of reach of name-based redaction. An object the
+            # projector cannot enter is precisely that field, one level down — so it
+            # gets the same answer the top-level guard above gives, through the same
+            # knob, instead of egressing with a note in the trail saying it did.
+            if opaque:
+                kinds = ", ".join(dict.fromkeys(opaque))
+                if contract.on_output_violation == "deny":
+                    return GateDecision(
+                        Effect.DENY,
+                        "output_schema",
+                        f"project_output is set but the return contains a {kinds} the projector cannot "
+                        "enter, so an undeclared field inside it could not be dropped",
+                    ), None
+                if contract.on_output_violation != "allow":
+                    return (
+                        GateDecision(
+                            Effect.REDACT,
+                            "output_schema",
+                            f"project_output is set but the return contains a {kinds} the projector cannot enter",
+                            redactions=(*redactions, "output:redacted_all"),
+                        ),
+                        "[REDACTED: tool output could not be projected]",
+                    )
 
         # 1. Canary leak in the output → redact verbatim *and* normalized tokens
         #    anywhere in the structure, then ask the pre-gate's question of the whole

@@ -482,6 +482,86 @@ def test_a_generator_nobody_drives_with_enter_exit_discipline_is_still_refused()
         list(stream())
 
 
+def test_the_contextmanager_workaround_does_not_smuggle_the_leak_back_in():
+    """The refusal recommends `@contextlib.contextmanager`, and that used to be enough
+    to satisfy a check that looked exactly one frame up. It is not enough: if the thing
+    *consuming* the context manager is itself a generator, the `with` block still spans
+    that generator's yields, the binding still lands in the consumer's context, and two
+    interleaved streams still run as each other — with nothing raised anywhere.
+
+    Measured before the walk went in: two producers, and the second row of alice's
+    stream executed as bob."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def request_scope(principal):
+        with use_principal(principal):
+            yield
+
+    def stream(principal):
+        with request_scope(principal):
+            yield 1
+            yield 2
+
+    with pytest.raises(PolicyError, match="consuming it"):
+        list(stream(Principal(role="ok", identity="alice")))
+
+
+def test_the_async_twin_of_the_same_hole_is_refused():
+    import asyncio
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def request_scope(principal):
+        with use_principal(principal):
+            yield
+
+    async def stream(principal):
+        async with request_scope(principal):
+            yield 1
+
+    async def drain():
+        return [row async for row in stream(Principal(role="ok", identity="alice"))]
+
+    with pytest.raises(PolicyError, match="consuming it"):
+        asyncio.run(drain())
+
+
+def test_an_async_contextmanager_awaited_by_an_ordinary_coroutine_still_works():
+    """The walk must stop at the first non-generator frame. A coroutine is not one."""
+    import asyncio
+    import contextlib
+
+    from histos.gate import _current_principal
+
+    @contextlib.asynccontextmanager
+    async def request_scope(principal):
+        with use_principal(principal):
+            yield
+
+    async def handler():
+        async with request_scope(Principal(role="ok", identity="i")):
+            return _current_principal.get()
+
+    assert asyncio.run(handler()).identity == "i"
+
+
+def test_a_pytest_style_yield_fixture_is_not_refused(as_a_clerk):
+    """`_refuse_a_leaking_frame`'s own docstring names a generator-style test fixture as
+    one of the two shapes the ban was too broad for — and only `contextlib` was ever
+    exempted, so this raised at fixture setup and errored out every test using it.
+    pytest brackets a yield fixture in the same Context, which is the safe case."""
+    from histos.gate import _current_principal
+
+    assert _current_principal.get().identity == "clerk-1"
+
+
+@pytest.fixture
+def as_a_clerk():
+    with use_principal(Principal(role="ok", identity="clerk-1")):
+        yield
+
+
 def test_reusing_one_use_principal_instance_still_unbinds():
     from histos.gate import _current_principal
 
