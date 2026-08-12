@@ -14,6 +14,7 @@ unbinds an approval issued by one worker from every other worker.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -80,23 +81,28 @@ print(p.content_hash())
 """
 
 
+def _hash_under(seed: str) -> str:
+    """Run the hash script in a fresh interpreter under a given PYTHONHASHSEED.
+
+    The environment is inherited rather than replaced. It used to be replaced with a
+    two-entry dict, which hid a portability bug: `sys.executable` is absolute so the
+    hardcoded POSIX `PATH` bought nothing, while on Windows dropping `SystemRoot` stops
+    the child interpreter starting at all.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", _HASH_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "PYTHONHASHSEED": seed},
+    ).stdout.strip()
+
+
 @pytest.mark.parametrize("seed", ["0", "1", "42", "12345"])
 def test_the_same_policy_hashes_identically_under_any_hash_seed(seed: str):
     """Set-valued fields used to capture Python's per-process iteration order."""
-    baseline = subprocess.run(
-        [sys.executable, "-c", _HASH_SCRIPT],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={"PYTHONHASHSEED": "0", "PATH": "/usr/bin:/bin"},
-    ).stdout.strip()
-    other = subprocess.run(
-        [sys.executable, "-c", _HASH_SCRIPT],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={"PYTHONHASHSEED": seed, "PATH": "/usr/bin:/bin"},
-    ).stdout.strip()
+    baseline = _hash_under("0")
+    other = _hash_under(seed)
     assert baseline and baseline == other
 
 

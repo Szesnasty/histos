@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import json
+import os
 import pathlib
 
 import pytest
@@ -81,7 +82,7 @@ def test_a_log_erased_under_a_running_sink_cannot_silently_restart(tmp_path):
         sink.record({"effect": "allow", "rule": "allow", "n": i})
     log.unlink()
     (tmp_path / "a.jsonl.tip").unlink()
-    sink.record({"effect": "allow", "rule": "allow", "n": "after"})   # must not raise
+    sink.record({"effect": "allow", "rule": "allow", "n": "after"})  # must not raise
     ok, detail = verify_chain(log)
     assert not ok, detail
     assert json.loads(log.read_text(encoding="utf-8"))["seq"] == 4
@@ -114,6 +115,10 @@ def test_verification_authenticates_the_bytes_that_are_on_disk(tmp_path):
     assert verify_chain(log)[0]
 
 
+# Windows has no POSIX mode bits to set: `os.chmod` there moves the read-only flag and
+# nothing else, so a file asked for as 0o600 reports 0o666. SECURITY.md says the
+# owner-only default is a POSIX guarantee, and this is the test that says so too.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits; Windows has no equivalent")
 def test_the_log_is_created_owner_only(tmp_path):
     log = tmp_path / "a.jsonl"
     JSONLAuditSink(log).record({"effect": "allow", "rule": "allow", "identity": "jane@acme.com"})
@@ -166,7 +171,7 @@ def test_a_bound_attribute_reaches_the_tool_as_a_copy():
     seen: list[list[str]] = []
 
     def read(tenants: list[str]) -> str:
-        seen.append(list(tenants))   # snapshot before mutating the very object under test
+        seen.append(list(tenants))  # snapshot before mutating the very object under test
         tenants.append("evil-corp")
         return "ok"
 
@@ -505,7 +510,7 @@ def test_a_namedtuple_return_is_not_silently_unprojected():
 
 
 def test_a_value_the_projector_could_not_enter_is_named_in_the_record():
-    """"Nothing undeclared to drop" and "something nobody could look inside" used to
+    """ "Nothing undeclared to drop" and "something nobody could look inside" used to
     produce the same audit line."""
 
     @dataclasses.dataclass
