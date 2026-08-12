@@ -22,13 +22,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The distribution claims `Operating System :: OS Independent`, so the suite has to
+  # actually run somewhere that is not Linux. Two of the guarantees are platform-shaped:
+  # the audit log's cross-process `flock` does not exist on Windows (documented in
+  # SECURITY.md), and the owner-only `0o600` mode only means what it says on POSIX.
+  # Both are meant to degrade, not crash. Linux carries the full version range; macOS
+  # and Windows run the lowest supported version, which is enough to catch a hard
+  # platform break without paying for the whole grid.
   test:
-    name: test (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    name: test (py${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13"]
+        os: [ubuntu-latest]
+        python: ["3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -43,10 +56,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      # Style is a property of the source, not of the runner, so it is checked once.
+      # Running `ruff format --check` on Windows would also be checking the checkout's
+      # line endings, which is a different question and not one this gate is asking.
       - name: Lint
+        if: runner.os == 'Linux'
         run: ruff check .
 
       - name: Format check
+        if: runner.os == 'Linux'
         run: ruff format --check .
 
       - name: Tests, including the conformance corpus
@@ -230,8 +248,17 @@ jobs:
 
       # The core has zero runtime dependencies, so this audits the dev toolchain —
       # which is still what builds and signs the artifact everyone else installs.
+      #
+      # Audited from a frozen list rather than from the live environment, because
+      # `--strict` treats "could not audit this distribution" as a failure and `histos`
+      # itself is installed editable: pip-audit looks it up on PyPI, does not find the
+      # working tree there, and the gate fails for the one package it has no business
+      # checking. `--exclude-editable` drops exactly that entry and nothing else, so
+      # every real dependency is still audited and still strictly.
       - name: pip-audit
-        run: pip-audit --strict
+        run: |
+          python -m pip freeze --exclude-editable > /tmp/frozen.txt
+          pip-audit --strict -r /tmp/frozen.txt
 
       # `-ll` reports medium and high only: a security library that cries wolf about
       # every `assert` in its own tests teaches its maintainers to skip the job.

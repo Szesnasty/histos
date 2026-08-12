@@ -33,6 +33,10 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]" mypy
       - run: python -m ruff check .
+      # `ruff format --check` was the gate this job was missing, which is the exact hole
+      # the comment above describes: CI runs it on every push to main, so a tag cut from
+      # a branch that never opened a pull request could be released past it.
+      - run: python -m ruff format --check .
       - run: python -m mypy
 
   build:

@@ -1,0 +1,15 @@
+# Check out LF everywhere, including Windows.
+#
+# This repository ships a conformance corpus and a lockfile format whose whole job is
+# that two machines agree on the same bytes. Git for Windows defaults to converting
+# line endings on checkout, which would make a Windows working tree a different
+# document from the one the hashes were computed over — for no benefit, since nothing
+# here is edited in a tool that needs CRLF.
+* text=auto eol=lf
+
+# Belt and braces for the files that are read as evidence rather than as text.
+*.json   text eol=lf
+*.jsonl  text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.py     text eol=lf
