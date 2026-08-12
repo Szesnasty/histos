@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from histos.contracts import ToolContract
+from histos.errors import PolicyError
 from histos.importers.json_schema import schema_from_json_schema
 from histos.importers.sources import (
     UNREVIEWED_ACCESS,
@@ -33,7 +34,13 @@ def source_from_mcp(tool: dict[str, Any]) -> ToolSource:
     """One MCP tool definition → its recorded source plus the projected contract."""
     name = tool.get("name")
     if not name:
-        raise ValueError("MCP tool definition has no 'name'")
+        # `PolicyError`, not `ValueError`: `project_tools` catches `PolicyError` and
+        # nothing else, so a per-tool problem raised as anything else escapes the
+        # per-tool skip and aborts the whole manifest — every healthy tool in the
+        # document lost to one nameless entry. `_reject_unusable_name` already
+        # raises `PolicyError` for a name of the wrong type; this is its sibling for
+        # a name that is missing, null, empty or `0`.
+        raise PolicyError("MCP tool definition has no 'name'", code="invalid_import")
     input_schema = tool.get("inputSchema")
     output_schema = tool.get("outputSchema")
     description = tool.get("description")

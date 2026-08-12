@@ -27,7 +27,7 @@ from typing import Any
 
 from histos.contracts import ToolContract
 from histos.errors import PolicyError
-from histos.importers.json_schema import field_from_json_schema, schema_from_json_schema
+from histos.importers.json_schema import _malformed, field_from_json_schema, schema_from_json_schema
 from histos.importers.sources import (
     UNREVIEWED_SENSITIVITY,
     ToolSource,
@@ -105,7 +105,14 @@ def _json_schema_of(spec: dict[str, Any], content: dict[str, Any], *, where: str
     return schema if isinstance(schema, dict) else None
 
 
-def _source_from_operation(spec: dict[str, Any], path: str, method: str, op: dict[str, Any], name: str) -> ToolSource:
+def _source_from_operation(
+    spec: dict[str, Any],
+    path: str,
+    method: str,
+    op: dict[str, Any],
+    name: str,
+    item: dict[str, Any] | None = None,
+) -> ToolSource:
     """One ``path`` × ``method`` operation → its recorded source plus the contract.
 
     ``spec`` is threaded into every bridge call as the document a local ``$ref``
@@ -114,15 +121,54 @@ def _source_from_operation(spec: dict[str, Any], path: str, method: str, op: dic
     """
     fields = {}
     resolved_params: list[Any] = []
-    for index, raw_param in enumerate(op.get("parameters", [])):
-        param = _deref(spec, raw_param, where=f"parameter {index} of {name!r}")
-        if not isinstance(param, dict):
-            continue
+    # Path-item parameters first, then the operation's own. OpenAPI 3.x lets a `path`
+    # item carry `parameters` that apply to every operation under it, which is the
+    # normal place to put a shared path variable — and reading only `op["parameters"]`
+    # meant that variable was simply absent from the contract. The schema is closed, so
+    # the caller then had an argument the tool needs and the gate denies, with nothing
+    # anywhere saying why. The operation's entry wins on a `(name, in)` collision, which
+    # is what the specification says overriding means.
+    merged: dict[tuple[str, str], Any] = {}
+    ordered: list[Any] = []
+    for source, raw_params in (
+        ("path item", (item or {}).get("parameters", [])),
+        ("operation", op.get("parameters", [])),
+    ):
+        if not isinstance(raw_params, list):
+            raise _malformed(f"the {source} `parameters` of {name!r}", raw_params, "a list")
+        for index, raw_param in enumerate(raw_params):
+            param = _deref(spec, raw_param, where=f"{source} parameter {index} of {name!r}")
+            if not isinstance(param, dict):
+                continue
+            key = (str(param.get("name")), str(param.get("in")))
+            if key in merged:
+                ordered[ordered.index(merged[key])] = param
+            else:
+                ordered.append(param)
+            merged[key] = param
+    for param in ordered:
         resolved_params.append(param)
         pname = param.get("name")
         if not pname:
             continue
-        schema = param.get("schema", {}) if isinstance(param.get("schema"), dict) else {}
+        schema = param.get("schema") if isinstance(param.get("schema"), dict) else None
+        if schema is None:
+            # The `content` form: a parameter whose value is a serialised media type
+            # rather than a plain scalar. `schema` is absent and the schema lives one
+            # level down. It used to fall through to `{}` — an untyped `any` field
+            # carrying none of the bounds the document wrote, which is the silent drop
+            # this module refuses everywhere else.
+            content = param.get("content")
+            if isinstance(content, dict) and content:
+                schema = _json_schema_of(spec, content, where=f"parameter {pname!r} of {name!r}")
+                if schema is None:
+                    raise _malformed(
+                        f"parameter {pname!r} of {name!r}",
+                        sorted(content),
+                        "a `content` block this projection can read (application/json)",
+                    )
+            else:
+                schema = {}
         fields[pname] = field_from_json_schema(schema, required=bool(param.get("required")), root=spec, name=pname)
 
     body_schema = None
@@ -188,7 +234,7 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
     the operation as written. Hashing the raw operation would miss a
     ``#/components/schemas`` target changing underneath an unchanged ``$ref``.
     """
-    operations: list[tuple[str, str, dict[str, Any], str]] = []
+    operations: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = []
     paths = spec.get("paths", {})
     for path, item in paths.items():
         if not isinstance(item, dict):
@@ -198,7 +244,7 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
             if not isinstance(op, dict):
                 continue
             name = op.get("operationId") or f"{method}_{path.strip('/').replace('/', '_') or 'root'}"
-            operations.append((path, method, op, name))
+            operations.append((path, method, op, name, item))
 
     return project_tools(
         "openapi",
