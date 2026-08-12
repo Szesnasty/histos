@@ -79,6 +79,11 @@ def _enum_type(ann: type[enum.Enum]) -> str:
     schema that cannot be satisfied is worse than one that does not constrain, because
     the second is visible in `histos review` and the first looks like a working policy.
     """
+    if issubclass(ann, enum.Flag):
+        # A Flag's satisfiable values are the closure under `|`, not the members: listing
+        # the members denies every composed value, which is the whole point of a Flag.
+        # Its own rule applies — an enum that cannot be listed honestly is not listed.
+        return "integer" if all(isinstance(m.value, int) for m in ann) else "any"
     values = [member.value for member in ann]
     if values and all(isinstance(v, bool) for v in values):
         return "boolean"
@@ -124,7 +129,12 @@ def infer_schema(func: Callable[..., Any]) -> Schema:
         required = param.default is inspect.Parameter.empty and not optional
 
         enum_vals: tuple[Any, ...] | None = None
-        if isinstance(ann, type) and issubclass(ann, enum.Enum) and ftype != "any":
+        if (
+            isinstance(ann, type)
+            and issubclass(ann, enum.Enum)
+            and not issubclass(ann, enum.Flag)
+            and ftype != "any"
+        ):
             # Dropped along with the type when the members disagree: listing values the
             # declared type cannot hold is the contradiction `_enum_type` exists to avoid.
             enum_vals = tuple(e.value for e in ann)

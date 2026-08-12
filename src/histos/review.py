@@ -111,6 +111,10 @@ class PolicyReview:
     unreviewed: list[str] = field(default_factory=list)  # still carrying an import's assumption
     callable_by: dict[str, list[str]] = field(default_factory=dict)  # tool -> roles
     warnings: list[str] = field(default_factory=list)
+    #: Tools handed to ``protect()`` that the policy never declares. `render()` names
+    #: them, and `ok()` has to as well: a host asserting `review.ok()` in CI was told
+    #: everything was fine about a tool set containing one the gate denies outright.
+    no_contract: list[str] = field(default_factory=list)
     #: The subset of :attr:`warnings` that came from :meth:`Policy.validate` — a grant
     #: for a tool that does not exist, a role inheriting itself. Structural, not
     #: advisory, and separated so `histos review` can fail CI on exactly what `histos
@@ -136,7 +140,7 @@ class PolicyReview:
         return self._by_verdict(BLOCKED)
 
     def ok(self) -> bool:
-        return not self.warnings and not self.missing_arg_schema and not self.unreviewed
+        return not (self.warnings or self.missing_arg_schema or self.unreviewed or self.no_contract)
 
     def render(self) -> str:
         lines = [
@@ -262,5 +266,6 @@ def review_policy(policy: Policy, *, discovered: Iterable[str] = ()) -> PolicyRe
         callable_by={k: sorted(v) for k, v in callable_by.items()},
         warnings=warnings,
         structural_issues=structural_issues,
+        no_contract=undeclared,
         classification=classification,
     )

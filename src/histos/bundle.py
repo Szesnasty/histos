@@ -227,7 +227,11 @@ def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -
     unknown = sorted(k for k in data if k not in allowed)
     if not unknown:
         return
-    if unknown[0] in _PYTHON_SPELLINGS:
+    # Only at the top level: `permissions` nested inside `tools.<name>` is not the
+    # constructor's `permissions`, and suggesting `roles` there sends the reader to the
+    # wrong place. Elsewhere the generic message, which lists what this scope accepts,
+    # is the more useful one.
+    if allowed is _BUNDLE_KEYS and unknown[0] in _PYTHON_SPELLINGS:
         raise PolicyError(
             f"{unknown[0]!r} in {where} is the Python constructor's name for this; the file format "
             f"spells it {_PYTHON_SPELLINGS[unknown[0]]}. The two vocabularies are listed in "
@@ -731,8 +735,17 @@ def _field_to_compact(field: Field) -> dict[str, Any]:
         out["pattern"] = field.pattern
     if field.sensitive is not None:
         out["sensitive"] = field.sensitive
+    if field.nullable:
+        # Dropped here, so `histos import --out` threw away the nullability the importer
+        # had just read off `anyOf: [T, null]` — a round trip that quietly tightened the
+        # policy, and then denied the null the source explicitly allows.
+        out["nullable"] = True
     if field.item_type is not None:
         out["item_type"] = field.item_type
+    for attr in ("max_items", "min_items"):
+        value = getattr(field, attr)
+        if value is not None:
+            out[attr] = value
     for attr in ("minimum", "maximum", "exclusive_minimum", "exclusive_maximum", "multiple_of"):
         value = getattr(field, attr)
         if value is not None:

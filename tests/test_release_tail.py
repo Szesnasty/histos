@@ -26,6 +26,7 @@ from histos import (
     ToolContract,
     ToolErrorRedacted,
     contracts_from_mcp,
+    contracts_from_openapi,
     gate,
     infer_schema,
     load_bundle,
@@ -569,3 +570,95 @@ def test_the_redactions_list_is_bounded_like_every_other_free_text_field():
     )
     assert len(record.redactions) < 100
     assert record.redactions[-1] == "...[truncated]"
+
+
+# ── the review of the hardening diff: importers, format, reports ─────────
+
+
+def test_a_round_trip_keeps_the_nullability_the_importer_read():
+    """`histos import --out` threw it away, so the round trip quietly tightened the
+    policy and then denied the null the source explicitly allows."""
+    from histos import dump_bundle, load_bundle
+
+    schema = schema_from_json_schema(
+        {"type": "object", "properties": {"note": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}
+    )
+    policy = Policy(tools={"t": ToolContract(name="t", args=schema)})
+    again = load_bundle(dump_bundle(policy))
+    assert again.tools["t"].args.fields["note"].nullable is True
+    assert again.content_hash() == policy.content_hash()
+
+
+def test_an_array_length_bound_survives_a_round_trip():
+    from histos import dump_bundle, load_bundle
+
+    policy = Policy(tools={"t": ToolContract(name="t", args=Schema({"xs": Field(type="array", max_items=3)}))})
+    again = load_bundle(dump_bundle(policy))
+    assert again.tools["t"].args.fields["xs"].max_items == 3
+
+
+def test_a_non_string_tool_name_is_refused_rather_than_crashing_the_manifest():
+    with pytest.raises(PolicyError):
+        contracts_from_mcp([{"name": 7, "inputSchema": {"type": "object", "properties": {}}}])
+
+
+def test_the_scalar_null_type_imports_like_the_list_form():
+    bare = schema_from_json_schema({"type": "object", "properties": {"x": {"type": "null"}}}).fields["x"]
+    listed = schema_from_json_schema({"type": "object", "properties": {"x": {"type": ["null"]}}}).fields["x"]
+    assert (bare.type, bare.nullable) == (listed.type, listed.nullable)
+
+
+class Perm(enum.Flag):
+    READ = enum.auto()
+    WRITE = enum.auto()
+
+
+def test_a_flag_enum_does_not_deny_every_composed_value():
+    """A Flag's satisfiable set is the closure under `|`; listing the members denies
+    every combination, which is the whole point of a Flag."""
+
+    def act(perm: Perm) -> str:
+        return "ok"
+
+    field = infer_schema(act).fields["perm"]
+    assert field.enum is None
+    assert field.type == "integer"
+
+
+def test_a_chained_openapi_ref_is_followed():
+    spec = {
+        "openapi": "3.0.0",
+        "components": {
+            "parameters": {
+                "A": {"$ref": "#/components/parameters/B"},
+                "B": {"name": "mode", "in": "query", "schema": {"type": "string", "maxLength": 4}},
+            }
+        },
+        "paths": {"/x": {"get": {"operationId": "getX", "parameters": [{"$ref": "#/components/parameters/A"}]}}},
+    }
+    field = contracts_from_openapi(spec)[0].args.fields["mode"]
+    assert (field.type, field.max_length) == ("string", 4)
+
+
+def test_a_review_with_an_undeclared_tool_is_not_ok():
+    """`render()` named it and `ok()` did not, so a host asserting `review.ok()` in CI
+    was told everything was fine about a tool the gate denies outright."""
+    review = review_policy(Policy(tools={}, permissions={}), discovered=["orphan"])
+    assert "orphan" in review.no_contract
+    assert not review.ok()
+
+
+def test_the_vocabulary_hint_only_fires_where_it_is_right():
+    """`permissions` nested inside a tool is not the constructor's `permissions`, and
+    pointing the reader at `roles` there sends them somewhere unrelated."""
+    from histos import load_bundle
+
+    with pytest.raises(PolicyError) as exc:
+        load_bundle(
+            {
+                "schema_version": "histos.policy/0.1",
+                "tools": {"t": {"args": {}, "permissions": {"r": []}}},
+                "roles": {"r": {"allow": ["t"]}},
+            }
+        )
+    assert "Understood here" in str(exc.value)
