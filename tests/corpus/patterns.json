@@ -1,5 +1,5 @@
 {
-  "$comment": "Regexes a policy author plausibly writes for a tool argument. `must_load` is the set the backtracking screen may not refuse: every one is measured cheap at the input cap, and refusing one breaks a working deployment at policy load. `must_refuse` is measured expensive. The screen is judged against both directions, because a screen that only ever refuses is as broken as one that never does \u2014 the first release of this screen refused `^[a-z]+.*$`, which costs nothing.",
+  "$comment": "Regexes a policy author plausibly writes for a tool argument. `must_load` is the set the backtracking screen may not refuse: every one is measured cheap at the input cap, and refusing one breaks a working deployment at policy load. `must_refuse` is measured expensive. The screen is judged against both directions, because a screen that only ever refuses is as broken as one that never does — the first release of this screen refused `^[a-z]+.*$`, which costs nothing.",
   "must_load": [
     "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$",
     "^[^@\\s]+@[^@\\s]+$",
@@ -72,6 +72,10 @@
     "^(?:zz)+(?:zzz)+(?:zzzzz)+$",
     "^(xx)+(xxx)+(xxxxx)+(xxxxxxx)+$",
     "^.+,[^\\n]+,[^\\n]+$",
-    "^[^\\n]+;[^\\n]+;[^\\n]+$"
+    "^[^\\n]+;[^\\n]+;[^\\n]+$",
+    "^Q(?:[a-z]+){1,40}$",
+    "^.+,\\d+,.+,\\d+,.+$",
+    "^[a-z]{1,4000}[a-z]{1,4000}$",
+    "^(?:[a-z]*-)*[a-z]*$"
   ]
 }
