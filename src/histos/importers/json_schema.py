@@ -442,6 +442,10 @@ def _resolve_type(js_type: Any, *, where: str = "an imported schema") -> tuple[s
         if unknown:
             raise _malformed(f"{where} type", unknown[0], f"one of {', '.join(sorted(_JS_TYPES))}")
         return concrete[0], nullable
+    if js_type == "null":
+        # The list form `["null"]` already imports as nullable-any; the scalar spelling
+        # is the same statement and was refused as an unknown type.
+        return "any", True
     if isinstance(js_type, str) and js_type in _JS_TYPES:
         return js_type, False
     raise _malformed(f"{where} type", js_type, f"one of {', '.join(sorted(_JS_TYPES))}")

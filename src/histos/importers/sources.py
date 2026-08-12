@@ -163,6 +163,13 @@ def _reject_unusable_name(name: str) -> None:
     point the name enters the library is the only place that fixes both, and it is the
     same posture the loader already takes for a policy key it cannot understand.
     """
+    if not isinstance(name, str):
+        # `{"name": 7}` reached the regex and came back as an uncaught TypeError, which
+        # skipped the per-tool skip and took the whole manifest with it — the failure
+        # mode that machinery exists to prevent, reached through the type system.
+        raise PolicyError(
+            f"a tool name must be a string, got {type(name).__name__}", code="invalid_import"
+        )
     if not name:
         raise PolicyError("a tool with an empty name cannot be a policy key", code="invalid_import")
     found = _UNUSABLE_IN_A_NAME.search(name)

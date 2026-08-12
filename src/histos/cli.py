@@ -92,7 +92,7 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     gate = Gate(policy)
     decision = gate.engine.pre(GateRequest(args.tool, call_args, principal, phase="pre"))
     print("developer:")
-    print(f"  {decision.explain()}")
+    print(f"  {safe_text(decision.explain())}")
     if decision.remedy:
         print(f"  remedy: {decision.remedy}")
     print("agent:")
@@ -354,6 +354,12 @@ def main(argv: list[str] | None = None) -> int:
     # generic branch swallows it and the message loses its context.
     except json.JSONDecodeError as exc:
         print(f"error: not valid JSON ({exc})", file=sys.stderr)
+        return 2
+    except RecursionError:
+        # The two bundle parsers translate this themselves; every other document the CLI
+        # reads — an MCP manifest, an OpenAPI spec, a lock file — goes through a bare
+        # `json.loads`, and a deeply nested one printed a traceback at the user.
+        print("error: the document is nested too deeply to parse — refusing to read it", file=sys.stderr)
         return 2
     except ImportError as exc:
         # The YAML extra is optional and `bundle.py` already composes the sentence that

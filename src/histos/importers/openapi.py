@@ -48,6 +48,33 @@ def _deref(spec: dict[str, Any], node: Any, *, where: str) -> Any:
     declared vanished from the contract without a word. A reference this importer
     cannot follow is now refused, the same way the JSON Schema bridge refuses one.
     """
+    # One hop was not enough: a document that points `parameters/A` at `parameters/B`
+    # returned a node still carrying `$ref`, and the caller then read no `name` off it
+    # and dropped the argument silently — the miss this function was written to stop,
+    # one indirection further out. Bounded and cycle-checked like the schema bridge.
+    seen: set[str] = set()
+    for _ in range(_MAX_DEREF_DEPTH):
+        if not (isinstance(node, dict) and "$ref" in node):
+            return node
+        pointer = node["$ref"]
+        if isinstance(pointer, str) and pointer in seen:
+            raise PolicyError(
+                f"imported OpenAPI {where} follows a $ref cycle through {pointer!r}",
+                code="invalid_import",
+            )
+        if isinstance(pointer, str):
+            seen.add(pointer)
+        node = _deref_once(spec, node, where=where)
+    raise PolicyError(
+        f"imported OpenAPI {where} follows a $ref chain deeper than {_MAX_DEREF_DEPTH} hops",
+        code="invalid_import",
+    )
+
+
+_MAX_DEREF_DEPTH = 8
+
+
+def _deref_once(spec: dict[str, Any], node: Any, *, where: str) -> Any:
     if not (isinstance(node, dict) and "$ref" in node):
         return node
     ref = node["$ref"]
