@@ -300,15 +300,35 @@ def test_draft4s_boolean_exclusive_minimum_is_still_ignored_inside_items():
     assert (field.minimum, field.exclusive_minimum) == (3, None)
 
 
-def test_an_element_enum_becomes_the_element_pattern_the_engine_already_enforces():
-    """`Field.enum` is matched against the *whole* argument, so copying an element enum
-    onto the array field would deny every call. Round one concluded from that that the
-    keyword had to be refused, which took `scopes: [read, write]` — the shape real MCP
-    tools use — out of the importable surface. `Field.pattern` *is* per element, so the
-    enum is carried there instead: same admitted set, actually enforced."""
+def test_an_element_enum_is_carried_as_a_value_set_per_element():
+    """Carried as `Field.item_enum` and checked per element. It spent one release as an
+    escaped alternation in `pattern`, which worked only because the per-element screen
+    happened to be a string screen — and therefore left an integer element enum
+    unimportable for a reason about the implementation rather than about the source."""
     field = _one({"type": "array", "items": {"type": "string", "enum": ["read", "write"]}})
-    assert (field.type, field.item_type, field.pattern) == ("array", "string", "read|write")
-    assert field.enum is None  # a whole-argument enum here would deny every call
+    assert field.item_enum == ("read", "write")
+    assert validate(Schema({"a": field}), {"a": ["read"]}) == []
+    assert validate(Schema({"a": field}), {"a": ["read", "delete"]}) != []
+
+
+def test_a_non_string_element_enum_is_carried_too():
+    field = _one({"type": "array", "items": {"type": "integer", "enum": [1, 2]}})
+    assert field.item_enum == (1, 2)
+    assert validate(Schema({"a": field}), {"a": [1, 2]}) == []
+    assert validate(Schema({"a": field}), {"a": [3]}) != []
+
+
+def test_an_element_enum_that_contradicts_the_element_type_is_refused():
+    with pytest.raises(PolicyError):
+        _one({"type": "array", "items": {"type": "integer", "enum": ["read"]}})
+
+
+def test_an_element_enum_and_an_element_pattern_are_both_enforced():
+    """They live in separate fields now, so the source can write both and the engine
+    applies the intersection — which is what the document says."""
+    field = _one({"type": "array", "items": {"type": "string", "enum": ["read"], "pattern": "^r.*$"}})
+    assert field.item_enum == ("read",) and field.pattern == "^r.*$"
+
 
 
 def test_an_element_enum_member_with_regex_metacharacters_is_matched_literally():
@@ -318,37 +338,6 @@ def test_an_element_enum_member_with_regex_metacharacters_is_matched_literally()
     assert validate(schema, {"a": ["axb"]})  # `.` must not have matched any character
 
 
-def test_a_non_string_element_enum_is_still_refused_and_says_why():
-    """There is no per-element screen to hang an integer value set on, so projecting
-    it would drop it. Named rather than dropped."""
-    with pytest.raises(PolicyError, match="items.enum"):
-        _one({"type": "array", "items": {"type": "integer", "enum": [1, 2]}})
-
-
-def test_an_element_enum_next_to_an_element_pattern_is_refused_rather_than_picking_one():
-    with pytest.raises(PolicyError, match="items.enum next to"):
-        _one({"type": "array", "items": {"type": "string", "enum": ["a"], "pattern": "^a$"}})
-
-
-@pytest.mark.parametrize(
-    "items",
-    [
-        {"type": "array", "items": {"type": "string"}},
-        {"anyOf": [{"type": "string"}]},
-    ],
-)
-def test_an_unprojected_keyword_inside_items_is_refused(items):
-    with pytest.raises(PolicyError, match="items."):
-        _one({"type": "array", "items": items})
-
-
-# ── the surface that must keep importing ─────────────────────────────────
-#
-# Round one refused these too. Every one of them is what an ordinary pydantic model
-# emits, and each projects onto this Field model without losing a thing, so refusing
-# them was a false positive that took twelve honest MCP schemas down to four. A
-# security screen that refuses honest input breaks working deployments at load time
-# and teaches its user to stop importing.
 
 
 def test_pydantic_optional_is_an_optional_field_not_a_union():

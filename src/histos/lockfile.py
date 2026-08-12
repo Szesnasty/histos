@@ -40,7 +40,6 @@ committed, the explanation is derivable from the artifact in the repository.
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 from dataclasses import dataclass
@@ -85,6 +84,19 @@ MAX_RECORDED_DESCRIPTION_CHARS = 4_096
 # A rendered diff is for a human to read once. Bounds keep a source that ships a
 # 10,000-line schema from burying the one line that matters.
 _MAX_DIFF_LINES = 40
+
+
+def _difflib() -> Any:
+    """`difflib` on first use, not at import.
+
+    It costs three quarters of a millisecond to import and is reached only by the drift
+    report — a CLI path. A library whose selling point is that wrapping a tool costs one
+    `pip install` and no infrastructure should not pay for its diff renderer in every
+    process that merely gates a call.
+    """
+    import difflib
+
+    return difflib
 
 
 def _digest(obj: Any) -> str:
@@ -417,7 +429,7 @@ def description_diff(recorded: str | None, current: str | None) -> tuple[str, ..
     """
     lines = [
         line
-        for line in difflib.unified_diff(_description_lines(recorded), _description_lines(current), n=1, lineterm="")
+        for line in _difflib().unified_diff(_description_lines(recorded), _description_lines(current), n=1, lineterm="")
         if not line.startswith(("---", "+++"))
     ]
     return _cap(lines)

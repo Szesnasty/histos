@@ -119,6 +119,7 @@ _FIELD_KEYS = frozenset(
         "enum",
         "exclusive_maximum",
         "exclusive_minimum",
+        "item_enum",
         "item_type",
         "max_items",
         "max_length",
@@ -298,6 +299,7 @@ def _field_from_compact(where: str, spec: Any) -> Field:
         pattern=spec.get("pattern"),
         sensitive=spec.get("sensitive"),
         nullable=spec.get("nullable", False),
+        item_enum=tuple(spec["item_enum"]) if spec.get("item_enum") is not None else None,
         item_type=spec.get("item_type"),
         max_items=spec.get("max_items"),
         min_items=spec.get("min_items"),
@@ -740,6 +742,8 @@ def _field_to_compact(field: Field) -> dict[str, Any]:
         # had just read off `anyOf: [T, null]` — a round trip that quietly tightened the
         # policy, and then denied the null the source explicitly allows.
         out["nullable"] = True
+    if field.item_enum is not None:
+        out["item_enum"] = list(field.item_enum)
     if field.item_type is not None:
         out["item_type"] = field.item_type
     for attr in ("max_items", "min_items"):
