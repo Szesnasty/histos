@@ -492,7 +492,13 @@ def _lazy_leaf_kind(value: Any) -> str | None:
     # constituents), so the MRO test above is right about it and refusing it is still
     # wrong: everything an enum member can hold was written at class-definition time,
     # so there is no tool output behind that iteration for anything to hide in.
-    if isinstance(value, enum.Enum):
+    if isinstance(value, enum.Enum) and not any(
+        "__iter__" in klass.__dict__ and klass.__module__ != "enum" for klass in type(value).__mro__
+    ):
+        # ...but only the iteration the enum machinery itself provides. A member class
+        # that writes its own `__iter__` is an ordinary lazy wrapper that happens to
+        # inherit from `Enum`, and the argument above says nothing about it: what it
+        # yields can be anything, including tool output the post chain never sees.
         return None
     # an `__iter__`-only object hides its payload exactly as a generator does: this is
     # the ordinary lazy-result-wrapper idiom (`class Rows: def __iter__(self): yield ...`),
@@ -626,6 +632,15 @@ def _is_control_flow(exc: BaseException) -> bool:
 _TOOL_CALLABLE_ATTRS = ("func", "coroutine")
 
 
+class _Unnameable(Exception):
+    """The binder cannot turn this call into named arguments, and says why.
+
+    Raised out of `bind` rather than returned, because the two wrappers already have a
+    path for "this call cannot be named" — `_refuse_unnameable`, which records the
+    denial instead of raising an unaudited `TypeError`.
+    """
+
+
 def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]] | None:
     """A function mapping ``(*args, **kwargs)`` to a named dict, or None if that is impossible.
 
@@ -676,7 +691,21 @@ def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]
         # own name. Flattened back, because `{"rest": {"tenant_id": ...}}` is not the
         # shape the schema, the bindings or the trail are written against.
         if var_keyword is not None:
-            named.update(named.pop(var_keyword, {}))
+            extras = named.pop(var_keyword, {})
+            # PEP 570's stated purpose for `/` is that the parameter name becomes free
+            # to reuse in `**kwargs`, so `def update(record_id, /, **fields)` legally
+            # accepts `update(1, record_id=2)` — two distinct values. Flattening one
+            # dict over the other silently kept the second and threw the trusted
+            # positional away, where the raw call had raised a loud TypeError. The gate
+            # names arguments; it cannot name these two apart, so it refuses.
+            if extras.keys() & named.keys():
+                collision = ", ".join(sorted(extras.keys() & named.keys()))
+                raise _Unnameable(
+                    f"{collision} arrives both positionally and in **{var_keyword}, and a gated call is "
+                    "named — the two values cannot be told apart in the schema check, the audit record "
+                    "or the approval fingerprint. Rename the keyword argument."
+                )
+            named.update(extras)
         return named
 
     def call(fn: Callable[..., Any], named: dict[str, Any]) -> Any:
@@ -695,13 +724,26 @@ def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]
         # signature does not name — the tool's own TypeError is a better error than one
         # invented here.
         rest = dict(named)
+        positionals = [p for p in signature.parameters.values() if p.kind is inspect.Parameter.POSITIONAL_ONLY]
+        # The last positional-only parameter the caller actually supplied. Stopping at
+        # the *first* one missing was the bug this re-split exists to fix, reintroduced
+        # one line down: `def f(a=1, b=2, /)` called as `f(b=9)` left `b` in `rest` and
+        # handed it to the tool as a keyword, which a positional-only parameter cannot
+        # accept. Everything up to the last supplied one goes positionally, and a hole
+        # before it is filled from the signature's own default — it must have one, or
+        # the call could not have been legal in the first place.
+        supplied = [i for i, p in enumerate(positionals) if p.name in rest]
         ordered: list[Any] = []
-        for parameter in signature.parameters.values():
-            if parameter.kind is not inspect.Parameter.POSITIONAL_ONLY:
-                break
-            if parameter.name not in rest:
-                break
-            ordered.append(rest.pop(parameter.name))
+        for parameter in positionals[: (supplied[-1] + 1) if supplied else 0]:
+            if parameter.name in rest:
+                ordered.append(rest.pop(parameter.name))
+            elif parameter.default is not inspect.Parameter.empty:
+                ordered.append(parameter.default)
+            else:  # pragma: no cover — unreachable for a call the tool could accept
+                raise _Unnameable(
+                    f"positional-only parameter {parameter.name!r} has no value and no default, so the "
+                    "gated call cannot be re-split into the positional form the tool requires."
+                )
         return fn(*ordered, **rest)
 
     bind.call = call  # type: ignore[attr-defined]
@@ -734,6 +776,23 @@ def _gate_stamp(tool: Any) -> str | None:
         return None
     stamp = getattr(tool, "__gate_name__", None)
     return stamp if isinstance(stamp, str) else None
+
+
+def _any_gate_stamp(tool: Any) -> str | None:
+    """Any tool name this object is gated under — the question `wrap()` has to ask.
+
+    `_gate_stamp` answers "gated, and every handle agrees", which is right for the
+    coverage report: half a mediated tool is an ungated tool. It is a fail-open here,
+    because it returns `None` both for "nothing is gated" and for "the handles
+    disagree", and `wrap()` read the second as permission to wrap. A LangChain-shaped
+    tool whose sync half was already wrapped therefore got its async half wrapped too,
+    and every limit on the sync path was consumed twice — the exact harm the refusal
+    beside this call exists to prevent.
+    """
+    candidates = [getattr(tool, attr, None) for attr in _TOOL_CALLABLE_ATTRS]
+    stamps = [getattr(h, "__gate_name__", None) for h in candidates if callable(h)]
+    stamps.append(getattr(tool, "__gate_name__", None))
+    return next((s for s in stamps if isinstance(s, str)), None)
 
 
 def _exposed_name(tool: Any) -> str:
@@ -855,6 +914,9 @@ class Gate:
         self._decision_seq = 0
         self._seq_lock = threading.Lock()
         self._wrapped_tools: set[str] = set()
+        # tool name -> the raw callable gated under it, so a second `protect()` call on
+        # this Gate cannot quietly enforce a different function against the same contract.
+        self._wrapped_targets: dict[tuple[str, bool], Any] = {}
         # The wrappers this Gate handed back, by identity. Weak, so a Gate does not keep
         # every tool it ever wrapped alive, and identity-compared rather than hashed —
         # a framework's tool object is often an unhashable model instance.
@@ -880,6 +942,12 @@ class Gate:
         The value goes through the same validation as the constructor, so a typo
         (``"enfroce"``) raises instead of quietly becoming not-enforce.
         """
+        # `_resolve_mode(value, None)` reads "neither argument given" as the constructor
+        # default, so `None` resolved to `enforce`. Every typo was refused and the one
+        # value a config loader actually produces for a missing key silently switched a
+        # calibrating gate into enforcement.
+        if value is None:
+            raise PolicyError("mode must be 'enforce' or 'observe', got None")
         self._enforcement = _resolve_mode(value, None)
         self._enforce = self._enforcement == "enforce"
 
@@ -1148,6 +1216,14 @@ class Gate:
         tool_name = name or getattr(tool, "__name__", None)
         if not tool_name:
             raise PolicyError("cannot determine tool name; pass name=...")
+        # `protect()` refuses a lambda and points the caller here — and `"<lambda>"` is a
+        # perfectly truthy string, so the very call its message recommends accepted one
+        # and keyed the policy on a name every other lambda in the process shares.
+        if name is None and tool_name == "<lambda>":
+            raise PolicyError(
+                "wrap() was handed a lambda, which has no stable name to key a policy on — every lambda "
+                "in the process is called '<lambda>'. Pass name=... to say what this tool is."
+            )
 
         # A streaming tool is refused here rather than wrapped. Calling one returns a
         # generator immediately, so the post-gate would scan the *iterator object* and
@@ -1174,7 +1250,7 @@ class Gate:
         # protected than before, which is why this is loud rather than idempotent.
         # Every wrapper publishes `__gate_name__` already — the coverage check reads it
         # — so the question costs one attribute lookup.
-        stamp = _gate_stamp(tool)
+        stamp = _any_gate_stamp(tool)
         if stamp is not None:
             raise PolicyError(
                 f"tool {tool_name!r} is already gated (as {stamp!r}) and wrapping it again would consume "
@@ -1183,10 +1259,35 @@ class Gate:
             )
 
         bound = _resolve_fixed_principal(fixed_principal, principal)
-        self._wrapped_tools.add(tool_name)
-
         run_async = is_async if is_async is not None else _detect_async(tool, tool_name)
+
+        # Gate-scoped, not call-scoped. `protect()` refuses two same-named tools by
+        # looking in a dict local to that one call, so building the tool set in two
+        # groups — `g.protect(db_tools)` then `g.protect(api_tools)`, which is the "two
+        # modules each defining `def delete(...)`" case its own comment names — walked
+        # straight past it and enforced both callables against one contract.
+        #
+        # Keyed by name *and* by which half it is, because a dual-mode tool legitimately
+        # gates two different callables under one name: a LangChain `StructuredTool`
+        # carries `func` and `coroutine`, and both have to be wrapped or the tool is only
+        # half mediated. Two sync `delete`s share a key and are refused; a sync/async
+        # pair does not.
+        key = (tool_name, run_async)
+        previous = self._wrapped_targets.get(key)
+        target = _unwrap_target(tool)
+        if previous is not None and previous is not target:
+            raise PolicyError(
+                f"two different callables are being gated as {tool_name!r} on this Gate. One contract "
+                "cannot describe two tools: pass name= to say which is which."
+            )
         wrapper = self._wrap_async(tool, tool_name, bound) if run_async else self._wrap_sync(tool, tool_name, bound)
+        # Recorded only now. It used to be recorded above `_detect_async`, which refuses
+        # a sync wrapper around an async function — so after that refusal the Gate held
+        # no wrapper for the tool while `declared_but_unwrapped()` reported none missing
+        # and `coverage()` called it covered. A coverage report that is wrong in the
+        # reassuring direction is the one failure it cannot have.
+        self._wrapped_tools.add(tool_name)
+        self._wrapped_targets[key] = target
         self._register(wrapper)
         return wrapper
 
@@ -1211,7 +1312,10 @@ class Gate:
             if args:
                 if binder is None:
                     return self._refuse_unnameable(tool_name, kwargs, active, started, tool, args)
-                call_args = binder(*args, **kwargs)
+                try:
+                    call_args = binder(*args, **kwargs)
+                except _Unnameable as exc:
+                    return self._refuse_unnameable(tool_name, kwargs, active, started, tool, args, str(exc))
             else:
                 call_args = dict(kwargs)
 
@@ -1225,6 +1329,7 @@ class Gate:
 
             rebound: list[str] = []
             overrides: dict[str, Any] = {}
+            exec_source = dict(call_args)
             binding_denial = self._apply_bindings(tool_name, active, call_args, rebound, overrides)
             if binding_denial is not None:
                 self._emit(
@@ -1251,7 +1356,15 @@ class Gate:
             # evaluate the model's unbound arguments — so it stopped predicting enforce
             # in both directions, which is the one thing observe is for.
             checked_args = {**call_args, **overrides}
-            exec_args = checked_args if self._enforce else call_args
+            # Observe does not rewrite an argument the caller sent — that is the whole
+            # point of it — but it does have to supply one the caller never sent at all.
+            # A `bind` on a parameter the model is not expected to pass is the ordinary
+            # shape (`def read(tenants): ...` with `tenants` bound from the principal),
+            # and leaving it out meant observe invoked the tool with a missing argument
+            # and raised a `TypeError` on a call enforce serves without complaint. A dry
+            # run that breaks the app teaches the team to skip the dry run.
+            supplied = {k: v for k, v in overrides.items() if k not in exec_source} if not self._enforce else {}
+            exec_args = checked_args if self._enforce else {**exec_source, **supplied}
             call_args = checked_args
 
             req = GateRequest(tool_name, call_args, active, phase="pre")
@@ -1360,7 +1473,11 @@ class Gate:
                 if binder is None:
                     outcome = self._refuse_unnameable(tool_name, kwargs, active, started, tool, args)
                     return await outcome if inspect.isawaitable(outcome) else outcome
-                call_args = binder(*args, **kwargs)
+                try:
+                    call_args = binder(*args, **kwargs)
+                except _Unnameable as exc:
+                    outcome = self._refuse_unnameable(tool_name, kwargs, active, started, tool, args, str(exc))
+                    return await outcome if inspect.isawaitable(outcome) else outcome
             else:
                 call_args = dict(kwargs)
 
@@ -1373,6 +1490,7 @@ class Gate:
 
             rebound: list[str] = []
             overrides: dict[str, Any] = {}
+            exec_source = dict(call_args)
             binding_denial = self._apply_bindings(tool_name, active, call_args, rebound, overrides)
             if binding_denial is not None:
                 self._emit(
@@ -1392,7 +1510,15 @@ class Gate:
             # See the sync path: the policy is evaluated against the bound arguments in
             # both modes, and only enforce rewrites the ones the tool receives.
             checked_args = {**call_args, **overrides}
-            exec_args = checked_args if self._enforce else call_args
+            # Observe does not rewrite an argument the caller sent — that is the whole
+            # point of it — but it does have to supply one the caller never sent at all.
+            # A `bind` on a parameter the model is not expected to pass is the ordinary
+            # shape (`def read(tenants): ...` with `tenants` bound from the principal),
+            # and leaving it out meant observe invoked the tool with a missing argument
+            # and raised a `TypeError` on a call enforce serves without complaint. A dry
+            # run that breaks the app teaches the team to skip the dry run.
+            supplied = {k: v for k, v in overrides.items() if k not in exec_source} if not self._enforce else {}
+            exec_args = checked_args if self._enforce else {**exec_source, **supplied}
             call_args = checked_args
 
             req = GateRequest(tool_name, call_args, active, phase="pre")
@@ -1504,6 +1630,7 @@ class Gate:
         started: float,
         tool: Callable[..., Any],
         args: tuple[Any, ...],
+        reason: str | None = None,
     ) -> Any:
         """Refuse a positional call the gate cannot turn into named arguments.
 
@@ -1523,9 +1650,12 @@ class Gate:
         decision = GateDecision(
             Effect.DENY,
             "unnameable_args",
-            f"{tool_name!r} was called with {len(args)} positional argument(s) and its parameters cannot "
-            "be named (it takes *args, or exposes no signature), so the schema, the bindings and the "
-            "audit trail have nothing to attach to. Call it with keyword arguments.",
+            reason
+            or (
+                f"{tool_name!r} was called with {len(args)} positional argument(s) and its parameters "
+                "cannot be named (it takes *args, or exposes no signature), so the schema, the bindings "
+                "and the audit trail have nothing to attach to. Call it with keyword arguments."
+            ),
         )
         self._emit(tool_name, dict(kwargs), decision, "pre", started, active, self._will_execute(decision))
         if self._enforce:
