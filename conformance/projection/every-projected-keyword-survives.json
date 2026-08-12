@@ -63,6 +63,8 @@
             "sensitive": null,
             "nullable": false,
             "item_type": null,
+            "max_items": null,
+            "min_items": null,
             "minimum": null,
             "maximum": null,
             "exclusive_minimum": null,
@@ -79,6 +81,8 @@
             "sensitive": null,
             "nullable": false,
             "item_type": null,
+            "max_items": null,
+            "min_items": null,
             "minimum": "1",
             "maximum": "500",
             "exclusive_minimum": null,
@@ -95,6 +99,8 @@
             "sensitive": null,
             "nullable": false,
             "item_type": null,
+            "max_items": null,
+            "min_items": null,
             "minimum": null,
             "maximum": null,
             "exclusive_minimum": "0",
@@ -114,6 +120,8 @@
             "sensitive": null,
             "nullable": false,
             "item_type": null,
+            "max_items": null,
+            "min_items": null,
             "minimum": null,
             "maximum": null,
             "exclusive_minimum": null,
@@ -130,6 +138,8 @@
             "sensitive": null,
             "nullable": false,
             "item_type": "string",
+            "max_items": null,
+            "min_items": null,
             "minimum": null,
             "maximum": null,
             "exclusive_minimum": null,
@@ -142,6 +152,6 @@
     },
     "schema_sha256": "sha256:7722fd720821551c6b608bc874aac7a53295537f223329ea7479be579c716f20",
     "description_sha256": "sha256:71d473960704ae7a05fc9543e4ed25b9773547d3c21822434239ddbaeb4c86af",
-    "contract_sha256": "sha256:bc7842a9e6cf97bd16c5793003ef3ccfac5a588ab2ea5fb1e71741d25cdd78f1"
+    "contract_sha256": "sha256:6dd88d450d963e9bcd5509e2b43f844b09ee907991e7b528f7b523432de851f2"
   }
 }

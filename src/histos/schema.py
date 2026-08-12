@@ -763,6 +763,12 @@ class Field:
     #: `arg_schema`, with nothing in the policy format able to express what it wanted.
     nullable: bool = False
     item_type: str | None = None  # element type for "array"
+    #: Element-count bounds for an ``array``. `maxItems` is a bound the source author
+    #: wrote and the projection had nowhere to put, so an ordinary
+    #: `list[str] = Field(max_length=10)` refused the whole tool rather than lose it.
+    #: Distinct from ``max_length``, which bounds each string *element*.
+    max_items: int | None = None
+    min_items: int | None = None
     # Numeric value bounds (integer/number, and per numeric array element). A
     # non-finite value (NaN/±Inf) is denied outright — a NaN makes every IEEE
     # comparison False, so a naive `<=` bound would silently pass it (Phase 0.1).
@@ -783,7 +789,7 @@ class Field:
             raise PolicyError(f"sensitive must be None|'pii'|'secret', got {self.sensitive!r}", code="invalid_field")
         for bound in ("minimum", "maximum", "exclusive_minimum", "exclusive_maximum", "multiple_of"):
             _check_bound(bound, getattr(self, bound))
-        for bound in ("max_length", "min_length"):
+        for bound in ("max_length", "min_length", "max_items", "min_items"):
             _check_length_bound(bound, getattr(self, bound))
         if self.multiple_of is not None and self.multiple_of == 0:
             raise PolicyError(f"multiple_of must be non-zero, got {self.multiple_of!r}", code="invalid_field")
@@ -879,6 +885,12 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
         errors.extend(_check_string_value(name, spec, value))
     if spec.type in ("integer", "number"):
         errors.extend(_check_number(name, spec, value))
+
+    if spec.type == "array" and isinstance(value, (list, tuple)):
+        if spec.min_items is not None and len(value) < spec.min_items:
+            errors.append(f"{name}: has {len(value)} items, fewer than min_items {spec.min_items}")
+        if spec.max_items is not None and len(value) > spec.max_items:
+            errors.append(f"{name}: has {len(value)} items, more than max_items {spec.max_items}")
 
     if spec.type == "array" and spec.item_type is not None:
         item_expected = _TYPE_CHECKS.get(spec.item_type, object)

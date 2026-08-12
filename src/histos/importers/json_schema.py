@@ -96,14 +96,17 @@ _UNPROJECTED_ASSERTIONS = frozenset(
         "$recursiveRef",
         "extends",
         "disallow",
-        # nested object shape: a `type: object` argument is checked for being an object
-        # and never for its contents (docs/policy-reference.md), so all of this is lost
-        "properties",
+        # nested object shape beyond "it is an object". `properties`/`required` are
+        # projected as far as this model goes — the field keeps `type: object`, which is
+        # what the engine checks — because refusing them took out every pydantic model
+        # with a nested model in it, and 4 of the 19 operations in the standard Swagger
+        # Petstore document. The inner contract is genuinely not carried, and
+        # docs/policy-reference.md has always said a `type: object` argument is checked
+        # for being an object and never for its contents.
         "patternProperties",
         "additionalProperties",
         "unevaluatedProperties",
         "propertyNames",
-        "required",
         "dependencies",
         "dependentSchemas",
         "dependentRequired",
@@ -116,8 +119,6 @@ _UNPROJECTED_ASSERTIONS = frozenset(
         "contains",
         "minContains",
         "maxContains",
-        "minItems",
-        "maxItems",
         "uniqueItems",
         # single-value assertions with no `Field` equivalent
         "const",
@@ -520,7 +521,7 @@ def _checked_enum(enum: Any, ftype: str, *, nullable: bool) -> tuple[Any, ...] |
     return tuple(enum)
 
 
-def _bound(prop: dict[str, Any], items: dict[str, Any], keyword: str) -> tuple[str, Any]:
+def _bound(prop: dict[str, Any], items: dict[str, Any] | None, keyword: str) -> tuple[str, Any]:
     """Return ``(source spelling, value)`` for one bound, reading ``items`` for an array.
 
     An array's element bounds are enforced from the array field's own spec —
@@ -533,7 +534,9 @@ def _bound(prop: dict[str, Any], items: dict[str, Any], keyword: str) -> tuple[s
     """
     if keyword in prop:
         return keyword, prop[keyword]
-    if keyword in items:
+    # `maxItems`/`minItems` describe the array, never an element, so they are asked
+    # of the property alone and `items` comes through as None for them.
+    if items and keyword in items:
         return f"items.{keyword}", items[keyword]
     return keyword, None
 
@@ -590,6 +593,8 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         pattern=pattern,
         sensitive=sensitive,
         item_type=item_type,
+        max_items=_length(*_bound(prop, None, "maxItems")),
+        min_items=_length(*_bound(prop, None, "minItems")),
         minimum=_numeric(*_bound(prop, items, "minimum")),
         maximum=_numeric(*_bound(prop, items, "maximum")),
         exclusive_minimum=_numeric(*_bound(prop, items, "exclusiveMinimum")),

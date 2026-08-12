@@ -192,19 +192,15 @@ def test_a_dangling_openapi_parameter_ref_is_refused_rather_than_dropping_the_ar
 @pytest.mark.parametrize(
     "prop",
     [
-        {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+        {"anyOf": [{"type": "string"}, {"type": "integer"}]},  # a real union has no single type
         {"anyOf": [{"type": "string", "maxLength": 3}, {"const": "x"}]},
         {"oneOf": [{"type": "string"}]},
         {"allOf": [{"type": "string", "maxLength": 3}]},
         {"not": {"type": "string"}},
         {"if": {"type": "string"}, "then": {"maxLength": 3}},
-        {"type": "array", "items": {"type": "string"}, "minItems": 1},
-        {"type": "array", "items": {"type": "string"}, "maxItems": 3},
         {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
         {"type": "array", "items": {"type": "string"}, "contains": {"const": "x"}},
         {"type": "array", "prefixItems": [{"type": "string"}]},
-        {"type": "object", "properties": {"inner": {"type": "string", "maxLength": 2}}},
-        {"type": "object", "required": ["inner"]},
         {"type": "object", "additionalProperties": False},
         {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
         {"type": "object", "propertyNames": {"maxLength": 3}},
@@ -221,9 +217,11 @@ def test_an_assertion_keyword_the_bridge_cannot_project_is_refused(prop):
 
 def test_the_refusal_names_the_argument_and_the_keyword():
     with pytest.raises(PolicyError) as excinfo:
-        schema_from_json_schema({"type": "object", "properties": {"ids": {"type": "array", "maxItems": 5}}})
+        schema_from_json_schema(
+            {"type": "object", "properties": {"ids": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}}
+        )
     assert "'ids'" in str(excinfo.value)
-    assert "maxItems" in str(excinfo.value)
+    assert "anyOf" in str(excinfo.value)
     assert excinfo.value.code == "invalid_import"
 
 
@@ -327,7 +325,6 @@ def test_an_element_enum_next_to_an_element_pattern_is_refused_rather_than_picki
 @pytest.mark.parametrize(
     "items",
     [
-        {"type": "object", "properties": {"a": {"type": "string"}}},
         {"type": "array", "items": {"type": "string"}},
         {"anyOf": [{"type": "string"}]},
     ],
@@ -397,21 +394,35 @@ def test_a_union_of_literals_that_disagree_on_type_is_refused():
 
 
 def test_the_honest_limit_of_the_projection_is_still_refused():
-    """A nested object and a recursive model are shapes one flat field cannot hold, so
-    they stay refused. This is the trade the projection makes, pinned so it is a
-    decision rather than a drift."""
-    with pytest.raises(PolicyError, match="does not carry"):
-        _one({"type": "object", "properties": {"city": {"type": "string"}}})
-    with pytest.raises(PolicyError, match="does not carry"):
-        _one({"type": "object", "additionalProperties": {"type": "string"}})
-    with pytest.raises(PolicyError, match="does not carry|recursive"):
-        schema_from_json_schema(
-            {
-                "type": "object",
-                "properties": {"node": {"$ref": "#/$defs/N"}},
-                "$defs": {"N": {"type": "object", "properties": {"child": {"$ref": "#/$defs/N"}}}},
-            }
-        )
+    """Where the projection stops, pinned so it stays a decision rather than a drift.
+
+    Two things moved out of this list deliberately. A nested object now projects to
+    `type: object` — which is exactly what the engine checks, and what
+    docs/policy-reference.md has always said it checks — because refusing it cost every
+    pydantic model with a model inside it and 4 of the 19 Petstore operations. And a
+    recursive model follows: the bridge stops at `type: object` and never descends, so
+    there is no cycle left to hit.
+    """
+    for unprojectable in (
+        {"type": "object", "additionalProperties": {"type": "string"}},
+        {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
+        {"type": "object", "propertyNames": {"maxLength": 3}},
+        {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+    ):
+        with pytest.raises(PolicyError, match="does not carry"):
+            _one(unprojectable)
+
+
+def test_a_recursive_model_projects_as_an_object_and_does_not_hang():
+    """"Does not hang" is the property that mattered when this used to refuse."""
+    recursive = schema_from_json_schema(
+        {
+            "type": "object",
+            "properties": {"node": {"$ref": "#/$defs/N"}},
+            "$defs": {"N": {"type": "object", "properties": {"child": {"$ref": "#/$defs/N"}}}},
+        }
+    )
+    assert recursive.fields["node"].type == "object"
 
 
 # ── one bad tool must not take the manifest with it ──────────────────────
@@ -422,7 +433,12 @@ def _manifest(*schemas):
 
 
 GOOD = {"type": "object", "properties": {"q": {"type": "string"}}}
-UNPROJECTABLE = {"type": "object", "properties": {"ids": {"type": "array", "maxItems": 5}}}
+# A real value-type union: no single `type` can stand for it and `any` would accept
+# everything. `maxItems` used to play this role and is now carried, so it no longer can.
+UNPROJECTABLE = {
+    "type": "object",
+    "properties": {"amount": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+}
 
 
 def test_one_unprojectable_tool_no_longer_refuses_the_whole_manifest():
@@ -439,7 +455,7 @@ def test_the_skipped_tool_is_reported_by_name_alongside_the_argument_and_keyword
     (skipped,) = sources.skipped
     assert skipped.name == "t1"
     for text in (skipped.reason, str(warnings_seen[0].message)):
-        assert "'t1'" in text and "'ids'" in text and "maxItems" in text
+        assert "'t1'" in text and "'amount'" in text and "anyOf" in text
 
 
 def test_a_skipped_tool_has_no_contract_so_the_gate_denies_it():
@@ -479,7 +495,9 @@ def test_one_unprojectable_openapi_operation_does_not_refuse_the_others():
             "/b": {
                 "get": {
                     "operationId": "getB",
-                    "parameters": [{"name": "ids", "in": "query", "schema": {"type": "array", "maxItems": 5}}],
+                    "parameters": [
+                        {"name": "ids", "in": "query", "schema": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}
+                    ],
                 }
             },
         },
@@ -550,3 +568,38 @@ def test_an_element_bound_from_items_refuses_a_real_call():
         with pytest.raises(GateDenied) as excinfo:
             run(scopes=["read", "admin:*"])
     assert excinfo.value.decision.rule == "arg_schema"
+
+
+# ── shapes that used to be refused and are now carried ───────────────────
+#
+# Refusing them was the first cut of "do not drop a bound", and it took the stance too
+# far: `maxItems` is a bound this field model can hold, and a nested object degrades to
+# `type: object`, which is precisely what the engine checks and what
+# docs/policy-reference.md has always said it checks. Refusing instead cost every
+# pydantic model with a nested model in it, and 4 of the 19 operations in the standard
+# Swagger Petstore document — and a bridge people stop pointing at protects nothing.
+
+
+@pytest.mark.parametrize(
+    ("keyword", "attribute", "expected"),
+    [("maxItems", "max_items", 3), ("minItems", "min_items", 1)],
+)
+def test_an_array_length_bound_is_carried_now_that_the_field_can_hold_one(keyword, attribute, expected):
+    field = _one({"type": "array", "items": {"type": "string"}, keyword: expected})
+    assert getattr(field, attribute) == expected
+
+
+def test_a_nested_object_projects_as_an_object_rather_than_taking_the_tool_down():
+    field = _one({"type": "object", "properties": {"inner": {"type": "string", "maxLength": 2}}})
+    assert field.type == "object", "the engine checks it is a mapping; the inner shape is not carried"
+
+
+def test_a_value_type_union_is_still_refused():
+    """`any` would accept everything, which is the widening this bridge exists to refuse."""
+    with pytest.raises(PolicyError):
+        _one({"anyOf": [{"type": "string"}, {"type": "integer"}]})
+
+
+def test_an_optional_is_still_not_a_union():
+    field = _one({"anyOf": [{"type": "string", "maxLength": 4}, {"type": "null"}]})
+    assert (field.type, field.nullable, field.max_length) == ("string", True, 4)
