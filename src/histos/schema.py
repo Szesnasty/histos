@@ -209,6 +209,27 @@ def _terminated_body(body: Any) -> bool:
     return _separates(separator, _edges(_re_parser.SubPattern(body.state, items[:-1])))
 
 
+def _leaf_separates(op: Any, av: Any, neighbours: list[_Neighbour]) -> bool:
+    """Whether a non-repeat opcode ends the ambiguity between the repeats around it.
+
+    Only if the characters it can match are disjoint from every pending repeat's. A
+    leaf they can also produce is not a boundary — the engine can still slide the split
+    across it, which is exactly the backtracking the neighbour list is tracking.
+    Anything this cannot reason about (a backreference, a lookaround, a group op that
+    got here) is treated as *not* separating: keeping the pending repeats costs a
+    possible false positive, dropping them costs the screen.
+    """
+    if not neighbours:
+        return True
+    points = _edges((op, av))
+    if points is None:
+        return False
+    firsts = points[0]
+    if firsts is None:
+        return False
+    return all(edges is None or edges[1] is None or firsts.isdisjoint(edges[1]) for _, edges, _ in neighbours)
+
+
 def _shape_key(node: Any) -> Any:
     """A hashable, comparable form of a parse subtree (``SubPattern`` is list-like)."""
     if isinstance(node, tuple | list | _re_parser.SubPattern):
@@ -392,6 +413,9 @@ def _backtracking_risk(
     # must consume one clears the list, since it is what disambiguates the two sides.
     if neighbours is None:
         neighbours = []
+    # the characters of a leaf that the repeats before it could also match, held until
+    # the next repeat says whether it can match them too.
+    crossed: _Edges | None = None
     items = list(seq)
     # the last item that can occupy a character: an anchor after it is not "after" it in
     # any sense that matters, so `[a-z]+.*$` has `.*` in tail position just like `[a-z]+.*`.
@@ -422,7 +446,18 @@ def _backtracking_risk(
             # Only an unbounded repeat contributes a *degree*. `[01]?\d?\d` is three
             # overlapping repeats and four possible splits — the IPv4 octet every policy
             # author writes — and refusing it bought nothing.
-            neighbour = (_shape_key(av[2]), _edges(av[2]), dot_repeat) if variable_repeat and _unbounded(av) else None
+            # A separator only one side can absorb is still a separator. In
+            # `[A-Za-z0-9.-]+\.[A-Za-z]{2,}` the dot is in the left class and not the
+            # right, so the only freedom is *which* dot is the last one — linear, and
+            # measured at 0.03 ms on 4 KiB. In `^.+,[^\n]+,[^\n]+$` both sides match a
+            # comma, every comma is a free choice, and that is the 518 ms case.
+            body_edges = _edges(av[2])
+            if crossed is not None and body_edges is not None:
+                incoming, separator = body_edges[0], crossed[0]
+                if incoming is not None and separator is not None and incoming.isdisjoint(separator):
+                    neighbours.clear()
+                crossed = None
+            neighbour = (_shape_key(av[2]), body_edges, dot_repeat) if variable_repeat and _unbounded(av) else None
             if neighbour is not None:
                 clash = _neighbour_clash(neighbours, neighbour)
                 if clash is not None:
@@ -476,7 +511,22 @@ def _backtracking_risk(
         elif op is _re_const.AT:
             risk = None  # an anchor matches the empty string, so it separates nothing
         else:
-            neighbours.clear()
+            # A leaf separates the repeats around it only if it is a character neither
+            # of them can produce. Clearing unconditionally read `,` in
+            # `^.+,[^\n]+,[^\n]+$` as a boundary — and `.` and `[^\n]` both match a
+            # comma, so it marks nothing and the three runs stay mutually ambiguous.
+            # Measured 518 ms at 2 000 characters of comma-rich input, which is the
+            # finding this whole screen was rewritten to close, reopened one opcode
+            # away. Disjointness is the same test `_separates` applies to a repeat body.
+            if _leaf_separates(op, av, neighbours):
+                neighbours.clear()
+                crossed = None
+            else:
+                # The leaf is inside the pending repeats' alphabet, so it does not end
+                # the ambiguity on its own — but it may still end it from the right. Held
+                # until the next repeat is known: if that one cannot match this
+                # character, the split point is forced and there is nothing to search.
+                crossed = _edges((op, av))
             risk = None  # every remaining opcode is a leaf (literal, class, backref)
         if risk is not None:
             return risk
