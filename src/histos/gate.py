@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import enum
 import functools
 import inspect
 import itertools
@@ -341,6 +342,20 @@ _MAX_OUTPUT_DEPTH = 64
 _LAZY_OWNED_BY_THE_RESULT = ("generator", "async generator", "coroutine")
 
 
+def _defines(value: Any, method: str) -> bool:
+    """Whether ``type(value)`` itself defines ``method`` — not its metaclass.
+
+    `hasattr(type(value), "__iter__")` was the obvious spelling and it asks the wrong
+    object: attribute lookup on a *class* falls through to the metaclass, and
+    `enum.EnumType` defines `__iter__` so that `for c in Colour` works. So every enum
+    member answered "iterable" while `iter(Colour.RED)` raises — and a single
+    enum-valued field anywhere in an ordinary dict result refused the whole call, which
+    is how a status field became a denial. Walking the instance MRO asks whether *this
+    value* can be iterated, which is the actual question.
+    """
+    return any(method in klass.__dict__ for klass in type(value).__mro__)
+
+
 def _lazy_leaf_kind(value: Any) -> str | None:
     """What kind of un-post-gateable thing a single value is, if it is one."""
     if inspect.isasyncgen(value):
@@ -353,9 +368,15 @@ def _lazy_leaf_kind(value: Any) -> str | None:
     # the interpreter iterates, and an opaque object that merely stores one is not an
     # iterator — refusing it would be a false positive on a value the post chain
     # already treats as an inert residual.
-    if hasattr(type(value), "__next__"):
+    if _defines(value, "__next__"):
         return "iterator"
     if isinstance(value, (str, bytes)):
+        return None
+    # An `enum.Flag` member is iterable in 3.11+ (iterating a composite yields its
+    # constituents), so the MRO test above is right about it and refusing it is still
+    # wrong: everything an enum member can hold was written at class-definition time,
+    # so there is no tool output behind that iteration for anything to hide in.
+    if isinstance(value, enum.Enum):
         return None
     # an `__iter__`-only object hides its payload exactly as a generator does: this is
     # the ordinary lazy-result-wrapper idiom (`class Rows: def __iter__(self): yield ...`),
@@ -364,7 +385,7 @@ def _lazy_leaf_kind(value: Any) -> str | None:
     # and of `__iter__` only: a `__getitem__`-only legacy sequence is left alone, because
     # every client object with subscript access defines one and refusing those would
     # refuse honest results to catch a shape nobody returns.
-    if not hasattr(type(value), "__iter__"):
+    if not _defines(value, "__iter__"):
         return None
     return f"{type(value).__name__} the post chain cannot traverse"
 

@@ -1,0 +1,167 @@
+{
+  "$comment": "Card numbers whose check digit is COMPUTED, not remembered: the first version of this file was typed from memory and 11 of 34 entries were not Luhn-valid, which would have made the corpus test the checksum instead of the detector. The external facts here are the (prefix, length) pairs the card schemes publish. `must_detect` is what has to be redacted \u2014 a miss is a secret that egresses. `must_not_detect` is Luhn-valid text that is not a card; an IMEI is 15 digits and Luhn by specification and starts 35, inside JCB's prefix range, so only the length tells them apart. A 13-digit Maestro entry under prefix 676770 was removed: it came from the same memory the rest of this file exists to distrust, and adding a detector prefix that cannot be sourced is how a false positive gets in through the corpus.",
+  "must_detect": [
+    {
+      "brand": "visa-13",
+      "number": "4777777777771"
+    },
+    {
+      "brand": "visa-16",
+      "number": "4777777777777778"
+    },
+    {
+      "brand": "visa-19",
+      "number": "4777777777777777775"
+    },
+    {
+      "brand": "mastercard-16",
+      "number": "5177777777777771"
+    },
+    {
+      "brand": "mastercard-16",
+      "number": "5577777777777777"
+    },
+    {
+      "brand": "mastercard-2series-16",
+      "number": "2221777777777774"
+    },
+    {
+      "brand": "mastercard-2series-16",
+      "number": "2720777777777770"
+    },
+    {
+      "brand": "amex-15",
+      "number": "347777777777777"
+    },
+    {
+      "brand": "amex-15",
+      "number": "377777777777770"
+    },
+    {
+      "brand": "discover-16",
+      "number": "6011777777777779"
+    },
+    {
+      "brand": "discover-19",
+      "number": "6011777777777777777"
+    },
+    {
+      "brand": "discover-16",
+      "number": "6577777777777775"
+    },
+    {
+      "brand": "discover-16",
+      "number": "6447777777777773"
+    },
+    {
+      "brand": "diners-14",
+      "number": "36777777777773"
+    },
+    {
+      "brand": "diners-14",
+      "number": "30077777777774"
+    },
+    {
+      "brand": "diners-14",
+      "number": "30577777777773"
+    },
+    {
+      "brand": "diners-14",
+      "number": "38777777777771"
+    },
+    {
+      "brand": "jcb-16",
+      "number": "3528777777777772"
+    },
+    {
+      "brand": "jcb-16",
+      "number": "3566777777777775"
+    },
+    {
+      "brand": "jcb-16",
+      "number": "3589777777777778"
+    },
+    {
+      "brand": "unionpay-16",
+      "number": "6277777777777778"
+    },
+    {
+      "brand": "unionpay-17",
+      "number": "62777777777777776"
+    },
+    {
+      "brand": "unionpay-18",
+      "number": "627777777777777776"
+    },
+    {
+      "brand": "unionpay-19",
+      "number": "6277777777777777774"
+    },
+    {
+      "brand": "maestro-16",
+      "number": "6759777777777775"
+    },
+    {
+      "brand": "maestro-19",
+      "number": "6763777777777777773"
+    },
+    {
+      "brand": "maestro-16",
+      "number": "5018777777777774"
+    },
+    {
+      "brand": "visa-16-published",
+      "number": "4111111111111111"
+    },
+    {
+      "brand": "amex-15-published",
+      "number": "378282246310005"
+    },
+    {
+      "brand": "visa-16-spaced",
+      "number": "4111 1111 1111 1111"
+    },
+    {
+      "brand": "amex-15-hyphenated",
+      "number": "3782-822463-10005"
+    }
+  ],
+  "must_not_detect": [
+    {
+      "what": "imei",
+      "number": "358931803333339"
+    },
+    {
+      "what": "imei",
+      "number": "861234563333338"
+    },
+    {
+      "what": "imei",
+      "number": "352099003333339"
+    },
+    {
+      "what": "order-number",
+      "number": "8901333333333332"
+    },
+    {
+      "what": "meter-reading",
+      "number": "1234567333333333338"
+    },
+    {
+      "what": "timestamp-run",
+      "number": "20260812333333335"
+    },
+    {
+      "what": "internal-reference",
+      "number": "1000333333333337"
+    },
+    {
+      "what": "ean13",
+      "number": "9780306433333"
+    },
+    {
+      "what": "account-ref",
+      "number": "700033333333333335"
+    }
+  ]
+}

@@ -125,6 +125,90 @@ def _variable_width(av: tuple[Any, ...]) -> bool:
     return av[0] != av[1]
 
 
+def _unbounded(av: tuple[Any, ...]) -> bool:
+    """True when a repeat may iterate without limit — the degree that actually hurts.
+
+    A bounded outer repeat cannot produce runaway backtracking however ambiguous its
+    body is: ``(a+)?`` tries its body at most once and ``(?:X){3}`` three times.
+    Treating every nesting as ``(a+)+`` refused semver, slugs, decimals, hostnames,
+    ISO-8601 durations and Windows paths — all measured well under a millisecond
+    against 4 KiB of their own alphabet — while every shape that does blow up has an
+    unbounded repeat on the outside.
+    """
+    return av[1] is _re_const.MAXREPEAT
+
+
+def _transparent(body: Any) -> list[Any]:
+    """A repeat body with anchors dropped and a lone wrapping group unwrapped.
+
+    `(?:\\.[a-z0-9]...)*` parses as a repeat over a single SUBPATTERN, so a separator
+    test that looked at the body's own items saw one opaque node and gave up — which is
+    why the dotted-hostname pattern stayed refused after the comma-list one was fixed.
+    `_backtracking_risk` already treats a group as transparent; this is the same rule.
+    """
+    items = [item for item in body if item[0] is not _re_const.AT]
+    while len(items) == 1 and items[0][0] is _re_const.SUBPATTERN and not (items[0][1][1] or items[0][1][2]):
+        items = [item for item in items[0][1][3] if item[0] is not _re_const.AT]
+    return items
+
+
+def _separates(separator: int, rest: Any) -> bool:
+    """Whether ``separator`` really marks an iteration boundary in a body.
+
+    Three conditions, and the middle two are the ones that caught this out. The rest of
+    the body must not be able to *start* with the separator, must not be able to *end*
+    with it — otherwise the boundary slides one character either way, which is the whole
+    ambiguity — and must not be nullable, because a body that can shrink to just the
+    separator is a plain repeat of a literal and proves nothing.
+
+    Python's parser factors a common prefix, so `(a|ab)*` arrives as `a` followed by
+    `(|b)`: a leading literal with a nullable tail. Reading that as "anchored by `a`"
+    admitted a genuinely exponential pattern, which is why nullability is checked here
+    rather than assumed away.
+    """
+    if rest is None:
+        return False
+    firsts, lasts, nullable = rest
+    if nullable or firsts is None or lasts is None:
+        return False
+    return separator not in firsts and separator not in lasts
+
+
+def _anchored_body(body: Any) -> bool:
+    """Whether a repeat body opens with a separator its own tail cannot produce.
+
+    ``(?:,\\d+)*`` and ``(?:-[a-z0-9]+)*`` are how every list and slug pattern is
+    written, and they are safe for a reason the nesting rule cannot see: each iteration
+    must begin with a character the rest of the body can never match, so there is
+    exactly one way to split the input across iterations and nothing to backtrack over.
+    ``(?:\\d+)*`` has no such separator and is the classic bomb.
+
+    Deliberately narrow — one leading literal, and only when the remainder of the body
+    cannot itself start with that character. Anything less certain falls through to the
+    rules below, because being wrong here means admitting a bomb.
+    """
+    items = _transparent(body)
+    if len(items) < 2 or items[0][0] is not _re_const.LITERAL:
+        return False
+    separator = items[0][1]
+    rest = _edges(_re_parser.SubPattern(body.state, items[1:]))
+    return _separates(separator, rest)
+
+
+def _terminated_body(body: Any) -> bool:
+    """Whether a repeat body *ends* with a separator its own head cannot produce.
+
+    The mirror of :func:`_anchored_body`, and the shape every path pattern uses:
+    ``(?:[^/]+/)*`` puts the delimiter last. Same argument — an iteration boundary is
+    marked by a character the body cannot otherwise match, so the split is unique.
+    """
+    items = _transparent(body)
+    if len(items) < 2 or items[-1][0] is not _re_const.LITERAL:
+        return False
+    separator = items[-1][1]
+    return _separates(separator, _edges(_re_parser.SubPattern(body.state, items[:-1])))
+
+
 def _shape_key(node: Any) -> Any:
     """A hashable, comparable form of a parse subtree (``SubPattern`` is list-like)."""
     if isinstance(node, tuple | list | _re_parser.SubPattern):
@@ -335,16 +419,37 @@ def _backtracking_risk(
                 # after it" argument says nothing about the pair. `^[^/]+[b-d]{3}?.*.+$` is
                 # 39 s at 4 KiB and was found by exempting it.
                 continue
-            neighbour = (_shape_key(av[2]), _edges(av[2]), dot_repeat) if variable_repeat else None
+            # Only an unbounded repeat contributes a *degree*. `[01]?\d?\d` is three
+            # overlapping repeats and four possible splits — the IPv4 octet every policy
+            # author writes — and refusing it bought nothing.
+            neighbour = (_shape_key(av[2]), _edges(av[2]), dot_repeat) if variable_repeat and _unbounded(av) else None
             if neighbour is not None:
                 clash = _neighbour_clash(neighbours, neighbour)
                 if clash is not None:
                     return clash
-            if av[0] != 0:
+            # A repeat that must consume separates what is on either side of it. So does
+            # one that *may* be empty but opens with its own separator when it is not:
+            # `[a-z0-9]+(?:-[a-z0-9]+)*` reads as two overlapping repeats only if the `-`
+            # is ignored, and with it there is exactly one way to split the input. That
+            # elision refused slugs, comma lists and dotted hostnames.
+            if av[0] != 0 or _anchored_body(av[2]) or _terminated_body(av[2]):
                 neighbours.clear()
             if neighbour is not None:
                 neighbours.append(neighbour)
-            risk = _backtracking_risk(av[2], in_repeat=in_repeat or variable_repeat, at_tail=False)
+            # `in_repeat` means "enclosed by a repeat whose iterations are ambiguous".
+            # Two things make them unambiguous, and both were being ignored: a bounded
+            # outer repeat cannot iterate enough times for its body's ambiguity to cost
+            # anything (`(a+)?`), and a body carrying its own separator has exactly one
+            # valid split whatever it contains (`(?:,\d+)*`, `(?:[^/]+/)*`). Between
+            # them they account for semver, slugs, comma lists, hostnames, IPv6, ISO-8601
+            # durations and Windows paths — every one measured under a millisecond.
+            ambiguous = (
+                variable_repeat
+                and _unbounded(av)
+                and not _anchored_body(av[2])
+                and not _terminated_body(av[2])
+            )
+            risk = _backtracking_risk(av[2], in_repeat=in_repeat or ambiguous, at_tail=False)
         elif op is _re_const.BRANCH:
             if in_repeat:
                 return "an alternation inside a repeat, e.g. `(a|ab)*` — use a character class"

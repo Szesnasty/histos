@@ -901,7 +901,12 @@ class Engine:
             # worse than one that is off, because the policy says it is on. Treated as
             # a projection failure and handled by `on_output_violation`, exactly like a
             # return that fails its declared schema.
-            if not isinstance(out, (dict, list, tuple)):
+            # `None` is excluded deliberately: a tool that returns nothing has no
+            # fields to project and nothing to leak, and treating it as a projection
+            # failure replaced every `Optional[...]` return with a truthy redaction
+            # string — so `if result is None:` in the caller stopped being true and the
+            # tool silently changed meaning.
+            if out is not None and not isinstance(out, (dict, list, tuple)):
                 if contract.on_output_violation == "deny":
                     return GateDecision(
                         Effect.DENY,

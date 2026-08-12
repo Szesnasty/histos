@@ -64,6 +64,27 @@ class Sensitivity(StrEnum):
     CRITICAL = "critical"
 
 
+def _snapshot(attributes: dict[str, Any]) -> dict[str, Any]:
+    """Deep-copy what can be copied; keep what cannot, rather than refusing the request.
+
+    The copy exists so a tool handed a bound attribute cannot edit the trust anchor
+    through it. But a host legitimately parks unclonable things here — a database
+    session, an HTTP client, a lock — and `deepcopy` raises on those, which turned
+    building a `Principal` into something that could fail. A host builds one per
+    request, so that is an outage, and it is a worse outcome than the sharing it
+    prevents: an object with no `__deepcopy__` is one a tool could not meaningfully
+    mutate into a different authorization answer anyway. Copy per value, so one
+    uncopyable entry does not cost the snapshot on the others.
+    """
+    snapshot: dict[str, Any] = {}
+    for key, value in attributes.items():
+        try:
+            snapshot[key] = deepcopy(value)
+        except Exception:  # noqa: BLE001 — an uncopyable attribute must not fail the request
+            snapshot[key] = value
+    return snapshot
+
+
 @dataclass(frozen=True)
 class Principal:
     """Who is making the call.
@@ -99,12 +120,17 @@ class Principal:
         # `args["tenants"].append(...)` edited what the *next* call would be authorized
         # against; and a host that kept its own dict could rewrite a bound principal
         # mid-request. A snapshot has to be a snapshot all the way down.
-        object.__setattr__(self, "attributes", MappingProxyType(deepcopy(dict(self.attributes))))
+        object.__setattr__(self, "attributes", MappingProxyType(_snapshot(dict(self.attributes))))
         # A list here is the natural thing to write and it silently half-worked: it
         # compared as a member of nothing, and it made `hash(principal)` raise, which
         # is the one thing `__hash__` below exists to allow. Coerce rather than refuse —
         # the meaning of `["pii"]` is not in doubt.
-        if not isinstance(self.can_view, frozenset):
+        # A bare string is one sensitivity class, not a set of characters. `frozenset("pii")`
+        # is `{'p','i'}`, which matches nothing and silently turns a grant into a denial —
+        # the coercion that was added to accept a list quietly broke the shortest spelling.
+        if isinstance(self.can_view, str):
+            object.__setattr__(self, "can_view", frozenset({self.can_view}))
+        elif not isinstance(self.can_view, frozenset):
             object.__setattr__(self, "can_view", frozenset(self.can_view))
 
     def __hash__(self) -> int:
