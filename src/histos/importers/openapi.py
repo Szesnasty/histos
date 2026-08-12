@@ -176,9 +176,7 @@ def _source_from_operation(spec: dict[str, Any], path: str, method: str, op: dic
             "requestBody": body_schema,
             "responses": response_schema,
         },
-        contract=ToolContract(
-            name=name, args=args, returns=returns, access=access, sensitivity=UNREVIEWED_SENSITIVITY
-        ),
+        contract=ToolContract(name=name, args=args, returns=returns, access=access, sensitivity=UNREVIEWED_SENSITIVITY),
     )
 
 

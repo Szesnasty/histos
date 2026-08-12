@@ -62,17 +62,21 @@ class Detection:
 # `tests/corpus/cards.json`: numbers whose check digit is computed from these prefixes
 # rather than remembered, precisely so the corpus cannot inherit the same blind spot.
 _PAN_PREFIXES: tuple[tuple[str, tuple[int, ...]], ...] = (
-    ("4", (13, 16, 19)),                                    # Visa
-    *((str(n), (16,)) for n in range(51, 56)),              # Mastercard
-    *((str(n), (16,)) for n in range(2221, 2721)),          # Mastercard 2-series
-    ("34", (15,)), ("37", (15,)),                           # Amex
-    ("6011", (16, 19)), ("65", (16, 19)),                   # Discover
-    *((str(n), (16, 19)) for n in range(644, 650)),         # Discover
-    ("36", (14,)),                                          # Diners
-    *((str(n), (14,)) for n in range(300, 306)),            # Diners
-    ("3095", (14,)), ("38", (14,)), ("39", (14,)),          # Diners
-    *((str(n), (16, 19)) for n in range(3528, 3590)),       # JCB
-    ("62", (16, 17, 18, 19)),                               # UnionPay
+    ("4", (13, 16, 19)),  # Visa
+    *((str(n), (16,)) for n in range(51, 56)),  # Mastercard
+    *((str(n), (16,)) for n in range(2221, 2721)),  # Mastercard 2-series
+    ("34", (15,)),
+    ("37", (15,)),  # Amex
+    ("6011", (16, 19)),
+    ("65", (16, 19)),  # Discover
+    *((str(n), (16, 19)) for n in range(644, 650)),  # Discover
+    ("36", (14,)),  # Diners
+    *((str(n), (14,)) for n in range(300, 306)),  # Diners
+    ("3095", (14,)),
+    ("38", (14,)),
+    ("39", (14,)),  # Diners
+    *((str(n), (16, 19)) for n in range(3528, 3590)),  # JCB
+    ("62", (16, 17, 18, 19)),  # UnionPay
     # Maestro. Variable length by design (12-19), which is why it was the one that fell
     # out of a table built around "16 digits, sometimes 15".
     *((p, tuple(range(12, 20))) for p in ("5018", "5020", "5038", "5893", "6304", "6759", "6761", "6762", "6763")),
@@ -85,9 +89,7 @@ _PAN_BY_FIRST: dict[str, tuple[tuple[str, tuple[int, ...]], ...]] = {}
 for _prefix, _lengths in _PAN_PREFIXES:
     _PAN_BY_FIRST.setdefault(_prefix[0], ())
 for _first in _PAN_BY_FIRST:
-    _PAN_BY_FIRST[_first] = tuple(
-        sorted((p, ln) for p, ln in _PAN_PREFIXES if p[0] == _first)
-    )
+    _PAN_BY_FIRST[_first] = tuple(sorted((p, ln) for p, ln in _PAN_PREFIXES if p[0] == _first))
 del _prefix, _lengths, _first
 
 

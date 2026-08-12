@@ -320,10 +320,7 @@ def test_a_bound_the_source_wrote_survives_the_import():
 def test_the_real_petstore_document_imports_completely():
     spec = _load("openapi_petstore.json")
     operations = sum(
-        1
-        for item in spec["paths"].values()
-        for method in item
-        if method in ("get", "post", "put", "patch", "delete")
+        1 for item in spec["paths"].values() for method in item if method in ("get", "post", "put", "patch", "delete")
     )
     assert len(contracts_from_openapi(spec)) == operations
 

@@ -330,14 +330,11 @@ def test_an_element_enum_and_an_element_pattern_are_both_enforced():
     assert field.item_enum == ("read",) and field.pattern == "^r.*$"
 
 
-
 def test_an_element_enum_member_with_regex_metacharacters_is_matched_literally():
     field = _one({"type": "array", "items": {"type": "string", "enum": ["a.b", "c*"]}})
     schema = Schema({"a": field})
     assert validate(schema, {"a": ["a.b", "c*"]}) == []
     assert validate(schema, {"a": ["axb"]})  # `.` must not have matched any character
-
-
 
 
 def test_pydantic_optional_is_an_optional_field_not_a_union():
@@ -411,7 +408,7 @@ def test_the_honest_limit_of_the_projection_is_still_refused():
 
 
 def test_a_recursive_model_projects_as_an_object_and_does_not_hang():
-    """"Does not hang" is the property that mattered when this used to refuse."""
+    """ "Does not hang" is the property that mattered when this used to refuse."""
     recursive = schema_from_json_schema(
         {
             "type": "object",
@@ -461,9 +458,7 @@ def test_a_skipped_tool_has_no_contract_so_the_gate_denies_it():
     with pytest.warns(ToolImportSkipped):
         contracts = contracts_from_mcp(_manifest(GOOD, UNPROJECTABLE))
     policy = Policy(tools={c.name: c for c in contracts}, permissions={"agent": frozenset({"t0", "t1"})})
-    decision = Gate(policy).engine.pre(
-        GateRequest("t1", {}, Principal(role="agent", identity="svc-1"), phase="pre")
-    )
+    decision = Gate(policy).engine.pre(GateRequest("t1", {}, Principal(role="agent", identity="svc-1"), phase="pre"))
     assert not decision.allowed and decision.rule == "unknown_tool"
 
 
