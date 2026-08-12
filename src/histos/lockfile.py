@@ -43,13 +43,13 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from histos.canonical import canonical_json
 from histos.contracts import ToolContract
+from histos.display import safe_text
 from histos.errors import PolicyError
 from histos.importers.sources import KINDS, ToolSource
 
@@ -85,7 +85,6 @@ MAX_RECORDED_DESCRIPTION_CHARS = 4_096
 # A rendered diff is for a human to read once. Bounds keep a source that ships a
 # 10,000-line schema from burying the one line that matters.
 _MAX_DIFF_LINES = 40
-_MAX_DIFF_VALUE_CHARS = 400
 
 
 def _digest(obj: Any) -> str:
@@ -121,36 +120,6 @@ def contract_hash(contract: ToolContract) -> str:
     — one rule, one place, and the same one ``Policy.content_hash`` uses.
     """
     return _digest(contract.shape_structure())
-
-
-# ── rendering somebody else's text ───────────────────────────────────────
-
-# Everything that steers how a line of text *reads* without being visible in it:
-# C0/C1 controls (a carriage return rewrites the line already printed), the bidi
-# overrides and isolates (U+202A-U+202E, U+2066-U+2069 — the trick that makes
-# `export_contacts` render as `stcatnoc_tropxe` inside an otherwise innocent
-# sentence), the zero-width and word-joiner set, and the BOM.
-_UNSAFE_TEXT = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f"      # C0 and C1 controls
-    "\u061c\u200b-\u200f\u2028-\u202e"   # bidi marks, overrides, line/paragraph separators
-    "\u2060-\u2064\u2066-\u206f\ufeff]"  # word joiners, bidi isolates, zero-width no-break space
-)
-
-
-def safe_text(text: str, *, limit: int = _MAX_DIFF_VALUE_CHARS) -> str:
-    """Render source-authored text so that reading the report cannot be steered by it.
-
-    A tool description is a prompt fragment somebody else wrote, and a drift report is
-    the one place a human is guaranteed to read it. It is quoted data here and nothing
-    else: never interpolated into a shell, a template or a format string, never
-    executed, and never trusted to render as what it appears to say. Anything that
-    moves the cursor or reorders the line is escaped to its ``\\uXXXX`` spelling, so
-    what a reviewer sees is what a model would receive.
-    """
-    escaped = _UNSAFE_TEXT.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
-    if len(escaped) > limit:
-        return escaped[:limit] + f"… (+{len(escaped) - limit} chars)"
-    return escaped
 
 
 @dataclass(frozen=True)

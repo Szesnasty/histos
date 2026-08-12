@@ -24,6 +24,7 @@ Design points:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -43,9 +44,21 @@ except ImportError:  # pragma: no cover - exercised only on Windows
 def digest_args(args: dict[str, Any], key: bytes) -> str:
     """Keyed HMAC-SHA256 hex of the arguments — never the raw values.
 
-    Uses the one canonical serializer (Phase 0.1) so the digest matches the approval
-    fingerprint. Audit must never crash the gate, so an un-canonicalizable value
-    falls back to a stable repr rather than raising.
+    Uses the one canonical serializer (Phase 0.1), so two calls with the same arguments
+    digest the same *under the same key*. It does not equal the approval fingerprint,
+    which this used to claim: that one is an unkeyed SHA-256 over the tool, the args and
+    the whole principal, and it exists to be reproducible by a host that never sees this
+    key. Two different questions, two different values.
+
+    The key matters more than it looks. `Gate` generates a random one per instance
+    unless given `audit_key=`, which is right for the default — a bare SHA of a
+    low-entropy argument is brute-forceable — but it means the column cannot be
+    correlated across processes, across a restart, or between two Gates in one process
+    unless the operator passes a stable key. Pass one from your secret store if
+    "the same call, again" is a question you need the trail to answer.
+
+    Audit must never crash the gate, so an un-canonicalizable value falls back to a
+    stable repr rather than raising.
     """
     from histos.canonical import canonical_json
 
@@ -94,10 +107,58 @@ _REASON_IS_POLICY_TEXT: frozenset[str] = frozenset(
         "post_redaction",
         "exception_redaction",
         "output_schema",
+        # composed from the tool name and the *kind* of lazy value that came back
+        # ("generator", "structure containing a memoryview …") — never from the value,
+        # which is the one thing the gate could not read in the first place.
+        "uninspectable_output",
+        # tool name and a count of positional arguments; no value is quoted.
+        "confirm_suspended",
+        "unnameable_args",
     }
 )
 
 _REDACTED = "[redacted — this rule's reason quotes foreign text; it stays in the developer channel]"
+
+# `arg_keys` is the one field made entirely of model-chosen text, and it used to be
+# copied in whole: a call with ten thousand one-kilobyte argument names wrote a ten-
+# megabyte line into an append-only file, once per decision, for free. Caps here rather
+# than at the sink so every sink gets them, and truncation is announced in the record
+# instead of leaving a short list that reads like a short call.
+_MAX_ARG_KEYS = 64
+_MAX_ARG_KEY_LEN = 128
+_MAX_ARG_KEYS_TOTAL = 1024
+
+# Capping only `arg_keys` turned out to be the shape of the bug rather than the fix.
+# The other text fields are copied in whole from the same places: `tool` is whatever
+# name the host wrapped (a 200,000-character tool name is a 200,000-character field),
+# `identity` and `role` come from a Principal a host may build out of a token claim,
+# `field_name` is frequently the model's own argument name, and `reason` INTERPOLATES
+# those — so a single call still wrote an 800 KB line with `arg_keys` dutifully capped
+# at 1 KB inside it. Every free-text field is bounded here, and a clipped string keeps
+# a marker so a truncated value is never read as the whole one. Chosen over a
+# `<field>_truncated` flag per field: the marker travels with the text through every
+# sink, dashboard and grep, none of which know about a new column.
+_MAX_NAME_LEN = 256
+_MAX_TEXT_LEN = 512
+_TRUNCATED = "...[truncated]"
+
+
+def _cap_arg_keys(keys: list[str]) -> tuple[list[str], bool]:
+    """Bound an attacker-sized ``arg_keys`` list; returns (kept, truncated)."""
+    kept: list[str] = []
+    budget = _MAX_ARG_KEYS_TOTAL
+    for key in keys[:_MAX_ARG_KEYS]:
+        clipped = key[:_MAX_ARG_KEY_LEN]
+        if len(clipped) > budget:
+            break
+        budget -= len(clipped)
+        kept.append(clipped)
+    return kept, kept != keys
+
+
+def _cap_text(value: str, limit: int) -> str:
+    """Bound one free-text field, leaving the clipping visible in the value itself."""
+    return value if len(value) <= limit else value[:limit] + _TRUNCATED
 
 
 @dataclass
@@ -125,6 +186,9 @@ class AuditRecord:
     reason: str
     args_digest: str
     arg_keys: list[str] = field(default_factory=list)
+    #: Whether `arg_keys` was clipped on the way in — see :data:`_MAX_ARG_KEYS`. A record
+    #: listing 64 keys is otherwise indistinguishable from a call that had exactly 64.
+    arg_keys_truncated: bool = False
     #: Arguments the policy *overwrote* with a trusted principal attribute before the
     #: tool saw them — field names only, never values.
     #:
@@ -154,12 +218,23 @@ class AuditRecord:
     gate_version: str = ""
 
     def __post_init__(self) -> None:
+        self.arg_keys, self.arg_keys_truncated = _cap_arg_keys(self.arg_keys)
         if self.rule not in _REASON_IS_POLICY_TEXT:
             self.reason = _REDACTED
             # `received` is shape-only everywhere the engine sets it (`resource.<field>`,
             # a detector kind, the caller's role), but it is held to the same rule as
             # the reason rather than trusted to stay that way.
             self.received = _REDACTED if self.received else ""
+        # after the redaction, so a dropped reason is never clipped into something that
+        # looks like half of a real one.
+        self.tool = _cap_text(self.tool, _MAX_NAME_LEN)
+        self.role = _cap_text(self.role, _MAX_NAME_LEN)
+        if self.identity is not None:
+            self.identity = _cap_text(self.identity, _MAX_NAME_LEN)
+        self.field_name = _cap_text(self.field_name, _MAX_NAME_LEN)
+        self.reason = _cap_text(self.reason, _MAX_TEXT_LEN)
+        self.expected = _cap_text(self.expected, _MAX_TEXT_LEN)
+        self.received = _cap_text(self.received, _MAX_TEXT_LEN)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -203,6 +278,12 @@ class InMemoryAuditSink:
         return [e for e in self.entries if e["effect"] == "deny"]
 
 
+# One lock per log file, process-wide. Keyed by resolved path so two sinks pointed at
+# the same file cannot interleave, which a per-instance lock allowed.
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
 def tip_path_for(log: str | Path) -> Path:
     """The sidecar that binds a hash-chained log to its length. See :class:`JSONLAuditSink`."""
     p = Path(log)
@@ -211,6 +292,11 @@ def tip_path_for(log: str | Path) -> Path:
 
 class JSONLAuditSink:
     """Append-only JSONL on the local filesystem. Optionally hash-chained.
+
+    Lines are pure ASCII (``ensure_ascii=True``), so an ordinary
+    ``open(path, encoding="utf-8")`` can read the whole file no matter what text a
+    model put in an argument name; non-ASCII survives as a ``\\uXXXX`` escape that
+    ``json.loads`` turns back into the original string.
 
     With ``hash_chain=True`` each record gains ``seq`` (its 1-based position in this
     file), ``prev`` (the previous record's hash) and ``hash`` (over its own canonical
@@ -245,12 +331,56 @@ class JSONLAuditSink:
     stop believing ``histos audit verify``.
     """
 
-    def __init__(self, path: str | Path, *, hash_chain: bool = True, key: bytes | None = None) -> None:
+    def __init__(
+        self, path: str | Path, *, hash_chain: bool = True, key: bytes | None = None, mode: int = 0o600
+    ) -> None:
         self.path = Path(path)
         self.tip_path = tip_path_for(self.path)
         self.hash_chain = hash_chain
         self._key = key
-        self._lock = threading.Lock()
+        # The highest `seq` this sink has written, and its hash. Deleting the log
+        # together with its sidecar leaves nothing on disk to contradict a fresh chain,
+        # so the next append would start at seq 1 with a correctly-MAC'd tip and
+        # `verify_chain` would report OK — erasure that forges nothing and proves
+        # nothing. Nothing left on disk can close that, but a live process remembers.
+        #
+        # What it does with that memory matters. Raising was the obvious move and the
+        # wrong one: `record()` is called from `Gate._emit`, including on the POST path,
+        # where the tool has already run — so an erasure timed mid-call destroyed a
+        # completed call's result and handed the caller an exception instead. That is
+        # precisely the failure this sink was fixed for one release earlier. So it does
+        # not raise, and it does not lose the record either. It keeps numbering from
+        # where it left off and points `prev` at the hash it remembers, which no line in
+        # the truncated file matches — the break is written into the file itself, and
+        # `verify_chain` and the tip sidecar both report it.
+        #
+        # Cross-restart erasure is a real residual and is documented as one: ship the tip
+        # somewhere the host cannot write.
+        self._high_water = 0
+        self._high_water_hash = ""
+        # Owner-only by default. The trail records `identity` in the clear — that is
+        # what makes it evidence — and the default umask created it 0644, so on any
+        # shared host every local account could read who called what. Applied on
+        # creation only, so an operator who has deliberately widened an existing file,
+        # or pointed the sink at a group-writable collector directory, keeps their
+        # choice. Pass `mode=` to create it differently.
+        self._mode = mode
+
+    def _path_lock(self) -> threading.Lock:
+        """The in-process lock for this log file, shared by every sink writing to it.
+
+        A per-instance lock was the wrong scope on every platform. Two
+        ``JSONLAuditSink`` objects on one path — two Gates in one process, the ordinary
+        way a host separates a strict tool set from a lenient one — held different
+        locks, so on POSIX they were serialised only by ``flock``, and where ``flock``
+        is absent they were not serialised at all: interleaved appends, and a chain
+        that ``histos audit verify`` then calls broken forever.
+
+        Keyed by the resolved path, so two spellings of the same file share it.
+        """
+        key = str(self.path.resolve())
+        with _PATH_LOCKS_GUARD:
+            return _PATH_LOCKS.setdefault(key, threading.Lock())
 
     def _digest(self, body: str) -> str:
         return _chain_digest(body, self._key)
@@ -274,27 +404,80 @@ class JSONLAuditSink:
         payload = json.dumps({"records": seq, "hash": tip, "mac": self._digest(body)})
         # Replaced, never edited in place: a reader that catches the file mid-write
         # must see the previous tip, not half of two.
-        tmp = self.tip_path.with_name(self.tip_path.name + ".new")
-        tmp.write_text(payload + "\n", encoding="utf-8")
-        os.replace(tmp, self.tip_path)
+        #
+        # The temporary name carries pid and thread id because it used to be a fixed
+        # `<log>.tip.new` and was only safe by accident — the `flock` below happens to
+        # serialise POSIX writers. Where that lock is a no-op (Windows, some network
+        # mounts) two writers raced on one path, one `os.replace` consumed the file and
+        # the other raised `FileNotFoundError` out of `Gate._emit`. On the POST path
+        # that lands *after* the tool has run, so the side effect happened, the caller
+        # got an exception instead of the result, and the result was discarded — a
+        # sink taking down the call it exists to record.
+        tmp = self.tip_path.with_name(f"{self.tip_path.name}.{os.getpid()}.{threading.get_ident()}.new")
+        try:
+            # `os.replace` keeps the source's mode, so the scratch file has to be created
+            # owner-only too or the sidecar arrives 0644 however the log was made.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, self._mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload + "\n")
+            os.replace(tmp, self.tip_path)
+        finally:
+            # A crash between write and replace would otherwise leave the scratch file
+            # behind, and one per process-thread pair accumulates.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+
+    def _open_append(self) -> Any:
+        """Open the log for append, creating it owner-only.
+
+        `Path.open` cannot say what mode a file should be *created* with, so this goes
+        through `os.open`. The mode argument is ignored for a file that already exists,
+        which is the behaviour we want: this sets a safe default, it does not enforce a
+        policy on a file the operator already owns.
+        """
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, self._mode)
+        return os.fdopen(fd, "a+b")
 
     def record(self, entry: dict[str, Any]) -> None:
         payload = dict(entry)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, self.path.open("a+b") as fh:
+        with self._path_lock(), self._open_append() as fh:
             if fcntl is not None:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             if self.hash_chain:
                 seq, prev = self._tail(fh)
+                if seq < self._high_water:
+                    # The file went backwards under a running sink. Carry on from what
+                    # this process knows, so the resulting file cannot be read as an
+                    # intact chain by anyone.
+                    seq, prev = self._high_water, self._high_water_hash
                 payload["seq"] = seq + 1
                 payload["prev"] = prev
-                payload["hash"] = self._digest(json.dumps(payload, sort_keys=True, ensure_ascii=False))
-            line = json.dumps(payload, ensure_ascii=False) + "\n"
-            # `surrogatepass` for the same reason as `digest_args`: an argument *key*
-            # can carry a lone surrogate, and a sink that raises deletes the record.
+                payload["hash"] = self._digest(json.dumps(payload, sort_keys=True, ensure_ascii=True))
+            # `sort_keys=True` here as well as in the hashed body above, so the line on
+            # disk and the line verification reconstructs are the same bytes. Without it
+            # `verify_chain` authenticated a *re-serialisation* of the record and not the
+            # file: a rewrite that reordered keys, or respaced the JSON, changed what
+            # every reader and every grep sees while the chain still reported intact.
+            line = json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n"
+            # `surrogatepass` for the same reason as `digest_args`: an argument *key* can
+            # carry a lone surrogate, and a sink that raises deletes the record. But
+            # passing it through is what made the *file* the casualty instead: this used
+            # to serialise with `ensure_ascii=False`, so `{"\ud800evil": 1}` — what every
+            # framework's `json.loads` hands over for a lone-surrogate escape — put raw
+            # ED A0 80 into an append-only log, and `for line in open(path)` then yielded
+            # zero records, not one bad one, because Python decodes a whole 8 KiB buffer
+            # at a time. `ensure_ascii=True` escapes it to \ud800 instead, so the file is
+            # ASCII by construction and stays readable by an ordinary UTF-8 reader while
+            # the record still says exactly what the model sent. Chosen over sanitising
+            # the offending fields because it covers every field at once, including ones
+            # added later, and loses no text. The hashed body above must use the same
+            # setting or the chain would not verify against what is on disk.
             fh.write(line.encode("utf-8", "surrogatepass"))
             fh.flush()
             if self.hash_chain:
+                self._high_water = int(payload["seq"])
+                self._high_water_hash = str(payload["hash"])
                 self._write_tip(payload["seq"], payload["hash"])
 
     def verify(self) -> bool:
@@ -373,8 +556,18 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
                 if seq is None:
                     return False, f"line {lineno}: record carries no `seq` — it predates the numbered chain"
                 return False, f"line {lineno}: record {count} is numbered {seq!r} — records were removed"
-            body = json.dumps(rec, sort_keys=True, ensure_ascii=False)
-            if not hmac.compare_digest(_chain_digest(body, key), str(stored)):
+            # `record` hashes the ASCII serialisation now (see there). Logs written before
+            # that hashed the identical record with `ensure_ascii=False`, and the two
+            # bodies differ the moment any field holds a non-ASCII codepoint — so the old
+            # spelling is accepted as a fallback rather than every pre-existing log
+            # reporting "altered after it was written". Both are faithful serialisations of
+            # the same parsed record, so accepting either forges nothing.
+            body = json.dumps(rec, sort_keys=True, ensure_ascii=True)
+            legacy_body = json.dumps(rec, sort_keys=True, ensure_ascii=False)
+            matched = hmac.compare_digest(_chain_digest(body, key), str(stored)) or (
+                legacy_body != body and hmac.compare_digest(_chain_digest(legacy_body, key), str(stored))
+            )
+            if not matched:
                 return False, f"line {lineno}: hash mismatch — record was altered after it was written"
             prev = str(stored)
 

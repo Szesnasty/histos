@@ -183,11 +183,19 @@ def test_a_version_1_lock_degrades_to_hash_only_reporting_and_names_the_degradat
     assert set(drift.unexplained) == {"shape", "description"}
 
 
-def test_the_committed_demo_lock_written_by_the_previous_format_still_reads():
-    """A published format: an upgrade must not brick a lock file already in a repo."""
-    lock = load_lock(Path(__file__).resolve().parents[1] / "demo/04-mcp-rug-pull/docuvault.policy.lock.json")
+def test_a_lock_written_by_the_previous_format_still_reads(tmp_path):
+    """A published format: an upgrade must not brick a lock file already in a repo.
+
+    Its own fixture, not the demo's committed lock. Borrowing that one tied a
+    back-compat assertion to a live artifact the demo regenerates, so the day a hash
+    legitimately moved, the test that failed was this one — which is about something
+    else entirely, and says nothing about whether v1 still parses.
+    """
+    path = tmp_path / "old.lock.json"
+    path.write_text(json.dumps(V1_LOCK), encoding="utf-8")
+    lock = load_lock(path)
     assert lock.version == 1
-    assert set(lock.tools) == {"export_contacts", "search_documents", "share_document"}
+    assert set(lock.tools) == set(V1_LOCK["tools"])
 
 
 def test_a_version_1_file_carrying_a_reviewed_block_is_refused():
