@@ -1,352 +1,352 @@
 {
- "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and — the part prose kept getting wrong — what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
- "manifest_version": "1",
- "corpus_version": "0.3.0",
- "status": "draft",
- "schema_version": "histos.policy/0.1",
- "artifacts": {
-  "policy_schema": "../spec/policy-0.1.schema.json",
-  "decision_codes": "../spec/decision-codes.json",
-  "human_readable": "README.md",
-  "tool_lock_schema": "../spec/tool-lock-0.1.schema.json",
-  "json_schema_projection": "../spec/json-schema-projection-0.1.md"
- },
- "levels": {
-  "core": {
-   "corpora": [
-    "decisions",
-    "invalid-policy",
-    "projection"
-   ],
-   "requires_yaml_parser": false,
-   "means": "The engine reaches the same verdicts and refuses the same policies. Every fixture is JSON, so this level is runnable in a language with no YAML parser at hand. Includes agreement on how a tool definition projects into a contract, which is what drift detection compares.",
-   "claim": "Not a compatibility claim. A milestone for a port in progress — two engines can pass core and still invalidate each other's approvals."
+  "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and \u2014 the part prose kept getting wrong \u2014 what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
+  "manifest_version": "1",
+  "corpus_version": "0.3.0",
+  "status": "draft",
+  "schema_version": "histos.policy/0.1",
+  "artifacts": {
+    "policy_schema": "../spec/policy-0.1.schema.json",
+    "decision_codes": "../spec/decision-codes.json",
+    "human_readable": "README.md",
+    "tool_lock_schema": "../spec/tool-lock-0.1.schema.json",
+    "json_schema_projection": "../spec/json-schema-projection-0.1.md"
   },
-  "portable": {
-   "corpora": [
-    "decisions",
-    "invalid-policy",
-    "canonicalization",
-    "projection"
-   ],
-   "requires_yaml_parser": true,
-   "means": "core, plus agreement on the canonical content_hash. This is what policy pinning, approvals bound to a policy hash, and 'the same policy is deployed in both services' actually rest on.",
-   "claim": "The only level that may be described as Histos compatible, and it must be stated with the corpus_version it was run against."
+  "levels": {
+    "core": {
+      "corpora": [
+        "decisions",
+        "invalid-policy",
+        "projection"
+      ],
+      "requires_yaml_parser": false,
+      "means": "The engine reaches the same verdicts and refuses the same policies. Every fixture is JSON, so this level is runnable in a language with no YAML parser at hand. Includes agreement on how a tool definition projects into a contract, which is what drift detection compares.",
+      "claim": "Not a compatibility claim. A milestone for a port in progress \u2014 two engines can pass core and still invalidate each other's approvals."
+    },
+    "portable": {
+      "corpora": [
+        "decisions",
+        "invalid-policy",
+        "canonicalization",
+        "projection"
+      ],
+      "requires_yaml_parser": true,
+      "means": "core, plus agreement on the canonical content_hash. This is what policy pinning, approvals bound to a policy hash, and 'the same policy is deployed in both services' actually rest on.",
+      "claim": "The only level that may be described as Histos compatible, and it must be stated with the corpus_version it was run against."
+    }
+  },
+  "passing": {
+    "$comment": "Written down because 'passes the corpus' is exactly the phrase that decays into marketing.",
+    "rules": [
+      "Every case listed for the level must run and reach its expected outcome.",
+      "A skipped case counts as a failure. '47 of 52' is not a partial pass; it is a fail with a number attached.",
+      "Assert the internal code (RUNTIME rule / POLICY code), never the agent-facing public_reason.",
+      "Fixture content is pinned by sha256. A modified fixture is a different corpus, and a claim against it is a claim about something else.",
+      "A claim names the corpus_version it was run against. 'Passes the Histos corpus' with no version is not a claim.",
+      "Extra checks an engine performs are fine. Extra *refusals* on these fixtures are not: they are a divergence, and a stricter engine is still an incompatible one."
+    ]
+  },
+  "corpora": {
+    "decisions": {
+      "question": "Given this policy, principal, resource and call \u2014 what is the verdict?",
+      "fixture": {
+        "input": [
+          "policy",
+          "principal",
+          "resource (optional)",
+          "call"
+        ],
+        "expect": [
+          "effect",
+          "rule",
+          "field (optional)",
+          "bound_args (optional)"
+        ]
+      },
+      "asserts": "The RUNTIME decision code, not the agent-facing public_reason. Two engines that both answer ACTION_NOT_AUTHORIZED for different reasons are not compatible, they are equally quiet.",
+      "needs_yaml_parser": false,
+      "cases": [
+        {
+          "case": "arg-above-maximum-denies",
+          "file": "decisions/arg-above-maximum-denies.json",
+          "sha256": "177a4aee9ae40c3b81787675ad6de244d1e29e35d91c7a8571564765548d9aa2"
+        },
+        {
+          "case": "binding-overrides-a-spoofed-argument",
+          "file": "decisions/binding-overrides-a-spoofed-argument.json",
+          "sha256": "edaa58422e743954b34062cc1e9bbdf1f8b27dffded15630ff7094f0503584c0"
+        },
+        {
+          "case": "binding-without-the-attribute-denies",
+          "file": "decisions/binding-without-the-attribute-denies.json",
+          "sha256": "be5c5bd7e4a3e65faa6a494f38f82ae919fe7a220fc0ccf626c276b4630d5763"
+        },
+        {
+          "case": "canary-in-an-argument-denies",
+          "file": "decisions/canary-in-an-argument-denies.json",
+          "sha256": "f41dc9970183e2481bc115138144b2c59aafdde4e15b0ebb89ac17d33d3b8948"
+        },
+        {
+          "case": "checksum-secret-in-an-argument-denies",
+          "file": "decisions/checksum-secret-in-an-argument-denies.json",
+          "sha256": "9208831e5a8c2dd01f2c4141190f9621a88a55678b2e6074c12eb6b48ef1d06b"
+        },
+        {
+          "case": "confirmation-required",
+          "file": "decisions/confirmation-required.json",
+          "sha256": "6246fbd07984043b726ebb7cff26e302fd17aba05fbcfe742f5e55d00f9b2567"
+        },
+        {
+          "case": "constraint-without-resolver-denies",
+          "file": "decisions/constraint-without-resolver-denies.json",
+          "sha256": "a5bc8a2bdd77c605563fca1ad3be10cadc519921788c6b40c10a544dd816d403"
+        },
+        {
+          "case": "cross-tenant-resource-denies",
+          "file": "decisions/cross-tenant-resource-denies.json",
+          "sha256": "686df81138d309a071c56524bff9afe8fb5c6c944e8333dbf32828bb291024aa"
+        },
+        {
+          "case": "escalate-collapses-before-confirmation",
+          "file": "decisions/escalate-collapses-before-confirmation.json",
+          "sha256": "11cb59f3bfe59eda7b362cc67e5807c046a2849692ce34ab2723659f3b9f9586"
+        },
+        {
+          "case": "escalate-does-not-mask-a-deterministic-denial",
+          "file": "decisions/escalate-does-not-mask-a-deterministic-denial.json",
+          "sha256": "2122f803d2365556f9609f844a4891bbac3aa691a4878b53df1508d5fe333d45"
+        },
+        {
+          "case": "escalate-without-a-tier-denies",
+          "file": "decisions/escalate-without-a-tier-denies.json",
+          "sha256": "f1c9176acb9ce98f35492370a9c8663b1198af23ff00243b6aa4b7707187194a"
+        },
+        {
+          "case": "inherited-grant-allows",
+          "file": "decisions/inherited-grant-allows.json",
+          "sha256": "f36afb7f7dad968e12916b2b2c3534d4e36b3a0e8711992012f8f99cf59e33fa"
+        },
+        {
+          "case": "no-arg-schema-denies",
+          "file": "decisions/no-arg-schema-denies.json",
+          "sha256": "d5f6434c7584e0beb0e0b95961fd23c33b9d9811b02e1041342701e5bb9cdb82"
+        },
+        {
+          "case": "no-principal-denies",
+          "file": "decisions/no-principal-denies.json",
+          "sha256": "21a36560a872c1d7d5f6c4a54cab05c20100c45e2ec3acc7ea93d7c9b42a2263"
+        },
+        {
+          "case": "rbac-grant-allows",
+          "file": "decisions/rbac-grant-allows.json",
+          "sha256": "7f66f67a13639615166abcea6316d1a75fd2252efce73db5387170a5752e5801"
+        },
+        {
+          "case": "rbac-ungranted-role-denies",
+          "file": "decisions/rbac-ungranted-role-denies.json",
+          "sha256": "0c0a4efca493f0ffe42f96d3fab0bd0a6810c3dc7643adc6fd6329d767c4e581"
+        },
+        {
+          "case": "undeclared-arg-denies",
+          "file": "decisions/undeclared-arg-denies.json",
+          "sha256": "05ee90533004772c1f15f2448ea0f5dda8ae25bd60a7195df2af9ffc9e899e27"
+        },
+        {
+          "case": "unknown-tool-denies",
+          "file": "decisions/unknown-tool-denies.json",
+          "sha256": "bed01c133817aac1f403a68badf6d8883853b47257d684d2c901bb0b65e81a8b"
+        }
+      ]
+    },
+    "canonicalization": {
+      "question": "Do these spellings of one policy mean the same thing?",
+      "fixture": {
+        "input": [
+          "documents[] (yaml and/or json)"
+        ],
+        "expect": [
+          "one identical content_hash across every document"
+        ]
+      },
+      "asserts": "That every document in a case hashes to exactly one value. Engines rarely diverge on a verdict; they diverge on whether 1.0 and 1 hash the same, and then approvals bound to a policy hash quietly stop matching between services.",
+      "needs_yaml_parser": true,
+      "cases": [
+        {
+          "case": "defaults-normalize-away",
+          "file": "canonicalization/defaults-normalize-away.json",
+          "sha256": "74b3ae2d32d8444bacdff45be27abf3c0071bbd897bdae9463308f44a77e8dcd"
+        },
+        {
+          "case": "key-order-is-irrelevant",
+          "file": "canonicalization/key-order-is-irrelevant.json",
+          "sha256": "e3307f154e4f0fbdd4a6733b90c4aef9f5aacc22ae0edf40e8e8e5d2cf98acad"
+        },
+        {
+          "case": "metadata-does-not-affect-the-hash",
+          "file": "canonicalization/metadata-does-not-affect-the-hash.json",
+          "sha256": "1be7072a882f3d18cb8e295fd9dccde3cc5ada0d9c77f1e283a763d864bb6213"
+        },
+        {
+          "case": "numeric-spelling-is-irrelevant",
+          "file": "canonicalization/numeric-spelling-is-irrelevant.json",
+          "sha256": "4f00d05569e6510b5a015fa2ae99a79ed97e1bd79d6680e4f9b70afc5f2976a5"
+        },
+        {
+          "case": "owns-sugar-equals-its-expansion",
+          "file": "canonicalization/owns-sugar-equals-its-expansion.json",
+          "sha256": "d064b7b2a7cd5db48df26e2019a6bb98e41f9e6fad69fc55db19377468a99449"
+        },
+        {
+          "case": "requires-does-not-affect-the-hash",
+          "file": "canonicalization/requires-does-not-affect-the-hash.json",
+          "sha256": "3293abcb5b9c739fe47821357e52f5d6a128a8eefe283a4f107a53de4453a39d"
+        },
+        {
+          "case": "yaml-and-json-agree",
+          "file": "canonicalization/yaml-and-json-agree.json",
+          "sha256": "288a1dddfbcb11e253a970e734b021778259d957f445d0e448f03440c3538b13"
+        }
+      ]
+    },
+    "invalid-policy": {
+      "question": "Which policies must be refused, and under which code?",
+      "fixture": {
+        "input": [
+          "document"
+        ],
+        "expect": [
+          "code (POLICY namespace)"
+        ]
+      },
+      "asserts": "That loading raises, and raises with the published POLICY code. A policy an engine only partly understands must be refused, never partly enforced.",
+      "needs_yaml_parser": false,
+      "cases": [
+        {
+          "case": "binding-from-an-argument",
+          "file": "invalid-policy/binding-from-an-argument.json",
+          "sha256": "1db1aefd53de82fc60e77ec71088446b523f0b729978b877ba2fcb70d3146762"
+        },
+        {
+          "case": "binding-with-an-expression",
+          "file": "invalid-policy/binding-with-an-expression.json",
+          "sha256": "ac091930a8997e1322de8e61180b1766703a37e542efb86b4d4eb0cda919d199"
+        },
+        {
+          "case": "grant-as-an-object",
+          "file": "invalid-policy/grant-as-an-object.json",
+          "sha256": "dd0ad28bc262229e8a2d54412f89da02ded579c1e8319d0122863a324add80f1"
+        },
+        {
+          "case": "tools-as-a-list",
+          "file": "invalid-policy/tools-as-a-list.json",
+          "sha256": "2fe3a3dd9e8c77aeeb6d47f65e700a957b2a6794988d3b494a14cdeca3067212"
+        },
+        {
+          "case": "unknown-bundle-section",
+          "file": "invalid-policy/unknown-bundle-section.json",
+          "sha256": "87c541a20dcc023cbb8c52c2172b2eda992200bfa4a619604dabc8aea7b920de"
+        },
+        {
+          "case": "unknown-field-key-typo",
+          "file": "invalid-policy/unknown-field-key-typo.json",
+          "sha256": "6faa2bbaadbc921438eb61ee70154d13708c49e5eabe120f200f4cf6562ef9a0"
+        },
+        {
+          "case": "unknown-resource-key",
+          "file": "invalid-policy/unknown-resource-key.json",
+          "sha256": "205b9dd34a82ba7c6bce76a5dcf1907306592a84e8a5b7e2af7de330fb9d3269"
+        },
+        {
+          "case": "unknown-role-key",
+          "file": "invalid-policy/unknown-role-key.json",
+          "sha256": "3423f015069a1ea27aa98d928f8a97612fc49521b1c824d7853fe52ea21c026f"
+        },
+        {
+          "case": "unknown-tool-key",
+          "file": "invalid-policy/unknown-tool-key.json",
+          "sha256": "edb1f60498142319bad9f64af8ebbcc937971c68bbff951cd313bdcdc8a284fc"
+        },
+        {
+          "case": "unsupported-feature",
+          "file": "invalid-policy/unsupported-feature.json",
+          "sha256": "f59896da754de7f49da3d540077be1cf265f17f4eceaef5318a9d155ad2cb8ff"
+        },
+        {
+          "case": "unsupported-schema-version",
+          "file": "invalid-policy/unsupported-schema-version.json",
+          "sha256": "ee6ecb86723409148dfc1351eba71d06524d316fcd4df6668fbf17dba4064c91"
+        }
+      ]
+    },
+    "projection": {
+      "question": "Given this tool definition, what contract does an import produce, and what are its three lock hashes?",
+      "fixture": {
+        "input": [
+          "kind",
+          "source"
+        ],
+        "expect": [
+          "contract",
+          "schema_sha256",
+          "description_sha256",
+          "contract_sha256"
+        ]
+      },
+      "asserts": "That two implementations import the same tool definition identically. A bridge that drops a keyword still reaches the same verdicts \u2014 it reports drift the reference engine does not, and a drift signal that differs between runtimes is worse than none, because people learn to ignore it.",
+      "needs_yaml_parser": false,
+      "cases": [
+        {
+          "case": "absent-description-is-not-an-empty-one",
+          "file": "projection/absent-description-is-not-an-empty-one.json",
+          "sha256": "020c2d33c3b86a9b3bc2e2b8619ecd544de67d035504115349ef446b3be555a2"
+        },
+        {
+          "case": "argument-surface-is-closed-by-default",
+          "file": "projection/argument-surface-is-closed-by-default.json",
+          "sha256": "db6960231a52f7e83853839b047aa21eec186666a23205477ea063f635918fe1"
+        },
+        {
+          "case": "draft4-boolean-exclusive-minimum-is-ignored",
+          "file": "projection/draft4-boolean-exclusive-minimum-is-ignored.json",
+          "sha256": "0ec6b99cd2572607cc9f0febbf467e4396f292a29e15d2bf3a17bc538d3967de"
+        },
+        {
+          "case": "every-projected-keyword-survives",
+          "file": "projection/every-projected-keyword-survives.json",
+          "sha256": "e95605ec06c9de5584bc65fbefeef33d3e98498a0c2dae4ade6db470d75a34c1"
+        },
+        {
+          "case": "integral-bounds-hash-the-same-whether-written-as-int-or-float",
+          "file": "projection/integral-bounds-hash-the-same-whether-written-as-int-or-float.json",
+          "sha256": "b358737e248d456ff87754875679fe33b83b8fcd963bcb590360f25d91d33219"
+        },
+        {
+          "case": "integral-bounds-written-as-int",
+          "file": "projection/integral-bounds-written-as-int.json",
+          "sha256": "de30b2b2f1f8f0ac64b707679ecb2e66d1d72c7189c6b0172de0dd2faa70f6fe"
+        },
+        {
+          "case": "nullable-type-list-is-optional",
+          "file": "projection/nullable-type-list-is-optional.json",
+          "sha256": "a0cd8d935e671370035bf4a534b1ce03a251ff0766c86557a0987276ad37d6ba"
+        },
+        {
+          "case": "openai-function-projects-like-mcp",
+          "file": "projection/openai-function-projects-like-mcp.json",
+          "sha256": "1831867a2566403fe1117ab2cbc2320b7a66853918566f03adcdd6ab915be89b"
+        },
+        {
+          "case": "unprojected-keywords-do-not-move-the-contract-hash",
+          "file": "projection/unprojected-keywords-do-not-move-the-contract-hash.json",
+          "sha256": "03588e98fd9e223b2de6d6f1d3fa1cfc6b02f0a86bb0bcb34b3833cbf040b654"
+        }
+      ]
+    }
+  },
+  "totals": {
+    "decisions": 18,
+    "canonicalization": 7,
+    "invalid-policy": 11,
+    "projection": 9,
+    "all": 45
   }
- },
- "passing": {
-  "$comment": "Written down because 'passes the corpus' is exactly the phrase that decays into marketing.",
-  "rules": [
-   "Every case listed for the level must run and reach its expected outcome.",
-   "A skipped case counts as a failure. '47 of 52' is not a partial pass; it is a fail with a number attached.",
-   "Assert the internal code (RUNTIME rule / POLICY code), never the agent-facing public_reason.",
-   "Fixture content is pinned by sha256. A modified fixture is a different corpus, and a claim against it is a claim about something else.",
-   "A claim names the corpus_version it was run against. 'Passes the Histos corpus' with no version is not a claim.",
-   "Extra checks an engine performs are fine. Extra *refusals* on these fixtures are not: they are a divergence, and a stricter engine is still an incompatible one."
-  ]
- },
- "corpora": {
-  "decisions": {
-   "question": "Given this policy, principal, resource and call — what is the verdict?",
-   "fixture": {
-    "input": [
-     "policy",
-     "principal",
-     "resource (optional)",
-     "call"
-    ],
-    "expect": [
-     "effect",
-     "rule",
-     "field (optional)",
-     "bound_args (optional)"
-    ]
-   },
-   "asserts": "The RUNTIME decision code, not the agent-facing public_reason. Two engines that both answer ACTION_NOT_AUTHORIZED for different reasons are not compatible, they are equally quiet.",
-   "needs_yaml_parser": false,
-   "cases": [
-    {
-     "case": "arg-above-maximum-denies",
-     "file": "decisions/arg-above-maximum-denies.json",
-     "sha256": "177a4aee9ae40c3b81787675ad6de244d1e29e35d91c7a8571564765548d9aa2"
-    },
-    {
-     "case": "binding-overrides-a-spoofed-argument",
-     "file": "decisions/binding-overrides-a-spoofed-argument.json",
-     "sha256": "edaa58422e743954b34062cc1e9bbdf1f8b27dffded15630ff7094f0503584c0"
-    },
-    {
-     "case": "binding-without-the-attribute-denies",
-     "file": "decisions/binding-without-the-attribute-denies.json",
-     "sha256": "be5c5bd7e4a3e65faa6a494f38f82ae919fe7a220fc0ccf626c276b4630d5763"
-    },
-    {
-     "case": "canary-in-an-argument-denies",
-     "file": "decisions/canary-in-an-argument-denies.json",
-     "sha256": "f41dc9970183e2481bc115138144b2c59aafdde4e15b0ebb89ac17d33d3b8948"
-    },
-    {
-     "case": "checksum-secret-in-an-argument-denies",
-     "file": "decisions/checksum-secret-in-an-argument-denies.json",
-     "sha256": "9208831e5a8c2dd01f2c4141190f9621a88a55678b2e6074c12eb6b48ef1d06b"
-    },
-    {
-     "case": "confirmation-required",
-     "file": "decisions/confirmation-required.json",
-     "sha256": "6246fbd07984043b726ebb7cff26e302fd17aba05fbcfe742f5e55d00f9b2567"
-    },
-    {
-     "case": "constraint-without-resolver-denies",
-     "file": "decisions/constraint-without-resolver-denies.json",
-     "sha256": "a5bc8a2bdd77c605563fca1ad3be10cadc519921788c6b40c10a544dd816d403"
-    },
-    {
-     "case": "cross-tenant-resource-denies",
-     "file": "decisions/cross-tenant-resource-denies.json",
-     "sha256": "686df81138d309a071c56524bff9afe8fb5c6c944e8333dbf32828bb291024aa"
-    },
-    {
-     "case": "escalate-collapses-before-confirmation",
-     "file": "decisions/escalate-collapses-before-confirmation.json",
-     "sha256": "11cb59f3bfe59eda7b362cc67e5807c046a2849692ce34ab2723659f3b9f9586"
-    },
-    {
-     "case": "escalate-does-not-mask-a-deterministic-denial",
-     "file": "decisions/escalate-does-not-mask-a-deterministic-denial.json",
-     "sha256": "2122f803d2365556f9609f844a4891bbac3aa691a4878b53df1508d5fe333d45"
-    },
-    {
-     "case": "escalate-without-a-tier-denies",
-     "file": "decisions/escalate-without-a-tier-denies.json",
-     "sha256": "f1c9176acb9ce98f35492370a9c8663b1198af23ff00243b6aa4b7707187194a"
-    },
-    {
-     "case": "inherited-grant-allows",
-     "file": "decisions/inherited-grant-allows.json",
-     "sha256": "f36afb7f7dad968e12916b2b2c3534d4e36b3a0e8711992012f8f99cf59e33fa"
-    },
-    {
-     "case": "no-arg-schema-denies",
-     "file": "decisions/no-arg-schema-denies.json",
-     "sha256": "d5f6434c7584e0beb0e0b95961fd23c33b9d9811b02e1041342701e5bb9cdb82"
-    },
-    {
-     "case": "no-principal-denies",
-     "file": "decisions/no-principal-denies.json",
-     "sha256": "21a36560a872c1d7d5f6c4a54cab05c20100c45e2ec3acc7ea93d7c9b42a2263"
-    },
-    {
-     "case": "rbac-grant-allows",
-     "file": "decisions/rbac-grant-allows.json",
-     "sha256": "7f66f67a13639615166abcea6316d1a75fd2252efce73db5387170a5752e5801"
-    },
-    {
-     "case": "rbac-ungranted-role-denies",
-     "file": "decisions/rbac-ungranted-role-denies.json",
-     "sha256": "0c0a4efca493f0ffe42f96d3fab0bd0a6810c3dc7643adc6fd6329d767c4e581"
-    },
-    {
-     "case": "undeclared-arg-denies",
-     "file": "decisions/undeclared-arg-denies.json",
-     "sha256": "05ee90533004772c1f15f2448ea0f5dda8ae25bd60a7195df2af9ffc9e899e27"
-    },
-    {
-     "case": "unknown-tool-denies",
-     "file": "decisions/unknown-tool-denies.json",
-     "sha256": "bed01c133817aac1f403a68badf6d8883853b47257d684d2c901bb0b65e81a8b"
-    }
-   ]
-  },
-  "canonicalization": {
-   "question": "Do these spellings of one policy mean the same thing?",
-   "fixture": {
-    "input": [
-     "documents[] (yaml and/or json)"
-    ],
-    "expect": [
-     "one identical content_hash across every document"
-    ]
-   },
-   "asserts": "That every document in a case hashes to exactly one value. Engines rarely diverge on a verdict; they diverge on whether 1.0 and 1 hash the same, and then approvals bound to a policy hash quietly stop matching between services.",
-   "needs_yaml_parser": true,
-   "cases": [
-    {
-     "case": "defaults-normalize-away",
-     "file": "canonicalization/defaults-normalize-away.json",
-     "sha256": "74b3ae2d32d8444bacdff45be27abf3c0071bbd897bdae9463308f44a77e8dcd"
-    },
-    {
-     "case": "key-order-is-irrelevant",
-     "file": "canonicalization/key-order-is-irrelevant.json",
-     "sha256": "e3307f154e4f0fbdd4a6733b90c4aef9f5aacc22ae0edf40e8e8e5d2cf98acad"
-    },
-    {
-     "case": "metadata-does-not-affect-the-hash",
-     "file": "canonicalization/metadata-does-not-affect-the-hash.json",
-     "sha256": "1be7072a882f3d18cb8e295fd9dccde3cc5ada0d9c77f1e283a763d864bb6213"
-    },
-    {
-     "case": "numeric-spelling-is-irrelevant",
-     "file": "canonicalization/numeric-spelling-is-irrelevant.json",
-     "sha256": "4f00d05569e6510b5a015fa2ae99a79ed97e1bd79d6680e4f9b70afc5f2976a5"
-    },
-    {
-     "case": "owns-sugar-equals-its-expansion",
-     "file": "canonicalization/owns-sugar-equals-its-expansion.json",
-     "sha256": "d064b7b2a7cd5db48df26e2019a6bb98e41f9e6fad69fc55db19377468a99449"
-    },
-    {
-     "case": "requires-does-not-affect-the-hash",
-     "file": "canonicalization/requires-does-not-affect-the-hash.json",
-     "sha256": "3293abcb5b9c739fe47821357e52f5d6a128a8eefe283a4f107a53de4453a39d"
-    },
-    {
-     "case": "yaml-and-json-agree",
-     "file": "canonicalization/yaml-and-json-agree.json",
-     "sha256": "288a1dddfbcb11e253a970e734b021778259d957f445d0e448f03440c3538b13"
-    }
-   ]
-  },
-  "invalid-policy": {
-   "question": "Which policies must be refused, and under which code?",
-   "fixture": {
-    "input": [
-     "document"
-    ],
-    "expect": [
-     "code (POLICY namespace)"
-    ]
-   },
-   "asserts": "That loading raises, and raises with the published POLICY code. A policy an engine only partly understands must be refused, never partly enforced.",
-   "needs_yaml_parser": false,
-   "cases": [
-    {
-     "case": "binding-from-an-argument",
-     "file": "invalid-policy/binding-from-an-argument.json",
-     "sha256": "1db1aefd53de82fc60e77ec71088446b523f0b729978b877ba2fcb70d3146762"
-    },
-    {
-     "case": "binding-with-an-expression",
-     "file": "invalid-policy/binding-with-an-expression.json",
-     "sha256": "ac091930a8997e1322de8e61180b1766703a37e542efb86b4d4eb0cda919d199"
-    },
-    {
-     "case": "grant-as-an-object",
-     "file": "invalid-policy/grant-as-an-object.json",
-     "sha256": "dd0ad28bc262229e8a2d54412f89da02ded579c1e8319d0122863a324add80f1"
-    },
-    {
-     "case": "tools-as-a-list",
-     "file": "invalid-policy/tools-as-a-list.json",
-     "sha256": "2fe3a3dd9e8c77aeeb6d47f65e700a957b2a6794988d3b494a14cdeca3067212"
-    },
-    {
-     "case": "unknown-bundle-section",
-     "file": "invalid-policy/unknown-bundle-section.json",
-     "sha256": "87c541a20dcc023cbb8c52c2172b2eda992200bfa4a619604dabc8aea7b920de"
-    },
-    {
-     "case": "unknown-field-key-typo",
-     "file": "invalid-policy/unknown-field-key-typo.json",
-     "sha256": "6faa2bbaadbc921438eb61ee70154d13708c49e5eabe120f200f4cf6562ef9a0"
-    },
-    {
-     "case": "unknown-resource-key",
-     "file": "invalid-policy/unknown-resource-key.json",
-     "sha256": "205b9dd34a82ba7c6bce76a5dcf1907306592a84e8a5b7e2af7de330fb9d3269"
-    },
-    {
-     "case": "unknown-role-key",
-     "file": "invalid-policy/unknown-role-key.json",
-     "sha256": "3423f015069a1ea27aa98d928f8a97612fc49521b1c824d7853fe52ea21c026f"
-    },
-    {
-     "case": "unknown-tool-key",
-     "file": "invalid-policy/unknown-tool-key.json",
-     "sha256": "edb1f60498142319bad9f64af8ebbcc937971c68bbff951cd313bdcdc8a284fc"
-    },
-    {
-     "case": "unsupported-feature",
-     "file": "invalid-policy/unsupported-feature.json",
-     "sha256": "f59896da754de7f49da3d540077be1cf265f17f4eceaef5318a9d155ad2cb8ff"
-    },
-    {
-     "case": "unsupported-schema-version",
-     "file": "invalid-policy/unsupported-schema-version.json",
-     "sha256": "ee6ecb86723409148dfc1351eba71d06524d316fcd4df6668fbf17dba4064c91"
-    }
-   ]
-  },
-  "projection": {
-   "question": "Given this tool definition, what contract does an import produce, and what are its three lock hashes?",
-   "fixture": {
-    "input": [
-     "kind",
-     "source"
-    ],
-    "expect": [
-     "contract",
-     "schema_sha256",
-     "description_sha256",
-     "contract_sha256"
-    ]
-   },
-   "asserts": "That two implementations import the same tool definition identically. A bridge that drops a keyword still reaches the same verdicts — it reports drift the reference engine does not, and a drift signal that differs between runtimes is worse than none, because people learn to ignore it.",
-   "needs_yaml_parser": false,
-   "cases": [
-    {
-     "case": "absent-description-is-not-an-empty-one",
-     "file": "projection/absent-description-is-not-an-empty-one.json",
-     "sha256": "d6210b32c2d1fdf9a10758758e5434bc100d92cc74d71f5ecf8b60625c93d9ed"
-    },
-    {
-     "case": "argument-surface-is-closed-by-default",
-     "file": "projection/argument-surface-is-closed-by-default.json",
-     "sha256": "5da96119d785fa19fbee7506b2f661ec418aa85907cb26b35eae4a37ba90913e"
-    },
-    {
-     "case": "draft4-boolean-exclusive-minimum-is-ignored",
-     "file": "projection/draft4-boolean-exclusive-minimum-is-ignored.json",
-     "sha256": "f8e41e6f548e0e4e962c62c3dc1f5e084df6f563d88e192df701c40e58f02ffb"
-    },
-    {
-     "case": "every-projected-keyword-survives",
-     "file": "projection/every-projected-keyword-survives.json",
-     "sha256": "1a4edc664d8aab5c3a4082400cc57bb71c9d9b5c86eae40c9a8c22713486c21d"
-    },
-    {
-     "case": "integral-bounds-hash-the-same-whether-written-as-int-or-float",
-     "file": "projection/integral-bounds-hash-the-same-whether-written-as-int-or-float.json",
-     "sha256": "eaa07959b59c4450f5f1eae62c0123ca1859ec406ba1c764fe4453a53c1448aa"
-    },
-    {
-     "case": "integral-bounds-written-as-int",
-     "file": "projection/integral-bounds-written-as-int.json",
-     "sha256": "3fe4eb7e587cc445b463b4e6cf8da7ef056e4e6bbd870f7a2cc694775ea6d8e3"
-    },
-    {
-     "case": "nullable-type-list-is-optional",
-     "file": "projection/nullable-type-list-is-optional.json",
-     "sha256": "9f5c8341d65a9757887913967f74a2605dbbf0ff606d77df93af0fdba2b17501"
-    },
-    {
-     "case": "openai-function-projects-like-mcp",
-     "file": "projection/openai-function-projects-like-mcp.json",
-     "sha256": "ecb99d6609639dc0eae387907d755d654fbae0cbd02a475aad7b90ec3ef7defd"
-    },
-    {
-     "case": "unprojected-keywords-do-not-move-the-contract-hash",
-     "file": "projection/unprojected-keywords-do-not-move-the-contract-hash.json",
-     "sha256": "854c42c8c01e90425ece91c47ea6fc84a1441e79143b27a7fb67a27eb2ded9ec"
-    }
-   ]
-  }
- },
- "totals": {
-  "decisions": 18,
-  "canonicalization": 7,
-  "invalid-policy": 11,
-  "projection": 9,
-  "all": 45
- }
 }

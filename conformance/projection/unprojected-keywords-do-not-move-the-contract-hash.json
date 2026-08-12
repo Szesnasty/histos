@@ -1,5 +1,5 @@
 {
-  "$comment": "format/default/title/examples are outside the table, so they must not reach the contract. They DO reach schema_sha256 — that is the point of keeping the two apart.",
+  "$comment": "format/default/title/examples are outside the table, so they must not reach the contract. They DO reach schema_sha256 \u2014 that is the point of keeping the two apart.",
   "kind": "mcp",
   "source": {
     "tools": [
@@ -40,6 +40,7 @@
             "min_length": null,
             "pattern": null,
             "sensitive": null,
+            "nullable": false,
             "item_type": null,
             "minimum": null,
             "maximum": null,
@@ -51,8 +52,8 @@
       },
       "returns": null
     },
-    "schema_sha256": "sha256:e3164763cc65522787617c665cf1ccd025da8271d35685d8758f51d2708e6a6d",
+    "schema_sha256": "sha256:b5b0a728a3ff382a70b11c52ec992b80742bf18b7fd3725de237bd04c91f569d",
     "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
-    "contract_sha256": "sha256:34b5c8873d047abf9f8e6bc2785469e63537380246e89e8399224873451ea2a0"
+    "contract_sha256": "sha256:bac64e0e453bc6b88b9aab7b36eee2df8db98cab97fc1208b83d0d47db6d197b"
   }
 }

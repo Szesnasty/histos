@@ -75,7 +75,7 @@ from histos import Principal, use_principal
 
 principal = Principal(
     role="refund_officer",              # a policy role — see mapping, below
-    identity=claims["oid"],             # for the audit trail
+    identity=claims["oid"],             # the audit trail — and the limit partition key
     attributes={"tenant_id": claims["tid"]},   # trusted values policy may compare
     can_view=frozenset({"pii"}),        # which sensitivity classes may reach this caller
 )
@@ -89,8 +89,17 @@ with use_principal(principal):
   principal.tenant_id}` and every `principal_attr` condition resolve from here, and
   **only** from here. A missing attribute is a DENY (`arg_binding_unresolved`), never
   an injected `None`.
-- **`identity`** is not used for decisions. It is what makes an audit record answer
-  *who*.
+- **`identity`** is what makes an audit record answer *who* — and it **is** read by
+  two decisions, which this document used to deny. `rate_limit` and `budget` are
+  counted per `(identity, tool)` and by nothing else: two principals sharing an
+  identity share one allowance, a caller whose identity changes gets a fresh one, and
+  an unset `identity` puts every such caller in a single shared `<anonymous>` bucket —
+  on a multi-tenant server that is one tenant's traffic exhausting another's budget,
+  reported as a `budget` denial that names the wrong cause. An out-of-band approval is
+  bound to it too, so a grant issued for one identity cannot be consumed by another.
+  Make it **stable and unique per caller**, and set it wherever a tool declares a
+  limit. It is still not consulted by RBAC, by a constraint or by a binding: those read
+  `role` and `attributes`.
 - **`can_view`** gates the sensitivity classes a caller may see in returns.
 
 Note what is *not* reachable: `role` cannot be referenced from a policy at all.
@@ -261,4 +270,6 @@ Before an agent handles anything that matters:
 - [ ] Every `resource_resolver` reads the datastore, never the arguments.
 - [ ] The backend still authorizes in the user's context. Histos is the second lock,
       not the only one.
-- [ ] `identity` is a stable identifier, so the audit trail stays meaningful.
+- [ ] `identity` is a stable identifier and unique per caller — the audit trail depends
+      on the first, and `rate_limit` / `budget` partition on it, so a missing or shared
+      one is a shared allowance.

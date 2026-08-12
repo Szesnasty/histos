@@ -214,6 +214,24 @@
       "effect": "deny | redact",
       "phase": "post",
       "meaning": "The tool's output did not match its declared return schema. Under strict returns this is handled per on_violation, because name-based redaction cannot protect a secret in an undeclared field."
+    },
+    {
+      "code": "confirm_suspended",
+      "effect": "require_confirmation",
+      "phase": "pre",
+      "meaning": "The host's confirm callback signalled that the run is parked awaiting an out-of-band approval, by raising one of the types passed as confirm_suspends. Not a denial and not an allow: no decision has been made yet and the tool has not run. Recorded so the trail shows that a human was asked; an engine that lets a suspension leave without a record cannot show that."
+    },
+    {
+      "code": "unnameable_args",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The call passed positional arguments to a tool whose parameters cannot be named — it takes *args, or exposes no introspectable signature — so the argument schema, the trusted bindings and the audit trail have nothing to attach to. A tool with an ordinary signature is bound by name and never reaches this. An engine that instead validates positional arguments by position is not compatible: a policy names its fields."
+    },
+    {
+      "code": "uninspectable_output",
+      "effect": "deny",
+      "phase": "post",
+      "meaning": "The tool returned, or raised an error carrying, a value whose payload is behind an iteration the post chain never performs — a generator, a coroutine, an iterator, a view, or any other non-string iterable that is not a container the post chain walks — at the top level or nested inside one that is. Distinct from output_schema, which means the output WAS read and did not match: here nothing read it, so every output control would report allow on content it never saw. The tool has already run by then, so the denial stops the unscanned payload reaching the model; it does not undo the call. An engine that instead allows such a value is not compatible."
     }
   ],
   "policy_codes": {
