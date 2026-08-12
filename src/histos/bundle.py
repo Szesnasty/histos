@@ -555,7 +555,13 @@ def parse_yaml_bundle(text: str) -> dict[str, Any]:
     """Strictly parse a YAML bundle into a dict. Requires the optional ``[yaml]`` extra."""
     yaml, loader = _strict_yaml_loader()
     try:
-        data = yaml.load(text, Loader=loader)  # noqa: S506 — StrictLoader derives from SafeLoader
+        # Suppressed for both tools, because S506 and B506 are the same rule in ruff and
+        # in bandit and both read `yaml.load(..., Loader=)` as unsafe on sight. `loader`
+        # is `StrictLoader`, built above as a `yaml.SafeLoader` subclass that overrides
+        # `construct_mapping` to reject duplicate keys and swaps YAML 1.1's bool resolver
+        # for the JSON one. It registers no constructor, so no tag can instantiate an
+        # object. `yaml.safe_load` takes no loader, which is why this is not that call.
+        data = yaml.load(text, Loader=loader)  # noqa: S506  # nosec B506
     except PolicyError:
         raise
     except yaml.YAMLError as exc:

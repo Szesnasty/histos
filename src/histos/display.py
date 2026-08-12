@@ -26,10 +26,19 @@ MAX_DISPLAY_CHARS = 400
 # Everything that steers how a line of text *reads* without being visible in it:
 # C0/C1 controls, the bidi overrides and isolates (U+202A-U+202E, U+2066-U+2069), the
 # zero-width and word-joiner set, and the BOM.
+#
+# Spelled as escapes, never as the characters themselves. Writing the class literally
+# is what this file used to do, and it made the one module whose job is to neutralise
+# Trojan Source a module *containing* U+202E: every reviewer reading it on a forge saw
+# a reordered line, and every supply-chain scanner a downstream user runs flagged the
+# dependency -- `bandit -B613` among them. A rule about invisible characters has to be
+# legible in the source that states it.
 _UNSAFE_TEXT = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f"      # C0 and C1 controls
-    "؜​-‏ -‮"   # bidi marks, overrides, line/paragraph separators
-    "⁠-⁤⁦-⁯﻿]"  # word joiners, bidi isolates, zero-width no-break space
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f"  # C0 and C1 controls
+    "\u061c\u200b-\u200f"  # Arabic letter mark; the zero-width set; LRM and RLM
+    "\u2028-\u202e"  # line and paragraph separators; bidi embeddings and overrides
+    "\u2060-\u2064\u2066-\u206f"  # word joiner, invisible operators, bidi isolates
+    "\ufeff]"  # zero-width no-break space, i.e. a stray BOM
 )
 
 
