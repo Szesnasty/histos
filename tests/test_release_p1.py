@@ -508,9 +508,7 @@ def test_a_refused_value_the_gate_does_not_own_is_not_closed():
     def tool() -> Page:
         return Page()
 
-    policy = Policy(
-        tools={"t": ToolContract(name="t", args=Schema({}))}, permissions={"ok": frozenset({"t"})}
-    )
+    policy = Policy(tools={"t": ToolContract(name="t", args=Schema({}))}, permissions={"ok": frozenset({"t"})})
     with use_principal(Principal(role="ok", identity="i")), pytest.raises(GateDenied):
         gate(tool, policy=policy, name="t")()
     assert Page.closed is False

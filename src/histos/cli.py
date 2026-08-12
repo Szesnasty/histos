@@ -178,8 +178,9 @@ def _update_policy(policy_path: str, sources: list[ToolSource], *, locator: str,
 
     merged_policy = dataclasses.replace(policy, tools=tools)
     Path(policy_path).write_text(json.dumps(dump_bundle(merged_policy), indent=2, ensure_ascii=False) + "\n")
-    print(f"updated args/returns for {len(updated)} tool(s) → {policy_path}: "
-          f"{', '.join(safe_text(t) for t in updated)}")
+    print(
+        f"updated args/returns for {len(updated)} tool(s) → {policy_path}: {', '.join(safe_text(t) for t in updated)}"
+    )
     print("review the diff — git is what approves this change.")
     _report_lock_written(_write_lock(sources, policy_path=policy_path, locator=locator))
     return 0
@@ -259,8 +260,10 @@ def _read_chain_key(args: argparse.Namespace) -> bytes | None:
     if env:
         return bytes.fromhex(env.strip())
     if args.key:
-        print("warning: --key exposes the secret in `ps` and shell history; prefer --key-file or "
-              "HISTOS_AUDIT_KEY", file=sys.stderr)
+        print(
+            "warning: --key exposes the secret in `ps` and shell history; prefer --key-file or HISTOS_AUDIT_KEY",
+            file=sys.stderr,
+        )
         return bytes.fromhex(args.key)
     return None
 

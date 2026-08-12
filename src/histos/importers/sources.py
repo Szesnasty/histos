@@ -147,7 +147,7 @@ class ToolSource:
 # and something a human types into `histos explain`. The source picks it, and the source
 # is the untrusted party here.
 _UNUSABLE_IN_A_NAME = re.compile(
-    "[\x00-\x1f\x7f-\x9f"            # C0 and C1 controls — \r rewrites a printed line
+    "[\x00-\x1f\x7f-\x9f"  # C0 and C1 controls — \r rewrites a printed line
     "\u061c\u200b-\u200f\u2028-\u202e"  # bidi marks and overrides, line/paragraph separators
     "\u2060-\u2064\u2066-\u206f\ufeff]"  # word joiners, bidi isolates, BOM
 )
@@ -167,9 +167,7 @@ def _reject_unusable_name(name: str) -> None:
         # `{"name": 7}` reached the regex and came back as an uncaught TypeError, which
         # skipped the per-tool skip and took the whole manifest with it — the failure
         # mode that machinery exists to prevent, reached through the type system.
-        raise PolicyError(
-            f"a tool name must be a string, got {type(name).__name__}", code="invalid_import"
-        )
+        raise PolicyError(f"a tool name must be a string, got {type(name).__name__}", code="invalid_import")
     if not name:
         raise PolicyError("a tool with an empty name cannot be a policy key", code="invalid_import")
     found = _UNUSABLE_IN_A_NAME.search(name)

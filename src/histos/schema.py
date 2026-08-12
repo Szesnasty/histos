@@ -478,12 +478,7 @@ def _backtracking_risk(
             # valid split whatever it contains (`(?:,\d+)*`, `(?:[^/]+/)*`). Between
             # them they account for semver, slugs, comma lists, hostnames, IPv6, ISO-8601
             # durations and Windows paths — every one measured under a millisecond.
-            ambiguous = (
-                variable_repeat
-                and _unbounded(av)
-                and not _anchored_body(av[2])
-                and not _terminated_body(av[2])
-            )
+            ambiguous = variable_repeat and _unbounded(av) and not _anchored_body(av[2]) and not _terminated_body(av[2])
             risk = _backtracking_risk(av[2], in_repeat=in_repeat or ambiguous, at_tail=False)
         elif op is _re_const.BRANCH:
             if in_repeat:

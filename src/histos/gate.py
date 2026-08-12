@@ -599,9 +599,7 @@ def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]
     if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in signature.parameters.values()):
         return None
 
-    var_keyword = next(
-        (p.name for p in signature.parameters.values() if p.kind is inspect.Parameter.VAR_KEYWORD), None
-    )
+    var_keyword = next((p.name for p in signature.parameters.values() if p.kind is inspect.Parameter.VAR_KEYWORD), None)
     positional_only = any(p.kind is inspect.Parameter.POSITIONAL_ONLY for p in signature.parameters.values())
 
     def bind(*args: Any, **kwargs: Any) -> dict[str, Any]:

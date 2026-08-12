@@ -129,19 +129,12 @@ def infer_schema(func: Callable[..., Any]) -> Schema:
         required = param.default is inspect.Parameter.empty and not optional
 
         enum_vals: tuple[Any, ...] | None = None
-        if (
-            isinstance(ann, type)
-            and issubclass(ann, enum.Enum)
-            and not issubclass(ann, enum.Flag)
-            and ftype != "any"
-        ):
+        if isinstance(ann, type) and issubclass(ann, enum.Enum) and not issubclass(ann, enum.Flag) and ftype != "any":
             # Dropped along with the type when the members disagree: listing values the
             # declared type cannot hold is the contradiction `_enum_type` exists to avoid.
             enum_vals = tuple(e.value for e in ann)
 
-        fields[pname] = Field(
-            type=ftype, required=required, item_type=item_type, enum=enum_vals, nullable=optional
-        )
+        fields[pname] = Field(type=ftype, required=required, item_type=item_type, enum=enum_vals, nullable=optional)
 
     return Schema(fields, allow_extra=allow_extra)
 
