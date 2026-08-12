@@ -56,7 +56,7 @@ does, and it holds whether or not anyone noticed the attack.
 
 ## Run it both ways and see for yourself
 
-[`demo/`](demo/) has five of them — a LangChain clinic receptionist, a LangGraph
+[`demo/`](https://github.com/Szesnasty/histos/tree/v0.1.0/demo) has five of them — a LangChain clinic receptionist, a LangGraph
 invoice workflow, a **framework-free** on-call triage loop, a real **MCP** server that
 changes under you, and a mediation harness with no model at all. Each agent runs
 **twice**: once as first written, once behind a policy. Same model, same prompt, same
@@ -102,7 +102,7 @@ for an SMS and the poisoned note is a polite service request: there is nothing t
 clever about. So a deterministic bound is worth least against attacks a frontier model
 would have caught anyway, and most against the ones that never look wrong — and nobody
 gets to know in advance which kind arrives next. The protected column is 0 under both
-models. Full per-demo numbers: [`demo/README.md`](demo/README.md).
+models. Full per-demo numbers: [`demo/README.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/demo/README.md).
 
 The headline number survived making the baseline fair, but almost none of the *rows*
 did. Cross-patient reads and the mass cancellation are closed by ordinary session
@@ -114,9 +114,12 @@ email anyway, every single run. What a deterministic bound is left doing is narr
 than the old table claimed and easier to defend — **where the money goes, who gets told
 it went there, and what an agent may do to production while nobody is watching.**
 
+The demos are not part of the installed package — they need a clone of the
+repository, and each brings its own environment:
+
 ```bash
-cd demo/01-physio-clinic
-python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt -e ../..
+git clone https://github.com/Szesnasty/histos && cd histos/demo/01-physio-clinic
+python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt -e "../..[yaml]"
 ollama pull qwen2.5:7b
 
 .venv/bin/python run.py attacks                      # all four, both wirings
@@ -133,7 +136,7 @@ Two of the five need no model at all and finish in about a second —
 and one that cannot be closed in CPython, and prints both)
 and `demo/04-mcp-rug-pull` (a vendor changes a tool after you approved it). Full
 write-ups, including the mistakes that cost the most to find, are in
-[`demo/README.md`](demo/README.md).
+[`demo/README.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/demo/README.md).
 
 ## Detection is a different question
 
@@ -165,7 +168,11 @@ it. Adding meaning never weakens the gate, and not having it never opens one.
   contract before the tool runs; unexpected args are rejected.
 - **Resource-aware authorization** — Cedar-style `principal / action / resource`
   rules, e.g. *"delete_invoice only if `resource.tenant_id == principal.tenant_id`"*.
-- **Rate & budget limits** — per principal, per tool.
+- **Rate & budget limits** — per `principal.identity`, per tool. Identity is the
+  partition key and nothing else is, so two callers sharing an identity share an
+  allowance, and callers with no identity set share one `<anonymous>` bucket —
+  see [`docs/identity.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/identity.md).
+  The counters are per process; four workers hold four sets of them.
 - **Canary tokens** — a planted secret is caught if an agent tries to send it
   (pre-gate) or a tool leaks it (post-gate), whether it appears verbatim or after a
   fixed normalization: spaced out, separator-swapped, zero-width-padded, case-shifted.
@@ -178,12 +185,20 @@ it. Adding meaning never weakens the gate, and not having it never opens one.
 Everything is **deterministic** and **fail-closed**. The gate never asks *why* the
 model decided to act.
 
+**A gated tool must return a materialised value.** The outbound half can only inspect
+something it can read, so a return whose payload is behind an iteration — a generator,
+a `map`, an un-awaited coroutine, a `deque`, a `dict.values()` view, an object that is
+only iterable — is refused with `uninspectable_output`, wherever it sits in the result.
+`return (row for row in cursor)` is the idiom that trips it; `return [dict(r) for r in
+cursor]` is the fix, and the denial message says so. Refusing is the honest option:
+scanning an iterator without draining it reports `allow` on content nothing looked at.
+The limit worth knowing is that the tool has already run by then — the refusal stops
+the unscanned payload reaching the model, it does not undo the call.
+
 ## Install
 
-**Not on PyPI yet.** Until it is:
-
 ```bash
-pip install "histos[yaml] @ git+https://github.com/Szesnasty/histos"
+pip install "histos[yaml]"
 ```
 
 The core has **zero runtime dependencies**. The `[yaml]` extra adds PyYAML, and is
@@ -215,7 +230,7 @@ with use_principal(Principal(role="viewer")):
     safe_delete(user_id=42)          # raises GateDenied  [rbac]
 ```
 
-Or keep the policy in a file — see [`examples/security.policy.yaml`](examples/security.policy.yaml)
+Or keep the policy in a file — see [`examples/security.policy.yaml`](https://github.com/Szesnasty/histos/blob/v0.1.0/examples/security.policy.yaml)
 for a fully commented one:
 
 ```python
@@ -230,7 +245,8 @@ print(guarded.review.render())   # ✓ ready / ⚠ review / ✕ cannot be gated
 Nothing is silently left ungated: a tool with no contract or no grant is still wrapped
 and **denies by default**, and the coverage report names it.
 
-Run the full demo (no infra needed):
+Run the full demo (no infra needed). `examples/` is in the source distribution and
+the repository, not in the wheel, so run these from a clone or an unpacked sdist:
 
 ```bash
 python examples/quickstart.py
@@ -278,16 +294,20 @@ replacement for authorization in your backend.** If a tool calls a downstream
 system with an admin token, the gate becomes your only line of defense — run
 downstream calls with least privilege and in the user's context anyway.
 
-Where the guarantee stops is written down in full: [`SECURITY.md`](SECURITY.md) is
+Where the guarantee stops is written down in full: [`SECURITY.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/SECURITY.md) is
 the most useful file in this repository. How to bind an identity the gate can trust —
 and the five ways to get it wrong that all compile and run — is
-[`docs/identity.md`](docs/identity.md).
+[`docs/identity.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/identity.md).
 
 ## Modes
 
 - `mode="enforce"` (default) — block and redact.
 - `mode="observe"` — record what it *would* do, block nothing. A dry-run for
-  development and calibration before you turn on enforcement.
+  development and calibration before you turn on enforcement. It protects nothing:
+  it does not block a call with no principal bound, does not redact, and does not
+  withhold a canary or a secret. The one thing it still changes is `bind`, which
+  overwrites bound arguments before the tool runs — so observe is a dry run of the
+  *decisions*, not a transparent replay of the call.
 
 Observe records are unmistakable, so watching is never confused with protecting:
 a denial that still ran is written as `effect=deny enforced=false executed=true`.
@@ -374,7 +394,7 @@ and calling it a false alarm is how people learn to ignore the signal.
 `--update` refreshes `args` and `returns` only. Roles, `resource`, `bind`,
 `confirmation`, `output` and limits are the half no schema can supply, and they are
 left exactly as written. Details and the rejected designs:
-[`docs/tool-contracts.md`](docs/tool-contracts.md).
+[`docs/tool-contracts.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/tool-contracts.md).
 
 ## The policy is the product; this package is its reference implementation
 
@@ -382,14 +402,14 @@ The policy is a **portable artifact**, not a config file for this library. The s
 `security.policy.yaml` is meant to hold in Python today and in other runtimes later,
 so the contract is not the API — it is:
 
-- [`spec/`](spec/) — the [policy format](docs/policy-format-draft-0.1.md)
+- [`spec/`](https://github.com/Szesnasty/histos/tree/v0.1.0/spec) — the [policy format](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/policy-format-draft-0.1.md)
   (`schema_version: histos.policy/0.1`), the decision vocabulary, canonicalization.
-- [`conformance/`](conformance/) — language-neutral fixtures defining what *"the same
-  policy behaves the same way"* means, with [`manifest.json`](conformance/manifest.json)
+- [`conformance/`](https://github.com/Szesnasty/histos/tree/v0.1.0/conformance) — language-neutral fixtures defining what *"the same
+  policy behaves the same way"* means, with [`manifest.json`](https://github.com/Szesnasty/histos/blob/v0.1.0/conformance/manifest.json)
   pinning the case list and what *passing* is allowed to mean. The reference engine runs
   them in its own test suite, so a Python change that breaks the contract fails here and
   now rather than in a future port, much later.
-- [`policies/`](policies/) — five real policies from one tool to a whole MCP server,
+- [`policies/`](https://github.com/Szesnasty/histos/tree/v0.1.0/policies) — five real policies from one tool to a whole MCP server,
   each in **YAML and JSON**, each hashing identically across both spellings. Read these
   to learn the format; read the spec to implement it.
 
@@ -406,14 +426,14 @@ implementation detail, and why conformance has a level that covers it.
 | | | status |
 |---|---|---|
 | **Histos Policy Format** | the portable artifact — schema, decision codes, canonicalization | **Draft 0.1, implemented** |
-| **Histos Python** | this repository — the reference engine | **works; not yet on PyPI** |
+| **Histos Python** | this repository — the reference engine | **works; released, 0.1.0** |
 | **Histos MCP** | policy generation and enforcement at the MCP server boundary | planned |
 | **Histos JS** | a second, conformance-compatible implementation | after the adoption gate |
 | **Histos Control Plane** | fleet coverage, policy lifecycle, approval workflow, audit retention | commercial |
 
 **Only the first two exist.** The rest are named so the shape is legible, not to
 suggest they ship — the order, and the adoption gate that governs it, are in
-[`docs/roadmap.md`](docs/roadmap.md). Nothing past the gate starts until 5–10 external
+[`docs/roadmap.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/roadmap.md). Nothing past the gate starts until 5–10 external
 teams protect a real agent and are still running it weeks later.
 
 ## Open core, with the line written down
@@ -424,23 +444,23 @@ teams protect a real agent and are still running it weeks later.
 Every deterministic check is Apache-2.0, permanently — including distributed
 enforcement. There is no paid tier that makes a single deployment safer. The exact
 line, why it runs there, and how to decide for a capability that does not exist yet:
-[`docs/open-core-boundary.md`](docs/open-core-boundary.md). It is a commitment, not a
+[`docs/open-core-boundary.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/open-core-boundary.md). It is a commitment, not a
 marketing page — if a release contradicts it, that is a bug in the release.
 
 ## Docs
 
 | | |
 |---|---|
-| [`SECURITY.md`](SECURITY.md) | the guarantee, and exactly where it stops |
-| [`docs/identity.md`](docs/identity.md) | binding a trusted `Principal`, and the five ways it fails |
-| [`docs/design.md`](docs/design.md) | what it decides, and what the guarantee rests on |
-| [`policies/`](policies/) | seven worked policies, YAML and JSON, with the format explained |
-| [`docs/policy-reference.md`](docs/policy-reference.md) | every key, what it does, what it defaults to |
-| [`docs/policy-format-draft-0.1.md`](docs/policy-format-draft-0.1.md) | the format, and the six decisions behind it |
-| [`docs/tool-contracts.md`](docs/tool-contracts.md) | where tool shapes come from, and how drift is caught |
-| [`conformance/manifest.json`](conformance/manifest.json) | the case list, and what "passes the corpus" may mean |
-| [`docs/open-core-boundary.md`](docs/open-core-boundary.md) | the open/closed line |
-| [`docs/roadmap.md`](docs/roadmap.md) | order, not schedule — and the adoption gate |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | the bar for a change to a security library |
+| [`SECURITY.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/SECURITY.md) | the guarantee, and exactly where it stops |
+| [`docs/identity.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/identity.md) | binding a trusted `Principal`, and the five ways it fails |
+| [`docs/design.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/design.md) | what it decides, and what the guarantee rests on |
+| [`policies/`](https://github.com/Szesnasty/histos/tree/v0.1.0/policies) | seven worked policies, YAML and JSON, with the format explained |
+| [`docs/policy-reference.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/policy-reference.md) | every key, what it does, what it defaults to |
+| [`docs/policy-format-draft-0.1.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/policy-format-draft-0.1.md) | the format, and the six decisions behind it |
+| [`docs/tool-contracts.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/tool-contracts.md) | where tool shapes come from, and how drift is caught |
+| [`conformance/manifest.json`](https://github.com/Szesnasty/histos/blob/v0.1.0/conformance/manifest.json) | the case list, and what "passes the corpus" may mean |
+| [`docs/open-core-boundary.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/open-core-boundary.md) | the open/closed line |
+| [`docs/roadmap.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/roadmap.md) | order, not schedule — and the adoption gate |
+| [`CONTRIBUTING.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/CONTRIBUTING.md) | the bar for a change to a security library |
 
 Requires Python ≥3.12. Apache-2.0.

@@ -8,6 +8,74 @@ between minor versions — every such change is listed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-08-12
+
+### Changed — behaviour, before anything is published
+
+An adversarial pre-release review found these, and each is a change of behaviour
+rather than a bug fix. None of it is a compatibility break for anyone, because
+nothing is on PyPI yet — which is exactly why they land now rather than in 0.2.
+
+- **`contract_sha256` and `schema_sha256` move.** `nullable` is now part of the
+  hashed argument shape (a field that accepts `null` accepts something a field that
+  does not accept `null` refuses, so it belongs in the hash), and the recorded
+  source shape now covers the whole tool object: for MCP everything beside the two
+  schemas — `title`, `annotations`, `_meta` — and for OpenAPI the `servers` the call
+  actually goes to. A vendor could previously rewrite any of those after review and
+  `histos drift` reported clean. **Every lock file must be regenerated with
+  `histos import`.** The conformance corpus and the MCP demo's lock are regenerated
+  in this release.
+- **A positional call is bound by name instead of refused.** Gated tools were
+  silently keyword-only. `*args`, and a callable exposing no signature, are still
+  refused — now as an audited `unnameable_args` denial rather than an unrecorded
+  `PolicyError`.
+- **`confirm` must return exactly `True` to approve.** Any other truthy value —
+  a response object, an approval record, the string `"denied"` — is now a
+  `confirm_error` denial.
+- **`principal=` is gone.** Use `use_principal()` per request, or `fixed_principal=`.
+  The deprecation warning it used to emit was filtered by default outside `__main__`,
+  so the misconfiguration it warned about was silent in every real host.
+- **`ApprovalStore(policy)` takes its policy positionally and required.** Built
+  without one it could not see `confirmation.expires_in`, so a declared window
+  silently did not exist.
+- **`use_principal()` refuses to open inside a generator.** A generator has no
+  context of its own, so the binding leaked into the caller and interleaved streams
+  could run as each other.
+- **`Gate.wrap()` refuses a callable that is already gated**, and `protect()` refuses
+  two tools sharing one `__name__`, or a lambda.
+- **A Gate's ruleset is read-only.** `gate.policy.permissions[role] |= {...}` took
+  effect immediately while every audit record kept naming the hash from before the
+  edit. Swap the whole policy with `gate.policy = ...`, which re-hashes.
+- **`histos review` exits 1 on a structural issue**, matching `histos validate`, and
+  prints its warnings rather than counting them.
+- **The importer refuses more, and drops less.** An unknown JSON Schema `type`, a
+  near-miss `x-sensitive` marker, and a tool name carrying a terminal control
+  character are all refused rather than silently degraded.
+- **The PAN detector requires an issuer prefix** as well as a Luhn-clean run, so
+  IMEIs and ordinary Luhn-clean reference numbers are no longer redacted as cards.
+
+### Added
+
+- `histos --version`.
+- `audit_key=` on the `gate()` and `protect()` one-liners, so a stable
+  `args_digest` no longer requires constructing a `Gate` by hand.
+- `nullable` on `Field`, inferred from `T | None` and from `anyOf: [T, null]`.
+- `GateConfirmationRequired.request` and `.fingerprint` — the arguments an approval
+  will actually cover, which a host holding only its own arguments cannot derive
+  when the tool has a `bind`.
+- `uninspectable_output`, `unnameable_args` and `confirm_suspended` decision codes.
+
+The engine as first extracted into its own repository: RBAC with role
+inheritance, argument-schema validation, resource-aware (Cedar-style) constraints
+with IDOR-block-by-default, trusted argument binding, rate/budget limits,
+out-of-band single-use confirmation, canary detection, structured secret
+detectors, output projection and redaction, hash-chained audit,
+`observe`/`enforce` modes, shape importers (MCP / OpenAPI / JSON Schema / Python
+signature), policy review, the `histos` CLI, and LangChain / LangGraph
+adapters. Zero runtime dependencies.
+
 ### Fixed — security
 
 - **The gate no longer publishes a route to the ungated tool.** `functools.wraps`
@@ -184,15 +252,5 @@ between minor versions — every such change is listed here.
   test counts that had drifted across four documents are gone, and `tech-debt.md`
   now distinguishes debt that lives *here* from debt that left with the extraction.
 
-## [0.1.0] — unreleased
-
-The engine as first extracted into its own repository: RBAC with role
-inheritance, argument-schema validation, resource-aware (Cedar-style) constraints
-with IDOR-block-by-default, trusted argument binding, rate/budget limits,
-out-of-band single-use confirmation, canary detection, structured secret
-detectors, output projection and redaction, hash-chained audit,
-`observe`/`enforce` modes, shape importers (MCP / OpenAPI / JSON Schema / Python
-signature), policy review, the `histos` CLI, and LangChain / LangGraph
-adapters. Zero runtime dependencies.
-
-Not yet released to PyPI — see `docs/roadmap.md` for what gates that.
+[Unreleased]: https://github.com/Szesnasty/histos/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Szesnasty/histos/releases/tag/v0.1.0
