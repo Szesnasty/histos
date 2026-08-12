@@ -99,6 +99,16 @@ PolicySource = Policy | str | Path | dict[str, Any] | None
 # The trusted, request-scoped identity. Set by the host, never by the agent.
 _current_principal: ContextVar[Principal | None] = ContextVar("histos_principal", default=None)
 
+# The open `use_principal` scopes, as `(id(instance), token)` pairs, innermost last.
+# In the Context rather than on the instance, because that is where a `Token` is valid:
+# one may only be reset where it was created, so a stack held on a shared instance let
+# two tasks pop each other's tokens and leave both bindings live. A tuple, not a list,
+# so `set()` on it is a rebinding the Context owns and not a mutation every Context that
+# inherited it can see.
+_scope_tokens: ContextVar[tuple[tuple[int, Token[Principal | None]], ...]] = ContextVar(
+    "histos_scope_tokens", default=()
+)
+
 
 def set_principal(principal: Principal) -> Token[Principal | None]:
     """Bind the current trusted principal; returns a token for :func:`reset_principal`.
@@ -199,25 +209,36 @@ class use_principal:  # noqa: N801 — it is spelled and used as a function
     ``contextlib``'s own generator machinery that index is a guess.
     """
 
-    __slots__ = ("_principal", "_tokens")
+    __slots__ = ("_principal",)
 
     def __init__(self, principal: Principal) -> None:
         self._principal = principal
-        # A stack, not a slot. One instance entered twice — `scope = use_principal(p)`
-        # reused across two `with` blocks, or re-entered — overwrote the outer token
-        # with the inner one, so the inner exit reset the inner binding and the outer
-        # exit had nothing left to reset. The identity then outlived both blocks.
-        self._tokens: list[Token[Principal | None]] = []
 
     def __enter__(self) -> None:
         _refuse_a_leaking_frame(sys._getframe(1))
-        self._tokens.append(_current_principal.set(self._principal))
+        token = _current_principal.set(self._principal)
+        _scope_tokens.set((*_scope_tokens.get(), (id(self), token)))
         return None
 
     def __exit__(self, *_exc: object) -> None:
-        if not self._tokens:
-            return
-        token = self._tokens.pop()
+        # The most recent entry *this Context* holds for *this instance*. A plain list on
+        # the instance was the first attempt: it made a reused `scope = use_principal(p)`
+        # work, and then broke worse than what it fixed. A `Token` may only be reset in
+        # the Context that created it, so two tasks or two threads sharing one instance
+        # pushed onto one LIFO list and, on any interleaving that was not perfectly
+        # nested, each popped the other's token. contextvars refused it, both scopes
+        # raised, and *neither* binding was ever reset — so on a pooled worker the
+        # identity stayed live and every later task that landed there, with no principal
+        # bound at all, executed gated write tools as the leaked one. Measured: four
+        # unauthenticated tasks deleting four records as an admin.
+        stack = _scope_tokens.get()
+        for index in range(len(stack) - 1, -1, -1):
+            if stack[index][0] == id(self):
+                token = stack[index][1]
+                _scope_tokens.set(stack[:index] + stack[index + 1 :])
+                break
+        else:
+            return  # entered in another Context, which holds its own token and its own reset
         try:
             _current_principal.reset(token)
         except ValueError as exc:

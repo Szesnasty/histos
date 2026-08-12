@@ -604,3 +604,57 @@ def test_a_gate_owned_policy_can_still_be_pickled_and_copied():
     assert copy.deepcopy(owned).content_hash() == owned.content_hash()
     with pytest.raises(TypeError):
         owned.tools["x"] = None  # type: ignore[index]
+
+
+def test_one_use_principal_instance_shared_across_tasks_does_not_leak_an_identity():
+    """The token stack lived on the instance, and a `Token` may only be reset in the
+    Context that created it. Two tasks sharing one `scope = use_principal(p)` pushed
+    onto the same LIFO list and, on any interleaving that was not perfectly nested, each
+    popped the other's token. Both scopes raised and *neither* binding was reset — so on
+    a pooled worker the identity stayed live, and every later task landing there with no
+    principal bound at all executed gated write tools as the leaked one."""
+    import asyncio
+
+    from histos.gate import _current_principal
+
+    admin = Principal(role="ok", identity="admin")
+    scope = use_principal(admin)
+    ran: list[str] = []
+
+    def tool(x: str) -> str:
+        ran.append(x)
+        return x
+
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({"x": Field(type="string")}), access="write")},
+        permissions={"ok": frozenset({"t"})},
+    )
+    safe = gate(tool, policy=policy, name="t")
+
+    async def scoped(tag: str, hold: float) -> str:
+        try:
+            with scope:
+                await asyncio.sleep(hold)
+                safe(x=tag)
+            return "ok"
+        except PolicyError:
+            return "PolicyError"
+
+    async def unauthenticated(tag: str) -> str:
+        try:
+            safe(x=tag)
+            return "ALLOWED"
+        except GateDenied as exc:
+            return exc.decision.rule
+
+    async def main() -> tuple[list[str], list[str]]:
+        # Deliberately not nested: A opens first and closes last.
+        scoped_results = await asyncio.gather(scoped("u1", 0.02), scoped("u2", 0.001))
+        later = await asyncio.gather(*(unauthenticated(f"victim{n}") for n in range(4)))
+        return list(scoped_results), list(later)
+
+    scoped_results, later = asyncio.run(main())
+    assert scoped_results == ["ok", "ok"], "a shared instance broke its own scopes"
+    assert later == ["no_principal"] * 4, f"an identity leaked onto later tasks: {later}"
+    assert ran == ["u2", "u1"], f"the wrong tool bodies ran: {ran}"
+    assert _current_principal.get() is None
