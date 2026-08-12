@@ -69,6 +69,13 @@ nothing is on PyPI yet — which is exactly why they land now rather than in 0.2
 ### Added
 
 - `histos --version`.
+- `JSONLAuditSink.rotated()` — tell a sink its log was rotated deliberately, so
+  the next chain starts clean. Rotation and erasure are indistinguishable on disk,
+  so this is an explicit call rather than something inferred from the file: it is
+  the one signal an attacker rewriting files cannot produce. SECURITY.md used to
+  offer "rotate the `.tip` sidecar with the log", which did nothing.
+- `JSONLAuditSink.failed` — records this sink could not write, counted rather than
+  raised. See the `Fixed` entry below.
 - `audit_key=` on the `gate()` and `protect()` one-liners, so a stable
   `args_digest` no longer requires constructing a `Gate` by hand.
 - `nullable` on `Field`, inferred from `T | None` and from `anyOf: [T, null]`.

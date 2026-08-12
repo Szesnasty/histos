@@ -930,3 +930,90 @@ def test_redaction_growing_the_output_past_the_budget_is_not_scanned_as_a_prefix
     assert decision.effect is Effect.REDACT
     assert "output:redacted_all" in decision.redactions
     assert token not in repr(out)
+
+
+def test_a_partial_write_does_not_cost_the_whole_log(tmp_path, monkeypatch):
+    """`write` + `flush` is not failure-atomic. When the volume filled mid-line the
+    accepted bytes stayed in an append-only file with no newline, and every later append
+    landed on that same physical line — so one transient quota event cost not one record
+    but the log, permanently: `verify_chain` said "not valid JSON" there and never
+    recovered."""
+    log = tmp_path / "a.jsonl"
+    sink = JSONLAuditSink(log, key=b"k" * 32)
+    for n in range(3):
+        sink.record({"effect": "allow", "rule": "allow", "n": n})
+    assert verify_chain(log, key=b"k" * 32)[0]
+
+    class TearsOnce:
+        """A handle that accepts half of one big write and then reports ENOSPC."""
+
+        def __init__(self, real):
+            self._real = real
+            self._torn = False
+
+        def write(self, data):
+            if not self._torn and len(data) > 40:
+                self._torn = True
+                self._real.write(data[: len(data) // 2])
+                self._real.flush()
+                raise OSError(27, "File too large")
+            return self._real.write(data)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._real.__exit__(*exc)
+
+    real_open = JSONLAuditSink._open_append
+    monkeypatch.setattr(JSONLAuditSink, "_open_append", lambda self: TearsOnce(real_open(self)))
+    with pytest.warns(RuntimeWarning, match="could not be written"):
+        sink.record({"effect": "deny", "rule": "rbac", "identity": "mallory"})
+    monkeypatch.undo()
+
+    assert log.read_bytes().endswith(b"\n"), "a torn line was left behind"
+    assert verify_chain(log, key=b"k" * 32)[0], "the log did not survive the failed write"
+    sink.record({"effect": "allow", "rule": "allow", "n": "after"})
+    ok, detail = verify_chain(log, key=b"k" * 32)
+    assert ok, detail
+
+
+def test_rotation_has_a_remedy_that_actually_works(tmp_path):
+    """SECURITY.md offered "rotate the `.tip` sidecar with the log" as a remedy and it
+    did nothing: the high-water memory is keyed by path and outlives both files, so a
+    correctly rotated log stayed broken forever. Deciding on the inode instead would
+    have fixed it by handing the erasure back — `rm` leaves a fresh inode exactly as
+    `mv` does. An explicit call is the one signal an attacker rewriting files cannot
+    produce."""
+    log = tmp_path / "a.jsonl"
+    key = b"k" * 32
+    sink = JSONLAuditSink(log, key=key)
+    for n in range(3):
+        sink.record({"effect": "allow", "rule": "allow", "n": n})
+
+    os.rename(log, tmp_path / "a.jsonl.1")
+    os.rename(sink.tip_path, tmp_path / "a.jsonl.1.tip")
+    sink.rotated()
+    sink.record({"effect": "allow", "rule": "allow", "n": "fresh"})
+
+    ok, detail = verify_chain(log, key=key)
+    assert ok, detail
+
+
+def test_erasure_without_that_declaration_is_still_caught(tmp_path):
+    """The other half of the same property: `rotated()` must be the *only* way to clear
+    the memory, or it is not a defence."""
+    log = tmp_path / "a.jsonl"
+    key = b"k" * 32
+    sink = JSONLAuditSink(log, key=key)
+    for n in range(3):
+        sink.record({"effect": "allow", "rule": "allow", "n": n})
+    log.unlink()
+    sink.tip_path.unlink()
+    sink.record({"effect": "allow", "rule": "allow", "n": "after erasure"})
+
+    ok, _ = verify_chain(log, key=key)
+    assert not ok, "an erased log restarted a clean chain"

@@ -507,8 +507,17 @@ class JSONLAuditSink:
                 # at the same path, so the inode cannot tell them apart either. Flagging
                 # is the direction to be wrong in: a rotated log reporting a broken chain
                 # costs an operator an explanation they already have, and a missed
-                # erasure costs the evidence. Rotate the `.tip` with the log, or point the
-                # sink at the new path, and the chain starts clean. SECURITY.md says so.
+                # erasure costs the evidence.
+                #
+                # Which is why the remedy is `rotated()` and not something the file system
+                # can be made to say. The docs used to offer "rotate the `.tip` sidecar
+                # with the log" as the first of two remedies, and it simply did not work:
+                # this memory is keyed by path and outlives both files, so a correctly
+                # rotated log stayed broken forever. Making the inode decide would have
+                # fixed that by handing the erasure back — `rm` produces a fresh inode
+                # just as rotation does, which is the whole point of the paragraph above.
+                # An explicit in-process call is the one signal an attacker rewriting
+                # files on disk cannot produce.
                 if seq < high_seq:
                     seq, prev = high_seq, high_hash
                 payload["seq"] = seq + 1
@@ -533,11 +542,49 @@ class JSONLAuditSink:
             # the offending fields because it covers every field at once, including ones
             # added later, and loses no text. The hashed body above must use the same
             # setting or the chain would not verify against what is on disk.
-            fh.write(line.encode("utf-8", "surrogatepass"))
-            fh.flush()
+            # All or nothing. `write` + `flush` is not failure-atomic: when the volume
+            # fills mid-line the bytes already accepted stay in an append-only file with
+            # no trailing newline, and every later append lands on that same physical
+            # line. So one transient quota event did not cost one record — it cost the
+            # log, permanently: `verify_chain` reported "not valid JSON" at that line and
+            # never recovered, because each subsequent record was glued onto the torn one
+            # and swallowed with it. Truncating back to where the line started leaves the
+            # file exactly as it was, and the record is lost the ordinary way, through
+            # `failed` and the gap the chain already reports.
+            start = os.fstat(fh.fileno()).st_size
+            try:
+                fh.write(line.encode("utf-8", "surrogatepass"))
+                fh.flush()
+            except BaseException:
+                with contextlib.suppress(OSError, ValueError):
+                    os.ftruncate(fh.fileno(), start)
+                raise
             if self.hash_chain:
                 _PATH_HIGH_WATER[key] = (int(payload["seq"]), str(payload["hash"]), inode)
                 self._write_tip(payload["seq"], payload["hash"])
+
+    def rotated(self) -> None:
+        """Declare that this log was rotated deliberately, so the next chain starts clean.
+
+        A sink remembers the highest ``seq`` it has written to a path, because that
+        memory is the only thing left that contradicts a log erased together with its
+        tip sidecar. Ordinary rotation is indistinguishable from that erasure on disk —
+        `rm` and `mv` both leave a fresh inode at the same path — so a rotated log
+        reports a broken chain, which is the safe direction to be wrong in but leaves
+        the operator no way to say "that was me".
+
+        This is that way, and it is a method rather than an inference precisely because
+        an attacker rewriting files cannot call it: the signal comes from inside the
+        process that owns the sink. Call it after the rotation, before the next call
+        that will be recorded::
+
+            os.rename(log, log.with_suffix(".jsonl.1"))
+            os.rename(sink.tip_path, ...)
+            sink.rotated()
+
+        Pointing a new sink at the new path needs nothing — that path has no history.
+        """
+        _PATH_HIGH_WATER.pop(str(self.path.resolve()), None)
 
     def verify(self) -> bool:
         """Re-walk the file and confirm the hash chain is intact."""
