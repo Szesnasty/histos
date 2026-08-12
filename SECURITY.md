@@ -418,8 +418,11 @@ than starting over, so `verify` reports it. **Ordinary log rotation reads as exa
 that**, and deliberately: `rm` and `mv` both leave a fresh inode at the same path, so
 nothing inside the process can separate erasure from rotation. A rotated log reporting
 a broken chain costs an operator an explanation they already have; a missed erasure
-costs the evidence. Rotate the `<log>.tip` sidecar with the log, or point the sink at
-the new path, and the next chain starts clean. Across a restart there is no memory at
+costs the evidence. After rotating, call `sink.rotated()` — or point a new sink at the
+new path, which has no history — and the next chain starts clean. It is an explicit
+call rather than something inferred from the file, because every on-disk signal that
+would distinguish rotation from erasure is one an attacker can produce too; a call from
+inside the process that owns the sink is not. Across a restart there is no memory at
 all — ship the tip somewhere the host cannot write if that matters.
 
 **Concurrency.** `JSONLAuditSink.record` is atomic within a process (a `threading.Lock`)
