@@ -367,7 +367,11 @@ def cmd_rules(_: argparse.Namespace) -> int:
             try:
                 dispatch[tool](**args)
             except Exception as exc:  # noqa: BLE001 - the verdict is the point, not the type
-                reason = str(exc).replace("gate denied ", "")
+                # `decision.reason`, not `str(exc)`: the exception message now carries
+                # the remedy too, which is right for a developer reading a traceback and
+                # wrong for a one-line-per-rule table that would truncate mid-sentence.
+                decision = getattr(exc, "decision", None)
+                reason = f"[{decision.rule}]: {decision.reason}" if decision else str(exc)
                 verdict = f"{RED}denied{OFF}  {DIM}{reason[:100]}{OFF}"
             else:
                 verdict = f"{GREEN}allowed{OFF}"

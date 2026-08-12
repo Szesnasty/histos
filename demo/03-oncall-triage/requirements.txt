@@ -1,9 +1,16 @@
-# Nothing. That is the point of this demo — no framework, no SDK, no HTTP client.
-# The loop is `urllib` and the standard library.
+# No framework, no SDK, no HTTP client. That is the point of this demo — the loop is
+# `urllib` and the standard library.
 #
-# The one thing you do need is histos itself, and it is not on PyPI yet, so it is
-# installed from this checkout rather than named here:
+# The one thing you need is histos, and it is installed from this checkout rather than
+# named here so the demo runs against the code you are reading:
 #
-#     python3.13 -m venv .venv && .venv/bin/pip install -e ../..
+#     python3.13 -m venv .venv && .venv/bin/pip install -e "../..[yaml]"
+#
+# The `[yaml]` is load-bearing and used to be missing. `security.policy.yaml` is a YAML
+# bundle, and YAML is an optional extra of histos itself — the stdlib parses JSON and
+# nothing else. Without the extra, every subcommand here died on
+# `ImportError: YAML bundles need PyYAML` at the first policy load, which made the
+# documented setup for the framework-free demo the one setup that could not run it.
+# PyYAML is still not a dependency of the agent: it is a dependency of the policy file.
 #
 # `pip install -r requirements.txt` on this file is a no-op, deliberately.

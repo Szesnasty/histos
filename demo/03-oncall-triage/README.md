@@ -14,7 +14,7 @@ tool schemas and `temperature: 0`, and every trajectory below came out of the mo
 There is no canned transcript anywhere in this directory.
 
 ```bash
-python3.13 -m venv .venv && .venv/bin/pip install -e ../..   # histos only
+python3.13 -m venv .venv && .venv/bin/pip install -e "../..[yaml]"   # histos only
 ollama pull qwen2.5:7b
 
 .venv/bin/python run.py alerts             # the feed and the platform
