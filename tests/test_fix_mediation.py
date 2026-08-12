@@ -200,10 +200,30 @@ def test_assigning_a_new_policy_is_enforced_not_ignored() -> None:
 
 def test_a_gate_does_not_rewrite_the_caller_s_policy() -> None:
     """`protect()` used to mutate a shared Policy, flipping authorization elsewhere."""
+
+    def undeclared(note: str) -> None:  # an undeclared tool forces inference
+        return None
+
     shared = _policy()
     before = shared.content_hash()
-    protect([transfer, lambda **kw: None], policy=shared)  # noqa: E731 — an undeclared tool forces inference
+    protect([transfer, undeclared], policy=shared)
     assert shared.content_hash() == before, "protect() mutated the caller's policy in place"
+
+
+def test_protect_refuses_a_lambda_rather_than_keying_a_policy_on_its_name() -> None:
+    with pytest.raises(PolicyError, match="lambda"):
+        protect([lambda **kw: None], policy=_policy())  # noqa: E731 — the point is the name
+
+
+def test_protect_refuses_two_tools_that_answer_to_one_name() -> None:
+    def make() -> object:
+        def delete(target: str) -> None:
+            return None
+
+        return delete
+
+    with pytest.raises(PolicyError, match="two tools named"):
+        protect([make(), make()], policy=_policy())
 
 
 def test_async_reach_around_does_not_execute_either() -> None:

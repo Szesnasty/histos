@@ -8,10 +8,16 @@ the agent controls) lets an injected agent self-approve a destructive action.
 :class:`ApprovalStore` is the safe primitive:
 
 * the gate raises ``GateConfirmationRequired`` on an unconfirmed high-risk call;
-* a **trusted host** — never the agent — calls :meth:`grant` out-of-band with the
-  request's :func:`request_fingerprint` (the host knows the tool/args/principal it
-  attempted), e.g. after a human clicks approve;
+* a **trusted host** — never the agent — calls :meth:`grant` out-of-band with
+  ``exc.fingerprint``, e.g. after a human clicks approve;
 * the agent retries the **same** call and the gate consumes the approval.
+
+Take the fingerprint off the exception, not from the arguments you sent. A ``bind``
+overwrites its fields with the principal's trusted attribute *before* the request is
+fingerprinted, so for any tool that has one, the arguments the host passed and the
+arguments the approval covers are different — and a fingerprint built from the former
+matches nothing, which shows up as a call that pauses forever with a grant sitting in
+the store. ``exc.request.args`` is the spelling that ran.
 
 Approvals are **single-use** and **bound to the exact (tool, args, principal)** —
 role, identity, trusted attributes and ``can_view``, all of it — so one cannot be
@@ -75,11 +81,15 @@ class ApprovalStore:
     seconds after it was granted, which is what an operator writing a 15-minute window
     on a production deploy has always been told they were getting.
 
-    Built without a policy the store cannot see the declared window and keeps a grant
-    until it is consumed or revoked. Pass the policy.
+    The policy is required, and the default that made it optional is gone. A store
+    built without one cannot see ``confirmation.expires_in`` at all, so a fifteen-minute
+    window written on a production deploy simply did not exist — the grant stayed usable
+    until something consumed it — and nothing said so at any point: not at construction,
+    not at grant, not at consume. ``ApprovalStore(None)`` still works for the case where
+    there genuinely is no window to enforce, but it has to be written down.
     """
 
-    def __init__(self, policy: Policy | None = None, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, policy: Policy | None, *, clock: Callable[[], float] = time.monotonic) -> None:
         # Monotonic, not wall-clock: an NTP step backwards must not extend a window.
         self._clock = clock
         self._policy = policy

@@ -9,15 +9,13 @@ those adapters share, and it is fully testable without any framework installed.
 
 from __future__ import annotations
 
-import contextlib
-import functools
 import inspect
 from collections.abc import Callable
 from typing import Any
 
 from histos.contracts import GateDecision, Principal
 from histos.errors import GateConfirmationRequired, GateDenied, PolicyError
-from histos.gate import Gate
+from histos.gate import Gate, _adopt_metadata
 
 ON_DENIED = ("message", "raise")
 
@@ -65,7 +63,6 @@ def guard_callable(
 
     if inspect.iscoroutinefunction(guarded):
 
-        @functools.wraps(fn)
         async def safe(*args: Any, **kwargs: Any) -> Any:
             try:
                 return await guarded(*args, **kwargs)
@@ -76,8 +73,7 @@ def guard_callable(
 
     else:
 
-        @functools.wraps(fn)  # type: ignore[no-redef]
-        def safe(*args: Any, **kwargs: Any) -> Any:
+        def safe(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef,misc]
             try:
                 return guarded(*args, **kwargs)
             except (GateDenied, GateConfirmationRequired) as exc:
@@ -85,22 +81,16 @@ def guard_callable(
                     raise
                 return denial_message(exc.decision)
 
-    # `functools.wraps` publishes `__wrapped__ = fn` — a public attribute pointing
-    # straight at the *ungated* callable. On an ordinary decorator that is a
-    # convenience; on a security wrapper it is a hole, and a mediation hunt found it
-    # reachable as `tool.func.__wrapped__(...)`. Worse, `_unwrap_target` in this same
-    # library follows `__wrapped__` chains, so wrapping an already-guarded callable
-    # would have quietly stripped the guard.
-    #
-    # The metadata `functools.wraps` copied is worth keeping — frameworks read
-    # `__name__` and `__doc__`, and LangChain infers an argument schema from the
-    # signature when none is supplied. So the signature is pinned explicitly and only
-    # the pointer is removed.
-    with contextlib.suppress(TypeError, ValueError):  # a C callable has no signature
-        safe.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]
-    safe.__dict__.pop("__wrapped__", None)
-
-    safe.__gate_name__ = name  # type: ignore[attr-defined]
+    # The same chokepoint `Gate.wrap` uses, for the same reason, and reached through
+    # the shared helper rather than re-implemented here. `functools.wraps` used to do
+    # this job and was exactly wrong twice over: it publishes `__wrapped__ = fn`, a
+    # public pointer at the *ungated* callable that `inspect.unwrap` and every
+    # decorator-aware framework follows, and its WRAPPER_UPDATES step copies the
+    # target's whole instance `__dict__` — so guarding a callable object holding
+    # `self.func = raw_tool` republished the raw tool as `safe.func`. Popping
+    # `__wrapped__` afterwards closed the first hole and left the second open, and this
+    # adapter is the path a framework's tools actually travel.
+    _adopt_metadata(safe, fn, name)
     return safe
 
 

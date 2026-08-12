@@ -142,13 +142,35 @@ def test_missing_principal_fails_closed(sample_policy):
     assert exc.value.decision.rule == "no_principal"
 
 
-def test_positional_arguments_are_rejected(sample_policy):
-    """Gated tools are keyword-only so the gate always sees named args."""
-    from histos import PolicyError
+def test_positional_arguments_are_bound_by_name(sample_policy):
+    """A positional call is named from the signature, not refused.
+
+    The gate reasons about arguments by name, and it used to get them by demanding
+    keyword-only calls. Fail-closed, and wrong in four ways at once: undocumented, so
+    an ordinary `my_tool("x")` broke at runtime; fired in `observe`, which is
+    documented as blocking nothing; left no audit record, in a library whose trail
+    claims to record every decision; and escaped `guard_callable` as a raw PolicyError.
+    Python knows the mapping, so the gate asks it.
+    """
 
     def get_order(order_id):
         return {"total": 1.0}
 
     safe = gate(get_order, policy=sample_policy)
-    with use_principal(Principal(role="viewer")), pytest.raises(PolicyError):
+    with use_principal(Principal(role="viewer")):
+        assert safe(1) == {"total": 1.0}
+
+
+def test_a_positional_call_the_gate_cannot_name_is_denied_and_audited(sample_policy):
+    """`*args` is the shape with no honest mapping: one name, several values."""
+
+    def get_order(*args):
+        return {"total": 1.0}
+
+    sink = InMemoryAuditSink()
+    safe = gate(get_order, policy=sample_policy, audit=sink, name="get_order")
+    with use_principal(Principal(role="viewer")), pytest.raises(GateDenied) as exc:
         safe(1)
+    assert exc.value.decision.rule == "unnameable_args"
+    # the refusal that used to leave no trace
+    assert [e["rule"] for e in sink.entries] == ["unnameable_args"]

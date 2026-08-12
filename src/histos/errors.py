@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from histos.contracts import GateDecision
+    from histos.contracts import GateDecision, GateRequest
 
 
 class GateError(Exception):
@@ -39,12 +39,24 @@ class PolicyError(GateError):
         super().__init__(message)
 
 
+def _with_remedy(message: str, decision: GateDecision) -> str:
+    """Append the decision's remedy, because the message is where a developer reads it.
+
+    Every rule carries a remedy — "bind an identity with use_principal()", "declare the
+    tool in `tools:`" — and it was reachable only as ``exc.decision.remedy``, which
+    means it was read by nobody debugging their first denial. The first thing a new
+    user hits is ``no_principal``, and the message they got named the rule and stopped.
+    """
+    remedy = getattr(decision, "remedy", None)
+    return f"{message} — fix: {remedy}" if remedy else message
+
+
 class GateDenied(GateError):
     """A call was denied by a gate decision — the fail-closed default."""
 
     def __init__(self, decision: GateDecision) -> None:
         self.decision = decision
-        super().__init__(f"gate denied [{decision.rule}]: {decision.reason}")
+        super().__init__(_with_remedy(f"gate denied [{decision.rule}]: {decision.reason}", decision))
 
     @property
     def public_reason(self) -> str:
@@ -53,15 +65,42 @@ class GateDenied(GateError):
 
 
 class GateConfirmationRequired(GateError):
-    """A call needs explicit human/operator confirmation before it may proceed."""
+    """A call needs explicit human/operator confirmation before it may proceed.
 
-    def __init__(self, decision: GateDecision) -> None:
+    Carries the ``request`` the gate paused, and that is not a convenience. An approval
+    is bound to a fingerprint over the tool, the principal **and the arguments the tool
+    would actually run with** — which is not what the caller passed, because ``bind``
+    has already overwritten every bound field with the principal's trusted attribute by
+    the time this is raised. A host holding only its own arguments computes a
+    fingerprint that never matches, so ``grant()`` appears to work, the retry pauses
+    again, and the call loops forever with nothing in the logs to say why. The host
+    cannot derive these arguments from anything it has; only the gate knows them.
+
+    ``request.args`` is a detached copy, so nothing a host does to it reaches the call.
+    """
+
+    def __init__(self, decision: GateDecision, request: GateRequest | None = None) -> None:
         self.decision = decision
-        super().__init__(f"confirmation required [{decision.rule}]: {decision.reason}")
+        self.request = request
+        super().__init__(_with_remedy(f"confirmation required [{decision.rule}]: {decision.reason}", decision))
 
     @property
     def public_reason(self) -> str:
         return self.decision.public_reason
+
+    @property
+    def fingerprint(self) -> str | None:
+        """The :func:`~histos.approvals.request_fingerprint` to pass to ``grant()``.
+
+        ``None`` only when the exception was constructed without a request, which the
+        gate never does — a host building one by hand gets ``None`` rather than a
+        fingerprint that would authorise the wrong call.
+        """
+        if self.request is None:
+            return None
+        from histos.approvals import fingerprint_of  # local: approvals imports contracts
+
+        return fingerprint_of(self.request)
 
 
 class ToolErrorRedacted(GateError):

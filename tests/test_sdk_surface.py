@@ -189,14 +189,18 @@ def test_fixed_principal_binds_one_identity_for_the_wrapper():
     assert safe(x=1) == 1  # no use_principal() needed
 
 
-def test_deprecated_principal_kwarg_warns_but_still_works():
-    with pytest.warns(DeprecationWarning, match="fixed_principal"):
-        safe = Gate(_echo_policy()).wrap(echo, principal=Principal(role="r"))
-    assert safe(x=1) == 1
+def test_the_principal_alias_is_refused_rather_than_deprecated():
+    """It reads like the per-request identity and binds one for the wrapper's life.
+
+    A DeprecationWarning was the wrong channel — filtered by default outside
+    `__main__`, so the misconfiguration it warned about was silent in every real host.
+    """
+    with pytest.raises(PolicyError, match="use_principal"):
+        Gate(_echo_policy()).wrap(echo, principal=Principal(role="r"))
 
 
-def test_passing_both_principal_forms_is_an_error():
-    with pytest.raises(PolicyError, match="not both"):
+def test_passing_both_principal_forms_is_still_an_error():
+    with pytest.raises(PolicyError):
         Gate(_echo_policy()).wrap(echo, fixed_principal=Principal(role="r"), principal=Principal(role="r"))
 
 
