@@ -24,6 +24,7 @@ from histos import (
     Principal,
     Schema,
     ToolContract,
+    ToolErrorRedacted,
     contracts_from_mcp,
     gate,
     infer_schema,
@@ -45,6 +46,14 @@ CANARY = "CANARY-7f3a-SECRET"
 def _policy(**kw: object) -> Policy:
     return Policy(
         tools={"t": ToolContract(name="t", args=Schema({"x": Field(type="integer")}), access="write", **kw)},
+        permissions={"ok": frozenset({"t"})},
+        canaries=frozenset({CANARY}),
+    )
+
+
+def _no_args_policy() -> Policy:
+    return Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), access="read")},
         permissions={"ok": frozenset({"t"})},
         canaries=frozenset({CANARY}),
     )
@@ -383,3 +392,130 @@ def test_the_repo_ships_no_world_readable_audit_fixture():
     """Cheap guard: nothing in the tree should be a committed audit log."""
     root = pathlib.Path(__file__).resolve().parents[1]
     assert not list(root.glob("*.audit.jsonl"))
+
+
+# ── the review of the hardening diff: engine.py ──────────────────────────
+
+
+def test_the_scan_budget_gates_every_pass_not_only_the_canary_one():
+    """It sat inside the canary branch, so the secret detectors — the slowest pass by an
+    order of magnitude — read a 63 MB return in full whenever canaries were off."""
+    import time
+
+    def big() -> dict:
+        return {"rows": ["y" * 1_000_000 for _ in range(8)]}
+
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), redact_secret_output=True)},
+        permissions={"ok": frozenset({"t"})},
+    )
+    with use_principal(Principal(role="ok", identity="i")):
+        started = time.perf_counter()
+        out = gate(big, policy=policy, name="t")()
+    assert isinstance(out, str) and "scan budget" in out
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    ("action", "expect"),
+    [("deny", "denied"), ("allow", "returned"), ("redact_all", "redacted")],
+)
+def test_the_over_budget_action_is_the_policy_s_to_choose(action, expect):
+    def big() -> dict:
+        return {"rows": ["y" * 1_000_000 for _ in range(8)]}
+
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), on_output_violation=action)},
+        permissions={"ok": frozenset({"t"})},
+    )
+    with use_principal(Principal(role="ok", identity="i")):
+        try:
+            out = Gate(policy).wrap(big, name="t")()
+        except GateDenied:
+            assert expect == "denied"
+            return
+    assert expect == ("returned" if isinstance(out, dict) else "redacted")
+
+
+def test_a_host_can_raise_the_output_budget():
+    def big() -> dict:
+        return {"rows": ["y" * 1_000_000 for _ in range(8)]}
+
+    policy = Policy(tools={"t": ToolContract(name="t", args=Schema({}))}, permissions={"ok": frozenset({"t"})})
+    with use_principal(Principal(role="ok", identity="i")):
+        assert isinstance(Gate(policy, output_budget=16_000_000).wrap(big, name="t")(), dict)
+
+
+def test_an_error_raised_from_None_is_left_alone():
+    """`raise X from None` is how a driver error is deliberately hidden; CPython prints
+    none of it, so there is nothing there for the caller to read and nothing to redact.
+    Walking into it swapped the caller's exception type over a leak that never happened."""
+
+    def boom() -> str:
+        try:
+            raise ValueError(f"driver said {CANARY}")
+        except ValueError:
+            raise RuntimeError("repository error") from None
+
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(RuntimeError) as exc:
+        gate(boom, policy=_no_args_policy(), name="t")()
+    assert type(exc.value) is RuntimeError
+    assert CANARY not in str(exc.value)
+
+
+def test_a_chain_longer_than_the_bound_is_dropped_rather_than_reported_clean():
+    def boom() -> str:
+        error: BaseException = RuntimeError(f"innermost {CANARY}")
+        for i in range(25):
+            wrapper = RuntimeError(f"layer {i}")
+            wrapper.__cause__ = error
+            error = wrapper
+        raise error
+
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(ToolErrorRedacted) as exc:
+        gate(boom, policy=_no_args_policy(), name="t")()
+    assert CANARY not in str(exc.value)
+
+
+def test_a_namedtuple_return_is_not_silently_unprojected():
+    """It is a tuple, so it passed the guard, and the projector then rebuilt it and
+    dropped nothing — the exact outcome the guard was written to prevent."""
+    from typing import NamedTuple
+
+    class Row(NamedTuple):
+        public: str
+        secret: str
+
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t", args=Schema({}), returns=Schema({"public": Field(type="string")}), project_output=True
+            )
+        },
+        permissions={"ok": frozenset({"t"})},
+    )
+    with use_principal(Principal(role="ok", identity="i")):
+        out = gate(lambda: Row("fine", "leak"), policy=policy, name="t")()  # noqa: E731
+    assert isinstance(out, str) and "could not be projected" in out
+
+
+def test_a_value_the_projector_could_not_enter_is_named_in_the_record():
+    """"Nothing undeclared to drop" and "something nobody could look inside" used to
+    produce the same audit line."""
+
+    @dataclasses.dataclass
+    class Opaque:
+        secret: str
+
+    sink = InMemoryAuditSink()
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t", args=Schema({}), returns=Schema({"public": Field(type="string")}), project_output=True
+            )
+        },
+        permissions={"ok": frozenset({"t"})},
+    )
+    with use_principal(Principal(role="ok", identity="i")):
+        gate(lambda: {"public": Opaque("leak")}, policy=policy, audit=sink, name="t")()  # noqa: E731
+    assert "output:uninspectable:Opaque" in sink.entries[-1]["redactions"]
