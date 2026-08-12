@@ -27,11 +27,14 @@ It is written down in `spec/tool-lock-0.1.schema.json`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Set
+import re
+import warnings
+from collections.abc import Callable, Iterable, Iterator, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
 
 from histos.contracts import Sensitivity, ToolContract
+from histos.errors import PolicyError
 
 SourceReader = Callable[[Any], list["ToolSource"]]
 
@@ -137,8 +140,121 @@ class ToolSource:
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
             raise ValueError(f"unknown source kind {self.kind!r} — expected one of {', '.join(sorted(KINDS))}")
+        _reject_unusable_name(self.name)
+
+
+# A tool name is a policy key, a dict key in a YAML document, a column in every report
+# and something a human types into `histos explain`. The source picks it, and the source
+# is the untrusted party here.
+_UNUSABLE_IN_A_NAME = re.compile(
+    "[\x00-\x1f\x7f-\x9f"            # C0 and C1 controls — \r rewrites a printed line
+    "\u061c\u200b-\u200f\u2028-\u202e"  # bidi marks and overrides, line/paragraph separators
+    "\u2060-\u2064\u2066-\u206f\ufeff]"  # word joiners, bidi isolates, BOM
+)
+
+
+def _reject_unusable_name(name: str) -> None:
+    """Refuse a tool name that cannot survive being written down and read back.
+
+    Sanitising these at every printing path keeps a *report* honest, and that is a
+    different job from this one: `histos import --out policy.yaml` writes the raw name
+    into a document, and a C1 control there produced a file histos itself then refused
+    to load — an import that succeeds and leaves an unusable artifact. Refusing at the
+    point the name enters the library is the only place that fixes both, and it is the
+    same posture the loader already takes for a policy key it cannot understand.
+    """
+    if not name:
+        raise PolicyError("a tool with an empty name cannot be a policy key", code="invalid_import")
+    found = _UNUSABLE_IN_A_NAME.search(name)
+    if found:
+        raise PolicyError(
+            f"tool name {name!r} contains U+{ord(found.group()):04X}, which steers a terminal and cannot be "
+            "written into a policy document that reads back. A tool name is a policy key; ask the source "
+            "to rename it, or import it under a name of your own.",
+            code="invalid_import",
+        )
 
 
 def contracts_of(sources: list[ToolSource]) -> list[ToolContract]:
     """The contracts alone, for callers that do not care where they came from."""
     return [s.contract for s in sources]
+
+
+# ── one unprojectable tool must not take the manifest with it ────────────
+
+
+class ToolImportSkipped(UserWarning):
+    """A tool definition the projection refused; the rest of the manifest imported."""
+
+
+@dataclass(frozen=True)
+class SkippedTool:
+    """One tool that did not import, named, with the refusal that stopped it."""
+
+    name: str
+    kind: str
+    reason: str
+
+
+class ImportedSources(list[ToolSource]):
+    """The tools that imported, carrying the ones that did not on ``skipped``.
+
+    A plain ``list`` subclass so every existing caller — the CLI, the lock writer,
+    ``contracts_of`` — keeps working unchanged, while a caller that wants to report
+    the losses has somewhere to read them from.
+    """
+
+    def __init__(self, sources: Iterable[ToolSource] = (), skipped: Iterable[SkippedTool] = ()) -> None:
+        super().__init__(sources)
+        self.skipped: tuple[SkippedTool, ...] = tuple(skipped)
+
+
+def project_tools[Entry](
+    kind: str,
+    entries: Sequence[Entry],
+    name_of: Callable[[Entry], str],
+    read_one: Callable[[Entry], ToolSource],
+) -> ImportedSources:
+    """Project each tool on its own, so one refusal cannot take the manifest down.
+
+    The projection refuses an assertion keyword it cannot carry, which is right — a
+    dropped bound is a policy that reads as constrained and enforces nothing. It used
+    to raise out of the whole read, though, so one ``maxItems`` on the ninth tool of a
+    manifest meant the other eight healthy tools did not import either, and the message
+    named the argument and the keyword but not the tool, so on a real server there was
+    nothing to go and fix. A refusal that takes down eight working tools with the ninth
+    is not fail-closed; the user's next move is to stop importing.
+
+    So the refusal is now scoped to the tool it came from. Skipping is safe in the
+    direction that matters: a tool with no contract has no policy entry, and the engine
+    denies an unknown tool by default (``unknown_tool``), so a skipped tool cannot be
+    called — it just cannot be granted either, which is the outcome the user needs to
+    see. Every skip is warned about *and* recorded on the returned list.
+
+    A source where *nothing* imported still raises: an empty policy written without a
+    word about why is the silent failure this whole module exists to avoid.
+
+    Every ``PolicyError`` out of ``read_one`` is caught, not only ``invalid_import``: a
+    ``pattern`` the ReDoS screen refuses arrives as ``unsafe_pattern`` and a bad bound as
+    ``invalid_field``, and both are statements about the one tool being projected. That
+    one is attacker-reachable — the server picks its own patterns — so leaving it fatal
+    would let a single hostile tool definition deny the import of every honest tool
+    beside it. A malformed *document* is a ``ValueError`` and is raised before this loop.
+    """
+    kept: list[ToolSource] = []
+    skipped: list[SkippedTool] = []
+    for entry in entries:
+        try:
+            kept.append(read_one(entry))
+        except PolicyError as exc:
+            name = name_of(entry)
+            skipped.append(SkippedTool(name=name, kind=kind, reason=f"{kind} tool {name!r} was not imported: {exc}"))
+
+    if entries and not kept:
+        raise PolicyError(
+            f"no tool in this {kind} source could be imported:\n" + "\n".join(f"  - {s.reason}" for s in skipped),
+            code="invalid_import",
+        )
+    for skip in skipped:
+        warnings.warn(skip.reason, ToolImportSkipped, stacklevel=3)
+    return ImportedSources(kept, skipped)

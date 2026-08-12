@@ -20,8 +20,13 @@ from histos.importers.sources import (
     UNREVIEWED_SENSITIVITY,
     ToolSource,
     contracts_of,
+    project_tools,
     register_source_kind,
 )
+
+# Hashed under their own keys, or not part of the shape at all: `name` is the lock's
+# key, `description` has its own hash so a description-only change is distinguishable.
+_HASHED_ELSEWHERE = frozenset({"name", "description", "inputSchema", "outputSchema"})
 
 
 def source_from_mcp(tool: dict[str, Any]) -> ToolSource:
@@ -36,12 +41,22 @@ def source_from_mcp(tool: dict[str, Any]) -> ToolSource:
         name=name,
         kind="mcp",
         description=description if isinstance(description, str) else None,
-        # Normative shape for `mcp`: the two schemas, under these two keys, and
-        # nothing else. `name` is the lock's own key and `description` is hashed
-        # separately, so neither belongs here.
+        # Normative shape for `mcp`: the two schemas under their own keys, plus
+        # everything else the server sent under `rest`. `name` is the lock's own key
+        # and `description` is hashed separately, so neither belongs here.
+        #
+        # `rest` exists because the two schemas were the whole shape, and MCP carries
+        # more than two fields that a model reads: `title` is displayed instead of the
+        # name, `annotations.readOnlyHint` tells a client the tool is safe, `_meta` is
+        # open-ended. A vendor could rewrite any of them after review and `histos drift`
+        # reported clean — the exact rug pull this demo and this lock exist to catch,
+        # through the fields the lock did not look at. Recorded as "the tool object
+        # minus what is hashed elsewhere" rather than as a list of known keys, so a
+        # field MCP adds next year is inside the hash on the day it appears.
         shape={
             "input": input_schema if isinstance(input_schema, dict) else None,
             "output": output_schema if isinstance(output_schema, dict) else None,
+            "rest": {k: v for k, v in sorted(tool.items()) if k not in _HASHED_ELSEWHERE} or None,
         },
         contract=ToolContract(
             name=name,
@@ -83,7 +98,10 @@ def sources_from_mcp(source: list[dict[str, Any]] | dict[str, Any]) -> list[Tool
         if not isinstance(tool, dict):
             raise ValueError(f"MCP tool at position {index} is a {type(tool).__name__}, expected an object")
 
-    return [source_from_mcp(t) for t in tools]
+    # A malformed *manifest* is still a hard failure — nothing in it can be trusted to
+    # mean what it says. A tool the projection cannot carry is scoped to that tool; see
+    # `project_tools`.
+    return project_tools("mcp", tools, lambda t: str(t.get("name") or "<unnamed>"), source_from_mcp)
 
 
 def contracts_from_mcp(source: list[dict[str, Any]] | dict[str, Any]) -> list[ToolContract]:

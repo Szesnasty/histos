@@ -10,6 +10,12 @@ JSON Schema is the common denominator: OpenAPI and MCP both carry JSON Schema fo
 their arguments, so :func:`schema_from_json_schema` is the shared bridge and the
 other importers build on it. All importers here are **stdlib-only** and operate on
 already-parsed dict/JSON — no network, no schema-fetching.
+
+A tool the bridge cannot project is refused, and the refusal is scoped to that tool:
+the reader returns an :class:`ImportedSources` — a list of what imported, carrying
+the losses on ``.skipped`` — and warns :class:`ToolImportSkipped` for each. See
+:func:`histos.importers.sources.project_tools` for why the alternative, failing the
+whole manifest, was not fail-closed but unusable.
 """
 
 from __future__ import annotations
@@ -18,10 +24,22 @@ from histos.importers.json_schema import field_from_json_schema, schema_from_jso
 from histos.importers.mcp import contracts_from_mcp, sources_from_mcp
 from histos.importers.openai import contracts_from_openai, sources_from_openai
 from histos.importers.openapi import contracts_from_openapi, sources_from_openapi
-from histos.importers.sources import KINDS, ToolSource, contracts_of, reader_for, register_source_kind
+from histos.importers.sources import (
+    KINDS,
+    ImportedSources,
+    SkippedTool,
+    ToolImportSkipped,
+    ToolSource,
+    contracts_of,
+    reader_for,
+    register_source_kind,
+)
 
 __all__ = [
     "KINDS",
+    "ImportedSources",
+    "SkippedTool",
+    "ToolImportSkipped",
     "ToolSource",
     "contracts_from_mcp",
     "contracts_from_openai",

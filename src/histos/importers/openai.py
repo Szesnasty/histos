@@ -30,6 +30,7 @@ from histos.importers.sources import (
     UNREVIEWED_SENSITIVITY,
     ToolSource,
     contracts_of,
+    project_tools,
     register_source_kind,
 )
 
@@ -90,7 +91,7 @@ def sources_from_openai(source: list[dict[str, Any]] | dict[str, Any]) -> list[T
         if not isinstance(tool, dict):
             raise ValueError(f"OpenAI tool at position {index} is a {type(tool).__name__}, expected an object")
 
-    return [source_from_openai(t) for t in tools]
+    return project_tools("openai", tools, lambda t: str(_unwrap(t).get("name") or "<unnamed>"), source_from_openai)
 
 
 def contracts_from_openai(source: list[dict[str, Any]] | dict[str, Any]) -> list[ToolContract]:
