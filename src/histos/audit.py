@@ -30,6 +30,7 @@ import hmac
 import json
 import os
 import threading
+import warnings
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -380,6 +381,11 @@ class JSONLAuditSink:
         # choice. Pass `mode=` to create it differently.
         self._mode = mode
 
+        # Records this sink could not write, for the same reason `InMemoryAuditSink`
+        # counts what it drops: the loss is a fact about the evidence and has to be
+        # legible. See `record()` for why it is a counter and not an exception.
+        self.failed = 0
+
     def _path_lock(self) -> threading.Lock:
         """The in-process lock for this log file, shared by every sink writing to it.
 
@@ -453,6 +459,39 @@ class JSONLAuditSink:
         return os.fdopen(fd, "a+b")
 
     def record(self, entry: dict[str, Any]) -> None:
+        """Append one record. Never raises — see below.
+
+        `record()` runs from `Gate._emit` on the POST path as well as the PRE path, so
+        it lands *after* the tool body has run. An exception out of here therefore does
+        not prevent anything: the side effect already happened, and all it achieves is
+        replacing the caller's result with a traceback and discarding the value the call
+        produced — a sink taking down the calls it exists to record.
+
+        One raise path out of this method was closed a release earlier (a fixed
+        `.tip.new` scratch name that raced two writers into `FileNotFoundError`) and
+        every sibling was left open: a log directory that becomes read-only, a path
+        replaced by a directory, ENOSPC on the write, a `mode` the umask refuses. All
+        of them were reachable mid-call and all of them cost the caller a completed
+        result — measured, with the charge already made and the money gone.
+
+        So the whole body is total. A failure increments :attr:`failed` and warns once
+        per occurrence; it does not reach the caller. Losing a record is bad and is
+        meant to be visible — `verify_chain` will also report the gap in the chain — but
+        it is strictly better than losing the result of a call that already happened.
+        """
+        try:
+            self._record(entry)
+        except Exception as exc:  # noqa: BLE001 — totality is the point; see the docstring
+            self.failed += 1
+            warnings.warn(
+                f"histos: the audit record for this call could not be written to {self.path}: "
+                f"{type(exc).__name__}: {exc}. The call itself was unaffected; "
+                f"{self.failed} record(s) have now been lost from this sink.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _record(self, entry: dict[str, Any]) -> None:
         payload = dict(entry)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._path_lock(), self._open_append() as fh:
@@ -591,18 +630,34 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
             # A digest over the *parsed* record says nothing about the bytes a reader
             # sees. Two lines can parse to one dict and read differently — a repeated
             # key, where `json.loads` keeps the last and a human greps the first, is the
-            # sharp case: the record verifies as `allow` while the file says `deny`. For
-            # a line this version wrote the canonical form is the form on disk, so the
-            # two can simply be required to agree. A legacy line is exempt because its
-            # canonical form is a different spelling by construction.
-            if canonical:
-                rec["hash"] = stored
-                if json.dumps(rec, sort_keys=True, ensure_ascii=True) != stripped:
-                    return False, (
-                        f"line {lineno}: the bytes on disk are not the canonical form of the record they "
-                        "parse to — the file was rewritten in a way a reader and the chain disagree about"
-                    )
-                rec.pop("hash")
+            # sharp case: the record verifies as `allow` while the file says `deny`. So
+            # the line has to be a serialisation of the record it parses to.
+            #
+            # Which serialisation, though, is not something the check gets to dictate.
+            # Requiring today's exact spelling looked safe because a legacy line was
+            # thought to be "a different spelling by construction" — true only for the
+            # records with a non-ASCII field, which is the rare case. For an ordinary
+            # ASCII record the two bodies are byte-identical, so the legacy hash *is*
+            # today's hash, the check fired, and `histos audit verify` told the operator
+            # their untouched pre-0.1.0 log had been rewritten. That is a false accusation
+            # about evidence, which is worse than the rewrite it was looking for.
+            #
+            # So: accept any spelling `json.dumps` can produce from the parsed record,
+            # and run the check on every line rather than only on ones matching today's
+            # digest — which also closes the legacy tamper hole that exemption left. The
+            # sharp case is still caught: `json.loads` keeps document order, so an
+            # unsorted dump reproduces legacy bytes exactly, while no dump of a parsed
+            # dict can ever reproduce a duplicated key.
+            rec["hash"] = stored
+            faithful = {
+                json.dumps(rec, sort_keys=srt, ensure_ascii=asc) for srt in (True, False) for asc in (True, False)
+            }
+            if stripped not in faithful:
+                return False, (
+                    f"line {lineno}: the bytes on disk are not a faithful serialisation of the record they "
+                    "parse to — the file was rewritten in a way a reader and the chain disagree about"
+                )
+            rec.pop("hash")
             if not matched:
                 return False, f"line {lineno}: hash mismatch — record was altered after it was written"
             prev = str(stored)

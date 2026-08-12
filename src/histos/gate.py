@@ -63,6 +63,7 @@ import os
 import sys
 import threading
 import time
+import warnings
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar, Token
@@ -1743,7 +1744,21 @@ class Gate:
             policy_version=self.policy.policy_version,
             gate_version=__version__,
         )
-        self.audit.record(record.to_dict())
+        # The shipped sinks are total, and `AuditSink` is a Protocol, so a host's own
+        # sink — a database write, an HTTP post to a collector — cannot be made to be.
+        # `_emit` runs on the POST path too, after the tool body has produced its side
+        # effect, so a sink that raises there does not prevent anything: it replaces a
+        # completed call's result with the collector's traceback and throws the value
+        # away. Reporting the sink is right; letting it take the call with it is not.
+        try:
+            self.audit.record(record.to_dict())
+        except Exception as exc:  # noqa: BLE001 — a sink must never decide a call's fate
+            warnings.warn(
+                f"histos: the audit sink {type(self.audit).__name__} raised while recording this call: "
+                f"{type(exc).__name__}: {exc}. The call itself was unaffected, and this record is lost.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
 
 def gate(

@@ -95,15 +95,23 @@ _UNPROJECTED_ASSERTIONS = frozenset(
         "$recursiveRef",
         "extends",
         "disallow",
-        # nested object shape beyond "it is an object". `properties`/`required` are
-        # projected as far as this model goes — the field keeps `type: object`, which is
-        # what the engine checks — because refusing them took out every pydantic model
-        # with a nested model in it, and 4 of the 19 operations in the standard Swagger
-        # Petstore document. The inner contract is genuinely not carried, and
-        # docs/policy-reference.md has always said a `type: object` argument is checked
-        # for being an object and never for its contents.
+        # nested object shape beyond "it is an object". `properties`, `required` and
+        # `additionalProperties` are projected as far as this model goes — the field
+        # keeps `type: object`, which is what the engine checks — because refusing them
+        # took out every pydantic model with a nested model in it, and 4 of the 19
+        # operations in the standard Swagger Petstore document. The inner contract is
+        # genuinely not carried, and docs/policy-reference.md has always said a
+        # `type: object` argument is checked for being an object and never for its
+        # contents.
+        #
+        # `additionalProperties` was left on this list for every level below the root,
+        # and that was the same mistake one keyword later. It is not extra shape a
+        # generator writes occasionally — it is written *whenever* a nested object is
+        # written: pydantic `extra="forbid"` emits `false`, `dict[str, str]` emits a
+        # subschema, and OpenAI's structured-output strict mode *requires* `false` on
+        # every object. So the importer refused the single most common real tool
+        # definition there is, and told the author to write the argument by hand.
         "patternProperties",
-        "additionalProperties",
         "unevaluatedProperties",
         "propertyNames",
         "dependencies",
@@ -125,11 +133,9 @@ _UNPROJECTED_ASSERTIONS = frozenset(
     }
 )
 
-# Three of those are projected on the *top-level* object and only there: `properties`
-# and `required` are the whole point, and `additionalProperties: true` is the one way
-# to open the argument surface. Inside a property they describe a nested object the
-# projection cannot hold, so there they are refused like the rest.
-_UNPROJECTED_AT_OBJECT_LEVEL = _UNPROJECTED_ASSERTIONS - {"properties", "required", "additionalProperties"}
+# `properties` and `required` are the whole point at the top level, and are the nested
+# object's own contract below it — carried as far as `type: object` either way.
+_UNPROJECTED_AT_OBJECT_LEVEL = _UNPROJECTED_ASSERTIONS - {"properties", "required"}
 
 # Inside `items`: the element type, the scalar bounds `_bound` reads, and an element
 # `enum`/`const` (see `_element_enum_pattern`). A nested `items` is still a shape one
