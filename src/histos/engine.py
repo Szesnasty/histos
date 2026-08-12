@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import copy
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -92,7 +92,23 @@ def _callback_args(args: dict[str, Any]) -> dict[str, Any]:
 _MAX_EXCEPTION_CHAIN = 16
 
 
-def _exception_text(exc: BaseException) -> str:
+def _next_link(exc: BaseException) -> BaseException | None:
+    """The next exception CPython would display — its rules, not an approximation.
+
+    `__cause__ or __context__` is wrong twice. An exception class defining `__bool__`
+    or `__len__` can be *falsy*, and `or` then skips a link `traceback` prints. And
+    `raise X from None` sets `__suppress_context__`, which is the standard way to hide
+    a driver error deliberately — walking into it made the gate redact an error that
+    leaked nothing, swap the caller's exception type for `ToolErrorRedacted`, and put
+    the suppressed context into the audit trail. What Python will not display is not
+    something the caller can read.
+    """
+    if exc.__cause__ is not None:
+        return exc.__cause__
+    return None if exc.__suppress_context__ else exc.__context__
+
+
+def _exception_text(exc: BaseException) -> tuple[str, bool]:
     """Everything a caller can read off a raised exception, as one string to scan.
 
     ``f"{type(exc).__name__}: {exc}"`` covers only the outermost message, and that is
@@ -113,15 +129,20 @@ def _exception_text(exc: BaseException) -> str:
     current: BaseException | None = exc
     for _ in range(_MAX_EXCEPTION_CHAIN):
         if current is None or id(current) in seen:
-            break
+            return "\n".join(parts), False
         seen.add(id(current))
         parts.append(f"{type(current).__name__}: {current}")
         notes = getattr(current, "__notes__", None)
-        if isinstance(notes, list):
+        # A Sequence, not a list: `add_note` builds a list, but the attribute is
+        # writable and `traceback` prints whatever is iterable there. A `str` is a
+        # Sequence too and would be printed one character per line, so it is excluded.
+        if isinstance(notes, Sequence) and not isinstance(notes, (str, bytes)):
             parts.extend(str(note) for note in notes)
-        # `__cause__` first: an explicit `raise X from Y` is the one the author meant.
-        current = current.__cause__ or current.__context__
-    return "\n".join(parts)
+        current = _next_link(current)
+    # The bound was hit with links still to go. Saying "nothing to redact" about a chain
+    # that was not read to the end is the fail-open this walk exists to close, so the
+    # caller is told the text is incomplete and drops it whole.
+    return "\n".join(parts), current is not None
 
 
 def for_callback(req: GateRequest) -> GateRequest:
@@ -173,7 +194,18 @@ def _stringify_args(args: dict[str, Any]) -> tuple[str, bool]:
 _MAX_OUTPUT_SCAN_CHARS = 4_194_304
 
 
-def _text_blob(obj: Any) -> tuple[str, bool]:
+def _over_output_budget(obj: Any, budget: int) -> bool:
+    """Whether the textual leaves of ``obj`` exceed ``budget`` characters.
+
+    Stops at the first character over, so the check costs the size of the budget rather
+    than the size of the payload — the point is to refuse before anything expensive
+    walks it, not to measure exactly how oversized it was.
+    """
+    _, truncated = _text_blob(obj, budget)
+    return truncated
+
+
+def _text_blob(obj: Any, budget: int) -> tuple[str, bool]:
     """Join every str/bytes leaf of ``obj``, the way the pre-gate joins arguments.
 
     Only *textual* leaves take part: calling ``str()`` on an arbitrary returned object
@@ -204,7 +236,7 @@ def _text_blob(obj: Any) -> tuple[str, bool]:
             return
         if isinstance(value, (str, bytes)):
             text = value if isinstance(value, str) else value.decode("utf-8", "surrogateescape")
-            if total + len(text) > _MAX_OUTPUT_SCAN_CHARS:
+            if total + len(text) > budget:
                 truncated = True
                 return
             total += len(text)
@@ -368,7 +400,25 @@ def _redact_sensitive(obj: Any, sensitive_names: frozenset[str]) -> tuple[Any, l
     return obj, found
 
 
-def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str]]:
+# What the projector can look inside. Anything else is a leaf it walks past without
+# being able to say whether it carried an undeclared field.
+_PROJECTABLE = (dict, list, tuple, set, frozenset)
+_INSPECTABLE_LEAF = (str, bytes, bytearray, int, float, bool, type(None))
+
+
+def _projectable(value: Any) -> bool:
+    """Whether the projector can act on this shape at all.
+
+    `isinstance(out, tuple)` was the test and a `NamedTuple` passes it — so the
+    projector rebuilt the container, returned each non-dict element untouched, dropped
+    nothing, and reported the clean result the guard was written to prevent. A tuple
+    subclass carries its fields by *name*, which is exactly what the projector cannot
+    read, so it is asked by exact type.
+    """
+    return type(value) in (dict, list, tuple, set, frozenset)
+
+
+def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], list[str]]:
     """Deny-by-default on the OUTPUT surface: drop any dict key not in ``allowed``.
 
     The surgical alternative to strict_returns' all-or-nothing — an undeclared field
@@ -376,6 +426,7 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str]]:
     egresses. Recurses into nested objects and lists-of-records.
     """
     dropped: list[str] = []
+    opaque: list[str] = []
 
     def go(o: Any) -> Any:
         if isinstance(o, dict):
@@ -388,9 +439,15 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str]]:
             return kept
         if isinstance(o, (list, tuple)):
             return _rebuild_container(o, [go(x) for x in o])
+        # A value the projector cannot enter. It is returned as it came — there is
+        # nothing else it can honestly do — but it is *named*, so the audit record can
+        # tell "there was nothing undeclared to drop" from "there was something here
+        # nobody could look inside", which the trail could not distinguish before.
+        if not isinstance(o, _INSPECTABLE_LEAF):
+            opaque.append(type(o).__name__)
         return o
 
-    return go(obj), dropped
+    return go(obj), dropped, opaque
 
 
 def _redact_secrets_structure(obj: Any) -> tuple[Any, list[str]]:
@@ -442,12 +499,18 @@ class Engine:
         content_rules: ContentRules | None = None,
         resource_resolver: ResourceResolver | None = None,
         escalate: EscalationTier | None = None,
+        output_budget: int = _MAX_OUTPUT_SCAN_CHARS,
     ) -> None:
         self.policy = policy
         self.limits = limits
         self.content_rules = content_rules
         self.resource_resolver = resource_resolver
         self.escalate = escalate
+        # How much tool output the post-gate will read. A hard module constant was the
+        # wrong shape: it is a deployment question — a reporting tool legitimately
+        # returns tens of megabytes — and the answer decides whether a result is
+        # dropped, so it belongs where the host can set it.
+        self._output_budget = output_budget
 
     # ── pre-gate ─────────────────────────────────────────────────────
 
@@ -839,8 +902,19 @@ class Engine:
 
     def _post_exception(self, req: GateRequest, exc: BaseException) -> tuple[GateDecision, str]:
         contract = self.policy.contract_for(req.tool_name)
-        text = _exception_text(exc)
+        text, incomplete = _exception_text(exc)
         redactions: list[str] = []
+        if incomplete:
+            return (
+                GateDecision(
+                    Effect.REDACT,
+                    "exception_redaction",
+                    f"the exception chain is longer than {_MAX_EXCEPTION_CHAIN} links, so it could not be "
+                    "read to the end",
+                    redactions=("output:redacted_all",),
+                ),
+                "[REDACTED: the tool raised through a chain too long to inspect]",
+            )
 
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
             text, found = _redact_structure(text, self.policy.canaries)
@@ -866,6 +940,46 @@ class Engine:
         contract = self.policy.contract_for(req.tool_name)
         redactions: list[str] = []
         out = result
+
+        # The size question is asked once, before anything walks the payload. It used to
+        # sit inside the canary branch, which left the two expensive passes outside it:
+        # the secret detectors, which are the slowest thing here by an order of
+        # magnitude, and the sensitive-field walk. A 63 MB return with canaries switched
+        # off was still fully scanned. Asking first also means the answer costs one
+        # traversal rather than being paid after the payload has already been walked.
+        if contract is not None and _over_output_budget(out, self._output_budget):
+            if contract.on_output_violation == "deny":
+                return GateDecision(
+                    Effect.DENY,
+                    "output_schema",
+                    f"tool output exceeds the {self._output_budget} character scan budget, so no output "
+                    "control could read it",
+                ), None
+            if contract.on_output_violation != "allow":
+                # Scanning a prefix and reporting on the rest is the fail-open the
+                # pre-gate's budget refuses an input to avoid. The tool has already run,
+                # so the honest answer keeps the decision and drops the value.
+                return (
+                    GateDecision(
+                        Effect.REDACT,
+                        "post_redaction",
+                        "tool output exceeded the scan budget and was not inspected",
+                        redactions=("output:redacted_all",),
+                    ),
+                    "[REDACTED: tool output exceeded the scan budget and was not inspected]",
+                )
+            # `allow` is a deliberate choice to take an unscanned result, and it is
+            # recorded as one rather than passing silently.
+            redactions.append("output:unscanned_over_budget")
+            return (
+                GateDecision(
+                    Effect.ALLOW,
+                    "allow",
+                    "tool output exceeded the scan budget; the policy allows an unscanned result",
+                    redactions=tuple(redactions),
+                ),
+                out,
+            )
 
         # 0. Malformed-output policy (strict returns). Name-based redaction cannot
         #    save a secret that lands in an *undeclared* field, so an output that
@@ -906,7 +1020,7 @@ class Engine:
             # failure replaced every `Optional[...]` return with a truthy redaction
             # string — so `if result is None:` in the caller stopped being true and the
             # tool silently changed meaning.
-            if out is not None and not isinstance(out, (dict, list, tuple)):
+            if out is not None and not _projectable(out):
                 if contract.on_output_violation == "deny":
                     return GateDecision(
                         Effect.DENY,
@@ -924,8 +1038,9 @@ class Engine:
                         ),
                         "[REDACTED: tool output could not be projected]",
                     )
-            out, dropped = _project_output(out, frozenset(contract.returns.fields))
+            out, dropped, opaque = _project_output(out, frozenset(contract.returns.fields))
             redactions.extend(f"drop:{k}" for k in dict.fromkeys(dropped))
+            redactions.extend(f"output:uninspectable:{name}" for name in dict.fromkeys(opaque))
 
         # 1. Canary leak in the output → redact verbatim *and* normalized tokens
         #    anywhere in the structure, then ask the pre-gate's question of the whole
@@ -938,21 +1053,7 @@ class Engine:
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
             out, found = _redact_structure(out, self.policy.canaries)
             redactions.extend(f"canary:{tok}" for tok in found)
-            blob, blob_truncated = _text_blob(out)
-            if blob_truncated:
-                # Scanning a prefix and reporting `allow` on the rest is exactly the
-                # fail-open the pre-gate's budget refuses an input to avoid. The tool
-                # has already run, so the honest answer is to keep the decision and
-                # drop the value.
-                return (
-                    GateDecision(
-                        Effect.REDACT,
-                        "post_redaction",
-                        "tool output exceeded the scan budget, so it could not be checked for a canary",
-                        redactions=("output:redacted_all",),
-                    ),
-                    "[REDACTED: tool output exceeded the scan budget and was not inspected]",
-                )
+            blob, _ = _text_blob(out, self._output_budget)
             crossing = canary.find_normalized(blob, self.policy.canaries)
             if crossing:
                 redactions.extend(f"canary:{tok}" for tok in crossing)

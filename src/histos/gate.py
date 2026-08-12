@@ -76,6 +76,7 @@ from histos.audit import AuditRecord, AuditSink, InMemoryAuditSink, digest_args
 from histos.bundle import load_policy
 from histos.content_rules import ContentRules
 from histos.contracts import Effect, GateDecision, GateRequest, Policy, Principal, ToolContract
+from histos.engine import _MAX_OUTPUT_SCAN_CHARS as _DEFAULT_OUTPUT_BUDGET
 from histos.engine import Engine, EscalationTier, ResourceResolver, for_callback
 from histos.errors import GateConfirmationRequired, GateDenied, PolicyError, ToolErrorRedacted
 from histos.infer import infer_contract, infer_schema
@@ -762,6 +763,7 @@ class Gate:
         mode: str | None = None,
         enforcement: str | None = None,
         audit_key: bytes | None = None,
+        output_budget: int = _DEFAULT_OUTPUT_BUDGET,
         strict: bool = False,
     ) -> None:
         self.enforcement = _resolve_mode(mode, enforcement)
@@ -779,6 +781,7 @@ class Gate:
             content_rules=content_rules,
             resource_resolver=resource_resolver,
             escalate=escalate,
+            output_budget=output_budget,
         )
         self.audit = audit if audit is not None else InMemoryAuditSink()
         self._confirm = confirm
