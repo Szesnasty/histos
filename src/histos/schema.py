@@ -126,16 +126,28 @@ def _variable_width(av: tuple[Any, ...]) -> bool:
 
 
 def _unbounded(av: tuple[Any, ...]) -> bool:
-    """True when a repeat may iterate without limit — the degree that actually hurts.
+    """True when a repeat may iterate more than once — the degree that actually hurts.
 
-    A bounded outer repeat cannot produce runaway backtracking however ambiguous its
-    body is: ``(a+)?`` tries its body at most once and ``(?:X){3}`` three times.
     Treating every nesting as ``(a+)+`` refused semver, slugs, decimals, hostnames,
     ISO-8601 durations and Windows paths — all measured well under a millisecond
-    against 4 KiB of their own alphabet — while every shape that does blow up has an
-    unbounded repeat on the outside.
+    against 4 KiB of their own alphabet — so the rule was relaxed to "unbounded on the
+    outside", on the stated theory that a bounded outer repeat cannot produce runaway
+    backtracking however ambiguous its body is.
+
+    That theory is false, and expensively so. What a finite bound caps is the *exponent*,
+    not the cost: ``^Q(?:[a-z]+){1,40}$`` passed the relaxed screen and takes **17.5
+    seconds on 32 characters**, because forty iterations over a variable body is forty
+    nested choices. The bound that matters is one. A repeat that runs at most once —
+    ``?``, ``{0,1}``, ``{1}`` — cannot split its input at all and is genuinely free;
+    from two iterations upward there are partitions to enumerate, and the count grows
+    as ``C(n-1, m-1)`` in the input length.
+
+    Two iterations of a body whose boundary is *determined* are still fine, and that is
+    what keeps the dotted-quad and the hostname loading: they are excused a step later
+    by ``_anchored_body``/``_terminated_body``, on evidence about the body rather than
+    on an assumption about the bound.
     """
-    return av[1] is _re_const.MAXREPEAT
+    return av[1] is _re_const.MAXREPEAT or av[1] > 1
 
 
 def _transparent(body: Any) -> list[Any]:
@@ -377,21 +389,51 @@ def _branch_edges(branches: Any) -> _Edges | None:
 _Neighbour = tuple[Any, _Edges | None, bool]
 
 
-def _neighbour_clash(neighbours: list[_Neighbour], candidate: _Neighbour) -> str | None:
-    """Whether a variable repeat is ambiguous against one still adjacent to it.
+def _clashes(a: _Neighbour, b: _Neighbour) -> bool:
+    """Whether the boundary between two adjacent variable repeats can move.
 
-    The boundary between a run of the earlier repeat and the later one can move only if
-    some character is both a legal *end* of the earlier body and a legal *start* of the
-    later one — which is why `(?:ab)+(?:cd)+` is fine and `(?:ab)+(?:bc)+` is not.
+    It can only move if some character is both a legal *end* of the earlier body and a
+    legal *start* of the later one — which is why `(?:ab)+(?:cd)+` is fine and
+    `(?:ab)+(?:bc)+` is not.
     """
-    key, edges, _ = candidate
-    for prev_key, prev_edges, _ in neighbours:
-        if edges is not None and prev_edges is not None:
-            if prev_edges[1] & edges[0]:
-                return "two repeats in a row that can match the same character, e.g. `[a-z]+[a-z0-9]+`"
-        elif prev_key == key:
-            return "the same thing repeated twice in a row, e.g. `\\d+\\d+`"
-    return None
+    prev_key, prev_edges, _ = a
+    key, edges, _ = b
+    if edges is not None and prev_edges is not None:
+        return bool(prev_edges[1] & edges[0])
+    return prev_key == key
+
+
+# How many mutually ambiguous variable repeats may stand in one run.
+#
+# One, and the reason is a measurement rather than a preference. Under `re.fullmatch` —
+# which is how the gate applies a pattern — on input built from the pattern's own
+# alphabet and failing at the last character:
+#
+#     \d+\d+                                     2 runs      49 ms at 4 KiB
+#     [A-Za-z0-9]+[A-Za-z0-9_-]+                 2 runs      38 ms
+#     ^.+,[^\n]+$                                2 runs      14 ms
+#     [A-Za-z0-9]+[A-Za-z0-9_-]+[A-Za-z0-9]+     3 runs   6 000 ms at 2 KiB
+#     ^.+,[^\n]+,[^\n]+$                         3 runs   9 588 ms
+#     [a-z]+[a-z]+[a-z]+[a-z]+                   4 runs  13 800 ms at 500 B
+#
+# So a pair is quadratic with a small constant and a triple is an outage. Admitting
+# pairs was considered and rejected: 49 ms of held GIL per 4 KiB argument is a 20×
+# amplification an attacker can send on repeat, and this module's stated bargain is that
+# a false positive is a loud load-time error naming a rewrite while a false negative is
+# a hung process. Pairs stay refused; the shapes that actually blow up were the ones
+# getting through, and they are what the two fixes below close.
+_MAX_AMBIGUOUS_RUN = 1
+
+
+def _neighbour_clash(neighbours: list[_Neighbour], candidate: _Neighbour) -> str | None:
+    """Whether adding ``candidate`` makes the ambiguous run longer than we allow."""
+    clashing = [n for n in neighbours if _clashes(n, candidate)]
+    if len(clashing) < _MAX_AMBIGUOUS_RUN:
+        return None
+    _, edges, _ = candidate
+    if edges is not None and any(e is not None for _, e, _ in clashing):
+        return "two repeats in a row that can match the same character, e.g. `[a-z]+[a-z0-9]+`"
+    return "the same thing repeated twice in a row, e.g. `\\d+\\d+`"
 
 
 def _is_dot(body: Any) -> bool:
@@ -452,12 +494,32 @@ def _backtracking_risk(
             # measured at 0.03 ms on 4 KiB. In `^.+,[^\n]+,[^\n]+$` both sides match a
             # comma, every comma is a free choice, and that is the 518 ms case.
             body_edges = _edges(av[2])
+            # A leaf the pending repeats could also match was held as `crossed`, and this
+            # repeat decides what it meant. If this repeat cannot match it, the boundary
+            # between the two is pinned — and *only* that boundary.
+            #
+            # It used to clear the whole list, which threw away repeats it had never
+            # compared with anything. `^.+,\d+,.+,\d+,.+$` is the shape that exposed it:
+            # each `\d+` is pinned by the commas around it, so each one wiped both `.+`
+            # runs standing to its left, and the three `.+` runs — which *can* all absorb
+            # a comma, and are free with respect to each other — were never seen
+            # together. Measured 1 243 ms at 2 000 characters and 9 442 ms at 4 000,
+            # loading clean.
+            #
+            # So a pinned repeat drops out of the run instead of emptying it, and the
+            # repeats that can still absorb the separator stay in.
+            pinned = False
             if crossed is not None and body_edges is not None:
                 incoming, separator = body_edges[0], crossed[0]
                 if incoming is not None and separator is not None and incoming.isdisjoint(separator):
-                    neighbours.clear()
+                    pinned = True
+                    neighbours[:] = [n for n in neighbours if n[1] is None or n[1][1] & separator]
                 crossed = None
-            neighbour = (_shape_key(av[2]), body_edges, dot_repeat) if variable_repeat and _unbounded(av) else None
+            neighbour = (
+                (_shape_key(av[2]), body_edges, dot_repeat)
+                if variable_repeat and _unbounded(av) and not pinned
+                else None
+            )
             if neighbour is not None:
                 clash = _neighbour_clash(neighbours, neighbour)
                 if clash is not None:
@@ -467,8 +529,22 @@ def _backtracking_risk(
             # `[a-z0-9]+(?:-[a-z0-9]+)*` reads as two overlapping repeats only if the `-`
             # is ignored, and with it there is exactly one way to split the input. That
             # elision refused slugs, comma lists and dotted hostnames.
-            if av[0] != 0 or _anchored_body(av[2]) or _terminated_body(av[2]):
+            # A body carrying its own separator has exactly one valid split whatever it
+            # contains, so it ends the run outright: `[a-z0-9]+(?:-[a-z0-9]+)*` reads as
+            # two overlapping repeats only if the `-` is ignored.
+            #
+            # A repeat that *must* consume also separates — but only what it is disjoint
+            # from, which is the same test a leaf gets. Clearing the run whenever
+            # `av[0] != 0` was the blunt version, and it separated `.+` from `[^\n]+` in
+            # `^.+,[^\n]+,[^\n]+$` on the strength of the middle run consuming a
+            # character it could equally have left to either side. `\w+\s+\w+` is the
+            # case that needs the rule: `\s` cannot be a `\w`, so the boundary is
+            # forced and the two `\w+` runs are not neighbours at all.
+            if _anchored_body(av[2]) or _terminated_body(av[2]):
                 neighbours.clear()
+            elif av[0] != 0 and body_edges is not None:
+                spanned = body_edges[0] | body_edges[1]
+                neighbours[:] = [n for n in neighbours if n[1] is None or n[1][1] & spanned]
             if neighbour is not None:
                 neighbours.append(neighbour)
             # `in_repeat` means "enclosed by a repeat whose iterations are ambiguous".

@@ -396,3 +396,53 @@ def test_a_permitted_pattern_stays_fast_on_a_full_length_worst_case():
     elapsed = time.perf_counter() - started
 
     assert elapsed < 1.0, f"{len(permissive)} full-length non-matches took {elapsed:.3f}s"
+
+
+# ── round three: two holes the last relaxation of this screen opened ──────
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"^Q(?:[a-z]+){1,40}$",
+        r"^[a-z]{1,4000}[a-z]{1,4000}$",
+        r"^(?:[a-z]+){2,}$",
+    ],
+)
+def test_a_finite_outer_bound_does_not_make_a_nested_repeat_safe(pattern):
+    """`_unbounded` answered "is the outer repeat unbounded?", on the theory that a
+    bounded one cannot produce runaway backtracking however ambiguous its body is. A
+    finite bound caps the *exponent*, not the cost: `^Q(?:[a-z]+){1,40}$` passed and took
+    17.5 seconds on 32 characters. The bound that matters is one iteration."""
+    with pytest.raises(PolicyError, match="backtrack"):
+        Field(type="string", pattern=pattern)
+
+
+def test_a_repeat_that_runs_at_most_once_is_still_free():
+    """`?` and `{0,1}` cannot split their input at all, which is what kept semver and
+    the rest loading. The stricter rule must not take that back."""
+    for pattern in (r"^\d+\.\d+\.\d+(?:-[\w.]+)?$", r"^(?:[a-z]+)?$", r"^(?:[a-z]+){1}$"):
+        Field(type="string", pattern=pattern)
+
+
+def test_a_pinned_field_does_not_erase_the_free_runs_around_it():
+    """The separator held as `crossed` pins the boundary with the repeat that follows it
+    — and only that boundary. Clearing the whole run threw away repeats it had never
+    compared with anything: in `^.+,\\d+,.+,\\d+,.+$` each `\\d+` is pinned by its commas
+    and wiped both `.+` runs to its left, so the three `.+` runs — all of which can
+    absorb a comma — were never seen together. It loaded clean and cost 9.4 s at 4 KiB."""
+    with pytest.raises(PolicyError, match="backtrack"):
+        Field(type="string", pattern=r"^.+,\d+,.+,\d+,.+$")
+
+    # Its two-run sibling is the one that must keep loading.
+    Field(type="string", pattern=r"^.+,\d+$")
+
+
+def test_a_must_consume_repeat_separates_only_what_it_is_disjoint_from():
+    """`\\s` cannot be a `\\w`, so `\\w+\\s+\\w+` has a forced boundary and is not a pair
+    of neighbours at all. `[^\\n]+` in `^.+,[^\\n]+,[^\\n]+$` consumes a character it
+    could equally have left to either side, so it separates nothing."""
+    Field(type="string", pattern=r"^\w+\s+\w+$")
+    Field(type="string", pattern=r"^[a-z]+[0-9]+[a-z]+$")
+    with pytest.raises(PolicyError, match="backtrack"):
+        Field(type="string", pattern=r"^.+,[^\n]+,[^\n]+$")
