@@ -125,6 +125,7 @@ _FIELD_KEYS = frozenset(
         "min_length",
         "minimum",
         "multiple_of",
+        "nullable",
         "pattern",
         "required",
         "sensitive",
@@ -205,11 +206,32 @@ def _as_list(where: str, node: Any) -> list[Any]:
     return node
 
 
+# The Python constructor and the file format spell three things differently, and the
+# file format is the one that is versioned and published. A reader who followed the
+# README quickstart in code and then wrote the same policy to disk hit a bare "unknown
+# key 'permissions'" — technically correct and useless, because the key they wrote is
+# the name the library itself told them to use one page earlier. The loader still
+# accepts exactly one spelling; it just stops pretending it has never heard of the
+# other. See docs/policy-reference.md for the whole mapping.
+_PYTHON_SPELLINGS = {
+    "permissions": "roles (as `roles: {<role>: {allow: [...]}}`)",
+    "policy_version": "version",
+    "role_inherits": "roles.<role>.inherits",
+}
+
+
 def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -> None:
     """Fail closed on any key this engine does not understand."""
     unknown = sorted(k for k in data if k not in allowed)
     if not unknown:
         return
+    if unknown[0] in _PYTHON_SPELLINGS:
+        raise PolicyError(
+            f"{unknown[0]!r} in {where} is the Python constructor's name for this; the file format "
+            f"spells it {_PYTHON_SPELLINGS[unknown[0]]}. The two vocabularies are listed in "
+            "docs/policy-reference.md.",
+            code="unknown_key",
+        )
     raise PolicyError(
         f"unknown key {unknown[0]!r} in {where}"
         + (f" (also: {', '.join(unknown[1:])})" if len(unknown) > 1 else "")
@@ -269,6 +291,7 @@ def _field_from_compact(where: str, spec: Any) -> Field:
         min_length=spec.get("min_length"),
         pattern=spec.get("pattern"),
         sensitive=spec.get("sensitive"),
+        nullable=spec.get("nullable", False),
         item_type=spec.get("item_type"),
         minimum=spec.get("minimum"),
         maximum=spec.get("maximum"),
@@ -438,12 +461,25 @@ def _reject_json_constant(token: str) -> Any:
     )
 
 
+_TOO_DEEP = (
+    "policy is nested too deeply to parse — refusing to load. A document that exhausts the parser is "
+    "not one this engine can enforce only part of."
+)
+
+
 def parse_json_bundle(text: str) -> dict[str, Any]:
     """Strictly parse a JSON bundle into a dict (duplicate keys are refused)."""
     try:
         data = json.loads(text, object_pairs_hook=_reject_duplicate_json_pairs, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as exc:
         raise PolicyError(f"policy is not valid JSON: {exc}", code="unparseable") from exc
+    except RecursionError as exc:
+        # A deeply nested document exhausts the interpreter stack inside the parser, and
+        # a raw RecursionError walks straight past every `except PolicyError` a host
+        # wrote around loading — including the CLI's, which then prints a traceback for
+        # what is an ordinary malformed input. Same code as the expansion bomb: one
+        # family, one thing for a host to catch.
+        raise PolicyError(_TOO_DEEP, code="policy_too_large") from exc
     if not isinstance(data, dict):
         raise PolicyError(f"policy must be an object at the top level, got {type(data).__name__}", code="not_an_object")
     return data
@@ -514,6 +550,8 @@ def parse_yaml_bundle(text: str) -> dict[str, Any]:
         raise
     except yaml.YAMLError as exc:
         raise PolicyError(f"policy is not valid YAML: {exc}", code="unparseable") from exc
+    except RecursionError as exc:  # see parse_json_bundle
+        raise PolicyError(_TOO_DEEP, code="policy_too_large") from exc
     if data is None:
         raise PolicyError("policy file is empty", code="unparseable")
     if not isinstance(data, dict):
