@@ -39,7 +39,7 @@ from typing import Any
 
 from histos import canary, detectors
 from histos.content_rules import ContentRules
-from histos.contracts import Effect, GateDecision, GateRequest, Policy
+from histos.contracts import Effect, GateDecision, GateRequest, Policy, ToolContract
 from histos.errors import ResourceNotFound
 from histos.limits import LimitStore
 from histos.schema import sensitive_fields, validate
@@ -109,7 +109,7 @@ def _next_link(exc: BaseException) -> BaseException | None:
     return None if exc.__suppress_context__ else exc.__context__
 
 
-def _exception_text(exc: BaseException) -> tuple[str, bool]:
+def _exception_text(exc: BaseException, budget: int | None = None) -> tuple[str, bool]:
     """Everything a caller can read off a raised exception, as one string to scan.
 
     ``f"{type(exc).__name__}: {exc}"`` covers only the outermost message, and that is
@@ -132,10 +132,34 @@ def _exception_text(exc: BaseException) -> tuple[str, bool]:
     group with both sub-exceptions — and their secrets — intact, while the identical
     payload on a ``raise ... from`` chain was caught. So the walk is breadth-first over
     links *and* members.
+
+    Bounded by ``budget`` as well as by link count. The return path got a size budget
+    because the scan is linear in the text and a manipulated model can make the text
+    enormous; the raise path is the same channel and was left with none, so a chain of
+    sixteen exceptions each carrying a megabyte of message was materialised in full and
+    then NFKC-normalised and run past every detector. Tool error text is as
+    attacker-controlled as tool output. Over budget returns ``incomplete``, which the
+    caller already turns into a redact-all rather than a partial scan.
     """
+    # Resolved here, not as a default argument: `_MAX_OUTPUT_SCAN_CHARS` is declared
+    # further down the module, beside the input budget it is the twin of.
+    budget = _MAX_OUTPUT_SCAN_CHARS if budget is None else budget
     parts: list[str] = []
+    total = 0
     seen: set[int] = set()
     pending: deque[BaseException] = deque([exc])
+
+    def take(text: str) -> bool:
+        """Append one piece, or refuse it and stop. Refused rather than appended, so an
+        over-budget chain is never joined into the megabytes the budget exists to avoid
+        touching — the caller drops the text whole when `incomplete` comes back true."""
+        nonlocal total
+        if total + len(text) > budget:
+            return False
+        parts.append(text)
+        total += len(text)
+        return True
+
     for _ in range(_MAX_EXCEPTION_CHAIN):
         if not pending:
             return "\n".join(parts), False
@@ -143,7 +167,8 @@ def _exception_text(exc: BaseException) -> tuple[str, bool]:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        parts.append(f"{type(current).__name__}: {current}")
+        if not take(f"{type(current).__name__}: {current}"):
+            return "\n".join(parts), True
         notes = getattr(current, "__notes__", None)
         # A Sequence, not a list: `add_note` builds a list, but the attribute is
         # writable and `traceback` prints whatever is iterable there. A `str` is a
@@ -151,9 +176,11 @@ def _exception_text(exc: BaseException) -> tuple[str, bool]:
         # Anything else iterable-but-not-Sequence, or not iterable at all, is printed by
         # CPython as its `repr`, so that is what gets scanned rather than nothing.
         if isinstance(notes, Sequence) and not isinstance(notes, (str, bytes)):
-            parts.extend(str(note) for note in notes)
-        elif notes is not None:
-            parts.append(repr(notes))
+            for note in notes:
+                if not take(str(note)):
+                    return "\n".join(parts), True
+        elif notes is not None and not take(repr(notes)):
+            return "\n".join(parts), True
         if isinstance(current, BaseExceptionGroup):
             pending.extend(current.exceptions)
         link = _next_link(current)
@@ -935,15 +962,15 @@ class Engine:
 
     def _post_exception(self, req: GateRequest, exc: BaseException) -> tuple[GateDecision, str]:
         contract = self.policy.contract_for(req.tool_name)
-        text, incomplete = _exception_text(exc)
+        text, incomplete = _exception_text(exc, self._output_budget)
         redactions: list[str] = []
         if incomplete:
             return (
                 GateDecision(
                     Effect.REDACT,
                     "exception_redaction",
-                    f"the exception chain is longer than {_MAX_EXCEPTION_CHAIN} links, so it could not be "
-                    "read to the end",
+                    f"the exception chain is longer than {_MAX_EXCEPTION_CHAIN} links, or larger than the "
+                    f"{self._output_budget} character scan budget, so it could not be read to the end",
                     redactions=("output:redacted_all",),
                 ),
                 "[REDACTED: the tool raised through a chain too long to inspect]",
@@ -969,6 +996,20 @@ class Engine:
             )
         return GateDecision(Effect.ALLOW, "allow"), text
 
+    def _will_read_output(self, contract: ToolContract) -> bool:
+        """Whether any post-gate pass is going to walk the returned value.
+
+        The passes that do, and the only ones the budget is bounding: the canary scan
+        (which needs canaries planted to do anything), the secret detectors, and
+        anything keyed on a declared return shape — strict returns, projection and the
+        sensitive-field walk all need `returns`.
+        """
+        return bool(
+            contract.redact_secret_output
+            or (contract.scan_output_for_canary and self.policy.canaries)
+            or contract.returns is not None
+        )
+
     def _post(self, req: GateRequest, result: Any) -> tuple[GateDecision, Any]:
         contract = self.policy.contract_for(req.tool_name)
         redactions: list[str] = []
@@ -980,7 +1021,16 @@ class Engine:
         # magnitude, and the sensitive-field walk. A 63 MB return with canaries switched
         # off was still fully scanned. Asking first also means the answer costs one
         # traversal rather than being paid after the payload has already been walked.
-        if contract is not None and _over_output_budget(out, self._output_budget):
+        #
+        # Asked only where an answer changes something. Moving it out of the canary
+        # branch also moved it out of every *condition*, so it ran for a plain
+        # `ToolContract(name=…, args=Schema({}))` with no canaries, no secret scan and no
+        # declared return — a contract under which nothing reads the value at all. A
+        # 4.4 MB CSV that came back in 186 ms before now came back as a 70-character
+        # redaction string. A budget exists to bound work that is about to happen; where
+        # no work is about to happen it is not a bound, it is a size limit nobody asked
+        # for.
+        if contract is not None and self._will_read_output(contract) and _over_output_budget(out, self._output_budget):
             if contract.on_output_violation == "deny":
                 return GateDecision(
                     Effect.DENY,
@@ -1108,7 +1158,22 @@ class Engine:
         if contract is not None and contract.scan_output_for_canary and self.policy.canaries:
             out, found = _redact_structure(out, self.policy.canaries)
             redactions.extend(f"canary:{tok}" for tok in found)
-            blob, _ = _text_blob(out, self._output_budget)
+            # The blob is rebuilt *after* redaction, and redaction grows text: an
+            # 8-character token becomes the 17-character `[REDACTED-CANARY]`. So an
+            # output that fitted the budget on the way in can exceed it here, and this
+            # call site threw the truncation flag away — leaving `find_normalized`, the
+            # only thing in the library that can see a token split across two fields,
+            # reading a prefix and reporting clean about the rest.
+            blob, blob_cut = _text_blob(out, self._output_budget)
+            if blob_cut:
+                redactions.append("output:redacted_all")
+                why = "redaction grew the output past the scan budget, so it could not be checked for a canary"
+                return (
+                    GateDecision(
+                        Effect.REDACT, "post_redaction", f"{why} — output dropped", redactions=tuple(redactions)
+                    ),
+                    f"[REDACTED: {why}]",
+                )
             crossing = canary.find_normalized(blob, self.policy.canaries)
             if crossing:
                 redactions.extend(f"canary:{tok}" for tok in crossing)

@@ -42,6 +42,7 @@ from histos import (
     use_principal,
     verify_chain,
 )
+from histos.contracts import Effect, GateRequest
 from histos.detectors import scan_string
 from histos.lockfile import schema_hash
 from histos.review import review_policy
@@ -860,3 +861,72 @@ def test_projection_still_enters_the_container_subclasses_a_real_tool_returns():
             out = safe()
         assert "leak" not in repr(out) and "secret" not in repr(out), f"{type(value).__name__} was not projected"
         assert "REDACTED" not in repr(out), f"{type(value).__name__} was refused, but the projector handles it"
+
+
+def test_the_budget_is_asked_only_where_a_pass_will_read_the_value():
+    """Moving the size question out of the canary branch also moved it out of every
+    condition, so it ran for a contract under which nothing walks the output at all.
+    The passes it bounds are the secret detectors, the canary scan when tokens are
+    actually planted, and anything keyed on a declared return shape."""
+    rows = "\n".join(f"{i},value-{i},xxxxxxxxxx" for i in range(200_000))
+
+    def csv_tool() -> str:
+        return rows
+
+    def run(policy: Policy) -> object:
+        with use_principal(Principal(role="ok", identity="i")):
+            return gate(csv_tool, policy=policy, name="t")()
+
+    def _p(canaries: frozenset[str] = frozenset(), **kw: object) -> Policy:
+        return Policy(
+            tools={"t": ToolContract(name="t", args=Schema({}), **kw)},
+            permissions={"ok": frozenset({"t"})},
+            canaries=canaries,
+        )
+
+    # Nothing reads it — it comes back as it was.
+    assert run(_p(redact_secret_output=False, scan_output_for_canary=False)) is rows
+    # The canary pass with no tokens planted reads nothing either.
+    assert run(_p(redact_secret_output=False)) is rows
+    # But the secret detectors do read it, and bounding that pass is the whole point.
+    assert "scan budget" in run(_p())
+    # As does the canary scan once a token exists to look for.
+    assert "scan budget" in run(_p(canaries=frozenset({"CANARY-TOKEN"}), redact_secret_output=False))
+
+
+def test_the_raise_path_is_budgeted_like_the_return_path():
+    """`_exception_text` materialised the whole chain and handed it to the NFKC pass and
+    every detector. Tool error text is as attacker-controlled as tool output, so the
+    raise path is the same DoS the return budget exists to close."""
+    from histos.engine import _exception_text
+
+    text, incomplete = _exception_text(ValueError("x" * 5_000_000), 4_194_304)
+    assert incomplete
+    assert not text, "the over-budget piece must not be joined into the text at all"
+
+    # Under budget, nothing changes.
+    text, incomplete = _exception_text(ValueError("small"), 4_194_304)
+    assert not incomplete and "small" in text
+
+
+def test_redaction_growing_the_output_past_the_budget_is_not_scanned_as_a_prefix():
+    """Verbatim canary redaction grows text — an 8-character token becomes the
+    17-character `[REDACTED-CANARY]` — so an output that fitted on the way in can
+    exceed the budget after redaction. The second blob discarded its truncation flag,
+    leaving the split-token check reading a prefix and reporting clean about the rest."""
+    from histos.engine import Engine
+    from histos.limits import LimitStore
+
+    token = "CANARY-A"
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}))},
+        permissions={"ok": frozenset({"t"})},
+        canaries=frozenset({token}),
+    )
+    # A budget that the value fits under and the redacted value does not.
+    engine = Engine(policy, LimitStore(), output_budget=300)
+    rows = [token] * 20  # 160 chars in, 340 out
+    decision, out = engine.post(GateRequest("t", {}, Principal(role="ok", identity="i")), rows)
+    assert decision.effect is Effect.REDACT
+    assert "output:redacted_all" in decision.redactions
+    assert token not in repr(out)
