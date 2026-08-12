@@ -109,7 +109,6 @@ def test_a_returned_async_generator_is_denied() -> None:
         guarded(q="hello")
     assert exc.value.decision.rule == "uninspectable_output"
     assert "async generator" in exc.value.decision.reason
-    asyncio.get_event_loop_policy()  # no loop is needed; the agen was never started
 
 
 def test_an_async_tool_returning_a_genexp_is_denied_on_the_async_path() -> None:

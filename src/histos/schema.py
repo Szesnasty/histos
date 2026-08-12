@@ -819,6 +819,14 @@ class Field:
     #: Distinct from ``max_length``, which bounds each string *element*.
     max_items: int | None = None
     min_items: int | None = None
+    #: Allowed values for each *element* of an ``array``.
+    #:
+    #: Distinct from ``enum``, which the engine matches against the whole argument — so
+    #: copying an element enum there would deny every call. Carried as an escaped
+    #: alternation in ``pattern`` for one release, which worked for strings and left
+    #: `{"type": "array", "items": {"type": "integer", "enum": [1, 2]}}` unimportable
+    #: because there was nothing to hang a value set on that was not a string screen.
+    item_enum: tuple[Any, ...] | None = None
     # Numeric value bounds (integer/number, and per numeric array element). A
     # non-finite value (NaN/±Inf) is denied outright — a NaN makes every IEEE
     # comparison False, so a naive `<=` bound would silently pass it (Phase 0.1).
@@ -941,6 +949,14 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
             errors.append(f"{name}: has {len(value)} items, fewer than min_items {spec.min_items}")
         if spec.max_items is not None and len(value) > spec.max_items:
             errors.append(f"{name}: has {len(value)} items, more than max_items {spec.max_items}")
+
+    if spec.type == "array" and spec.item_enum is not None and isinstance(value, (list, tuple)):
+        allowed = spec.item_enum
+        errors.extend(
+            f"{name}[{i}]: not one of the allowed values {list(allowed)}"
+            for i, item in enumerate(value)
+            if item not in allowed
+        )
 
     if spec.type == "array" and spec.item_type is not None:
         item_expected = _TYPE_CHECKS.get(spec.item_type, object)

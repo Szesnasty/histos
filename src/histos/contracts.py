@@ -421,6 +421,7 @@ def _schema_structure(schema: Schema | None) -> Any:
                 "pattern": f.pattern,
                 "sensitive": f.sensitive,
                 "nullable": f.nullable,
+                "item_enum": list(f.item_enum) if f.item_enum is not None else None,
                 "item_type": f.item_type,
                 "max_items": f.max_items,
                 "min_items": f.min_items,

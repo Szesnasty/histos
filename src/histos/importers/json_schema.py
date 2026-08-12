@@ -53,7 +53,6 @@ is deny-by-default on the argument surface too. Pass an object whose
 from __future__ import annotations
 
 import math
-import re
 from typing import Any
 
 from histos.errors import PolicyError
@@ -395,30 +394,32 @@ def _collapse_union(
     return node, False
 
 
-def _element_enum_pattern(members: Any, *, item_type: str, where: str) -> str:
-    """Carry an element ``enum`` as the per-element pattern the engine already enforces.
+def _element_enum(members: Any, *, item_type: str, where: str) -> tuple[Any, ...]:
+    """The value set each element of an array must be drawn from.
 
-    ``Field.enum`` is matched against the *whole* argument (``_check_scalar`` in
-    :mod:`histos.schema`), so copying an element enum onto the array field would deny
-    every call. Round one drew the right conclusion from that and refused the keyword —
-    which removed ``{"type": "array", "items": {"type": "string", "enum": [...]}}``, the
-    shape real MCP tools use for scopes and permissions, from the importable surface.
-    ``Field.pattern`` *is* applied per element (``_check_string_value`` runs for each
-    item), so a string element enum is written as the equivalent alternation instead.
-    That is a re-spelling and not a widening: ``re.fullmatch`` over escaped alternatives
-    admits exactly the listed members. Non-string elements have no per-element screen to
-    hang a value set on, so those are still refused by name.
+    ``Field.enum`` is matched against the *whole* argument, so copying an element enum
+    there would deny every call — round one drew the right conclusion from that and
+    refused the keyword, which removed the shape real MCP tools use for scopes and
+    permissions from the importable surface. Round two carried it as an escaped
+    alternation in ``pattern``, which works only because the per-element screen happens
+    to be a string screen, and therefore left `items: {type: integer, enum: [1, 2]}`
+    unimportable for a reason that was about the implementation rather than the source.
+
+    ``Field.item_enum`` is the thing itself: the engine checks each element against it,
+    whatever its type. The members still have to agree with the declared element type,
+    because a value set that contradicts it can never be satisfied.
     """
     if not isinstance(members, list) or not members:
         raise _malformed("items.enum", members, "a non-empty list of allowed values")
-    if item_type not in ("string", "any") or not all(isinstance(m, str) for m in members):
-        raise PolicyError(
-            f"imported schema for {where} declares items.enum={members!r} on {item_type!r} elements. "
-            "The engine's per-element screen is a string screen, so a non-string element enum cannot "
-            "be projected and would be dropped. Write the argument by hand in the bundle.",
-            code="invalid_import",
-        )
-    return "|".join(re.escape(m) for m in members)
+    expected = _TYPE_OF.get(item_type)
+    if expected is not None and not all(isinstance(m, expected) and not _is_stray_bool(m, item_type) for m in members):
+        raise _malformed(f"{where} items.enum", members, f"a list of {item_type} values")
+    return tuple(members)
+
+
+def _is_stray_bool(member: Any, item_type: str) -> bool:
+    """`True` is an `int` in Python; a boolean in an integer enum is a malformed source."""
+    return isinstance(member, bool) and item_type in ("integer", "number")
 
 
 def _resolve_type(js_type: Any, *, where: str = "an imported schema") -> tuple[str, bool]:
@@ -573,17 +574,11 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         _refuse_unprojected(items, _UNPROJECTED_IN_ITEMS, where=where, prefix="items.")
         item_type = _resolve_type(items.get("type"), where=f"{where} items")[0]
 
-    pattern_keyword, pattern = _bound(prop, items, "pattern")
-    if "enum" in items:
-        if pattern is not None:
-            raise PolicyError(
-                f"imported schema for {where} declares items.enum next to {pattern_keyword}. The enum "
-                "is carried as the element pattern, so the two cannot both be projected and one of "
-                "them would be dropped. Write the intersection as a single pattern.",
-                code="invalid_import",
-            )
-        pattern = _element_enum_pattern(items["enum"], item_type=item_type or "any", where=where)
-        item_type = "string"
+    _, pattern = _bound(prop, items, "pattern")
+    # An element enum and an element pattern now live in separate fields and are both
+    # enforced, so a document may write either or both — the intersection is what the
+    # engine applies, which is what the source says.
+    item_enum = _element_enum(items["enum"], item_type=item_type or "any", where=where) if "enum" in items else None
 
     sensitive = _sensitivity_marker(prop, where=where)
 
@@ -596,6 +591,7 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         min_length=_length(*_bound(prop, items, "minLength")),
         pattern=pattern,
         sensitive=sensitive,
+        item_enum=item_enum,
         item_type=item_type,
         max_items=_length(*_bound(prop, None, "maxItems")),
         min_items=_length(*_bound(prop, None, "minItems")),
