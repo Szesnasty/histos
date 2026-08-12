@@ -630,8 +630,8 @@ _REMEDY: dict[str, str] = {
     "confirm_suspended": "resume the run and retry once the approval is granted; nothing was decided",
     "unnameable_args": "call the tool with keyword arguments — a policy names its fields, so the gate "
     "cannot check what it cannot name",
-    "uninspectable_output": "return the collected result — the output half of the gate can only inspect a "
-    "materialised value",
+    "uninspectable_output": "collect the result first — `list(...)`, `dict(...)`, `bytes(...)` — and return "
+    "that; the output half of the gate can only inspect a materialised value",
 }
 
 

@@ -1,7 +1,7 @@
 {
   "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and \u2014 the part prose kept getting wrong \u2014 what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
   "manifest_version": "1",
-  "corpus_version": "0.3.0",
+  "corpus_version": "0.4.0",
   "status": "draft",
   "schema_version": "histos.policy/0.1",
   "artifacts": {

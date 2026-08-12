@@ -1494,7 +1494,8 @@ class Gate:
             # every dashboard and second implementation that groups by rule.
             "uninspectable_output",
             f"{tool_name!r} returned a {kind}: the output half of the gate can only inspect a "
-            "materialised value, so nothing scanned it. Return the collected result instead.",
+            "materialised value, so nothing scanned it. Collect it first — `list(...)`, `dict(...)`, "
+            "`bytes(...)` — and return that.",
         )
         # executed=True without argument: the tool body ran to completion.
         self._emit(tool_name, call_args, decision, "post", started, active, True)

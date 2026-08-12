@@ -162,9 +162,11 @@ the denied-but-executed decisions → enforce*.
 
 Two things to hold onto while a gate is in observe. It protects nothing in the
 meantime — not a denied call, not a canary, not a call with no principal bound. And it
-is not a perfectly transparent replay: `bind` still overwrites bound arguments before
-the tool runs, because binding precedes evaluation and is what the rest of the chain
-judges, so the tool executes with the trusted value rather than the model's.
+predicts rather than replays: the policy is evaluated against the *bound* arguments, so
+the decision recorded is the decision enforce would make, while the tool itself runs
+with the arguments it would have received ungated. Both halves matter — judging the
+model's value would mispredict enforce, and rewriting the call would make the dry run
+measure something other than the app.
 
 ## Audit
 

@@ -305,9 +305,11 @@ and the five ways to get it wrong that all compile and run — is
 - `mode="observe"` — record what it *would* do, block nothing. A dry-run for
   development and calibration before you turn on enforcement. It protects nothing:
   it does not block a call with no principal bound, does not redact, and does not
-  withhold a canary or a secret. The one thing it still changes is `bind`, which
-  overwrites bound arguments before the tool runs — so observe is a dry run of the
-  *decisions*, not a transparent replay of the call.
+  withhold a canary or a secret. What it does do is reach the decision enforce would
+  reach — the policy is evaluated against the *bound* arguments in both modes — while
+  leaving the call itself alone: the tool runs with exactly the arguments it would
+  have received with no gate at all, `bind` included. A dry run whose side effects
+  differ from the ungated app would be measuring something else.
 
 Observe records are unmistakable, so watching is never confused with protecting:
 a denial that still ran is written as `effect=deny enforced=false executed=true`.
@@ -409,7 +411,7 @@ so the contract is not the API — it is:
   pinning the case list and what *passing* is allowed to mean. The reference engine runs
   them in its own test suite, so a Python change that breaks the contract fails here and
   now rather than in a future port, much later.
-- [`policies/`](https://github.com/Szesnasty/histos/tree/v0.1.0/policies) — five real policies from one tool to a whole MCP server,
+- [`policies/`](https://github.com/Szesnasty/histos/tree/v0.1.0/policies) — seven worked policies, from one tool to a whole MCP server,
   each in **YAML and JSON**, each hashing identically across both spellings. Read these
   to learn the format; read the spec to implement it.
 

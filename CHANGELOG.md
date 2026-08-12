@@ -36,7 +36,9 @@ nothing is on PyPI yet — which is exactly why they land now rather than in 0.2
   `confirm_error` denial.
 - **`principal=` is gone.** Use `use_principal()` per request, or `fixed_principal=`.
   The deprecation warning it used to emit was filtered by default outside `__main__`,
-  so the misconfiguration it warned about was silent in every real host.
+  so the misconfiguration it warned about was silent in every real host. (Entries below
+  this heading that describe `principal=` as deprecated-but-working predate that and
+  describe the state before 0.1.0, not the release.)
 - **`ApprovalStore(policy)` takes its policy positionally and required.** Built
   without one it could not see `confirmation.expires_in`, so a declared window
   silently did not exist.
@@ -50,6 +52,14 @@ nothing is on PyPI yet — which is exactly why they land now rather than in 0.2
   edit. Swap the whole policy with `gate.policy = ...`, which re-hashes.
 - **`histos review` exits 1 on a structural issue**, matching `histos validate`, and
   prints its warnings rather than counting them.
+- **The pattern screen refuses polynomial shapes, not only exponential ones.** A
+  `pattern` in a policy or an imported schema is now refused at load when adjacent
+  repeats can match the same character (`^[A-Za-z0-9]+[A-Za-z0-9_-]+[A-Za-z0-9]+$` cost
+  48 s on one 4 KiB argument) or when a delimited-line shape leaves every delimiter a
+  free choice (`^.+,[^\n]+,[^\n]+$`, 518 ms at 2 000 characters). A load-time timing
+  probe backs the shape screen up. Patterns that loaded before may now raise
+  `PolicyError`; the message names the rewrite. Verified against 60 real-world patterns
+  in `tests/corpus/patterns.json`, each classified by measurement rather than by eye.
 - **The importer refuses more, and drops less.** An unknown JSON Schema `type`, a
   near-miss `x-sensitive` marker, and a tool name carrying a terminal control
   character are all refused rather than silently degraded.
