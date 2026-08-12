@@ -171,9 +171,17 @@ def test_an_openapi_response_ref_is_resolved_too():
 
 def test_no_openapi_refusal_can_claim_a_target_is_absent_when_it_is_present():
     """The regression that made the fix look like a document bug: the bridge was
-    called with no root, so it reported `components/schemas/Mode` as naming nothing."""
+    called with no root, so it reported `components/schemas/Mode` as naming nothing.
+
+    Asserting only that `args` is populated was not enough to catch it — before the
+    fix the `$ref` degraded to `type: any` and `args` was a populated Schema all the
+    same. What separates the two states is whether the bound behind the reference
+    survived, so that is what is checked."""
     for source in sources_from_openapi(OPENAPI_WITH_REFS):
         assert source.contract.args is not None
+        mode = source.contract.args.fields["mode"]
+        assert mode.type == "string", "the $ref degraded to `any` instead of resolving"
+        assert mode.enum == ("read", "write")
 
 
 def test_a_dangling_openapi_parameter_ref_is_refused_rather_than_dropping_the_argument():

@@ -160,10 +160,13 @@ def test_an_oversized_output_is_refused_rather_than_partly_scanned():
 
 
 def test_a_bound_attribute_reaches_the_tool_as_a_copy():
+    """The old assertion held whenever the tool did not get the principal's own list —
+    including when the binding never ran at all, so it passed with the `bind` removed.
+    It has to check that the binding *did* happen and that the anchor survived it."""
     seen: list[list[str]] = []
 
     def read(tenants: list[str]) -> str:
-        seen.append(tenants)
+        seen.append(list(tenants))   # snapshot before mutating the very object under test
         tenants.append("evil-corp")
         return "ok"
 
@@ -181,6 +184,7 @@ def test_a_bound_attribute_reaches_the_tool_as_a_copy():
     safe = gate(read, policy=policy, name="read")
     with use_principal(who):
         safe(tenants=[])
+    assert seen == [["acme"]], "the binding did not overwrite the argument"
     assert who.attributes["tenants"] == ["acme"], "the tool rewrote the principal's own attribute"
 
 

@@ -261,12 +261,31 @@ which observe passes through unread rather than refuse (closing it would destroy
 very data the run exists to observe). An audit record is not a control. A gate left in
 observe protects nothing; it measures.
 
-One thing it *does* change, so do not read observe as a transparent replay: `bind`
-still overwrites bound arguments before the tool runs, because binding happens before
-evaluation and is what the rest of the chain then judges. The tool therefore executes
-with the trusted `tenant_id`, not the one the model asked for — an intervention, in the
-mode that promises none. Everything else the tool sees is what it would have seen with
-no gate at all.
+What observe *does* do is reach the decision enforce would reach. The policy is
+evaluated against the bound arguments in both modes — a run that judged the model's
+`tenant_id` while enforce judges the principal's would predict denials enforce never
+makes, and miss ones it does, which is the one job observe has. The call itself is
+untouched: the tool receives exactly what it would have received with no gate at all,
+`bind` included. An earlier version rewrote the arguments in observe too, and a dry run
+whose side effects differ from the ungated app is measuring something else.
+
+### The post-gate stops reading at 4 MiB of tool output
+
+Every outbound control has to read the value to act on it, and reading is linear in the
+size of the value while the tool that produced it is attacker-influenced. So there is a
+budget — 4 MiB of joined text by default, `Gate(output_budget=...)` — and a result that
+exceeds it is not partially scanned: scanning a prefix and reporting on the rest is the
+fail-open the inbound budget refuses an input to avoid.
+
+What happens instead is the policy's choice, through `on_output_violation`: the default
+drops the value and says so, `deny` refuses the call outright, and `allow` returns the
+result unscanned with `output:unscanned_over_budget` in the record — an explicit
+decision to take an unread result, visible in the trail rather than silent. The tool has
+already run in all three cases; none of this undoes it.
+
+A reporting tool that legitimately returns tens of megabytes needs the budget raised, and
+raising it is the supported answer. Leaving it at the default and hitting it is not a
+detection: it is the gate saying it could not look.
 
 ### Canary is a mechanical control + an oracle — NOT exfil prevention
 The pre-gate DENYs a canary token in an argument and the post-gate REDACTs it from
@@ -391,6 +410,17 @@ where the chain has reached; `verify()` compares them and reports a truncated ta
 Delete the sidecar and that detection is gone, in keyed and unkeyed mode alike. This
 document previously claimed the unkeyed chain detected truncation on its own; it did
 not, and an audit caught it.
+
+Deleting the log *and* the sidecar together leaves nothing on disk to contradict a
+fresh chain, and a running process is the only thing left that remembers. A sink that
+finds its log shorter than it left it therefore writes the break into the file rather
+than starting over, so `verify` reports it. **Ordinary log rotation reads as exactly
+that**, and deliberately: `rm` and `mv` both leave a fresh inode at the same path, so
+nothing inside the process can separate erasure from rotation. A rotated log reporting
+a broken chain costs an operator an explanation they already have; a missed erasure
+costs the evidence. Rotate the `<log>.tip` sidecar with the log, or point the sink at
+the new path, and the next chain starts clean. Across a restart there is no memory at
+all — ship the tip somewhere the host cannot write if that matters.
 
 **Concurrency.** `JSONLAuditSink.record` is atomic within a process (a `threading.Lock`)
 and, on POSIX, across processes (`flock` on the log). On Windows there is no
