@@ -7,7 +7,7 @@ building. Then the same agent behind a policy.
 Everything runs offline. No API key, no cloud, no cost.
 
 ```bash
-python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt -e ../..
+python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt -e "../..[yaml]"
 ollama pull qwen2.5:7b
 ```
 

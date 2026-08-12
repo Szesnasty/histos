@@ -11,7 +11,7 @@ agent has none of the hesitation a human has on the fourth read.
 Runs offline on a local model. No API key, no cloud, no cost.
 
 ```bash
-python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt -e ../..
+python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt -e "../..[yaml]"
 ollama pull qwen2.5:7b
 
 .venv/bin/python run.py checks       # every claim below that needs no model (<1s)
