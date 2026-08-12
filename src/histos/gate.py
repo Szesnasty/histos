@@ -68,7 +68,6 @@ from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 from histos._version import __version__
@@ -81,6 +80,7 @@ from histos.contracts import (
     GateRequest,
     Policy,
     Principal,
+    ReadOnlyDict,
     ToolContract,
     _snapshot_value,
 )
@@ -276,9 +276,9 @@ def _coerce_policy(policy: PolicySource) -> Policy:
         # all. Swap it with `gate.policy = ...`, which re-hashes.
         return replace(
             policy,
-            tools=MappingProxyType(dict(policy.tools)),
-            permissions=MappingProxyType(dict(policy.permissions)),
-            role_inherits=MappingProxyType(dict(policy.role_inherits)),
+            tools=ReadOnlyDict(dict(policy.tools)),
+            permissions=ReadOnlyDict(dict(policy.permissions)),
+            role_inherits=ReadOnlyDict(dict(policy.role_inherits)),
         )
     return load_policy(policy)
 

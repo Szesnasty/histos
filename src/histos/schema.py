@@ -910,6 +910,14 @@ class Field:
     #: `{"type": "array", "items": {"type": "integer", "enum": [1, 2]}}` unimportable
     #: because there was nothing to hang a value set on that was not a string screen.
     item_enum: tuple[Any, ...] | None = None
+    #: Whether every element of an ``array`` must be distinct.
+    #:
+    #: The same case `max_items` was rescued from, left behind in the same pass:
+    #: `uniqueItems` is what every pydantic `set[T]` emits, and refusing a bound a real
+    #: source writes cost the whole tool rather than the bound. Compared by equality
+    #: rather than by hash, so a list of dicts — which is what a `set[Model]` becomes
+    #: once it is JSON — is checked too.
+    unique_items: bool = False
     # Numeric value bounds (integer/number, and per numeric array element). A
     # non-finite value (NaN/±Inf) is denied outright — a NaN makes every IEEE
     # comparison False, so a naive `<=` bound would silently pass it (Phase 0.1).
@@ -932,6 +940,28 @@ class Field:
             _check_bound(bound, getattr(self, bound))
         for bound in ("max_length", "min_length", "max_items", "min_items"):
             _check_length_bound(bound, getattr(self, bound))
+        # An element bound on something with no elements reads as enforced and enforces
+        # nothing: every one of these is consulted only inside `if spec.type == "array"`,
+        # so `Field(type="string", max_items=3)` loaded clean and checked nothing.
+        if self.type != "array":
+            for attr in ("max_items", "min_items", "item_enum", "item_type"):
+                if getattr(self, attr) not in (None, False):
+                    raise PolicyError(
+                        f"{attr} is only meaningful on an array field, and this one is {self.type!r} — "
+                        "it would read as a bound and enforce nothing",
+                        code="invalid_field",
+                    )
+            if self.unique_items:
+                raise PolicyError(
+                    f"unique_items is only meaningful on an array field, and this one is {self.type!r}",
+                    code="invalid_field",
+                )
+        if self.min_items is not None and self.max_items is not None and self.min_items > self.max_items:
+            raise PolicyError(
+                f"min_items {self.min_items} is greater than max_items {self.max_items}, so no value can "
+                "ever satisfy this field",
+                code="invalid_field",
+            )
         if self.multiple_of is not None and self.multiple_of == 0:
             raise PolicyError(f"multiple_of must be non-zero, got {self.multiple_of!r}", code="invalid_field")
         if self.pattern is not None:
@@ -1032,6 +1062,15 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
             errors.append(f"{name}: has {len(value)} items, fewer than min_items {spec.min_items}")
         if spec.max_items is not None and len(value) > spec.max_items:
             errors.append(f"{name}: has {len(value)} items, more than max_items {spec.max_items}")
+        if spec.unique_items:
+            # By equality, not by hash: once a `set[Model]` has been through JSON it is a
+            # list of dicts, and `set()` on that raises rather than deduplicating.
+            seen: list[Any] = []
+            for item in value:
+                if item in seen:
+                    errors.append(f"{name}: has a repeated element, and unique_items is set")
+                    break
+                seen.append(item)
 
     if spec.type == "array" and spec.item_enum is not None and isinstance(value, (list, tuple)):
         allowed = spec.item_enum

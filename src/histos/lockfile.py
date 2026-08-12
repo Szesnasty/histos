@@ -404,12 +404,18 @@ def shape_diff(recorded: dict[str, Any], current: dict[str, Any]) -> tuple[str, 
         before, after = was.get(path, _ABSENT), now.get(path, _ABSENT)
         if _same(before, after):
             continue
+        # The path goes through `safe_text` as well as the value. It is built from the
+        # source document's own JSON keys, so it is as attacker-authored as anything
+        # else here — a property renamed to `x\r\x1b[2KOK — no drift` rewrites the
+        # line `histos drift` just printed, in the report a human reads to decide
+        # whether to accept a tool change.
+        shown = safe_text(path)
         if before is _ABSENT:
-            lines.append(f"+ {path}: {_render(after)}")
+            lines.append(f"+ {shown}: {_render(after)}")
         elif after is _ABSENT:
-            lines.append(f"- {path}: {_render(before)}")
+            lines.append(f"- {shown}: {_render(before)}")
         else:
-            lines.append(f"~ {path}: {_render(before)} → {_render(after)}")
+            lines.append(f"~ {shown}: {_render(before)} → {_render(after)}")
     return _cap(lines)
 
 

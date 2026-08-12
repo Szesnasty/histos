@@ -91,6 +91,7 @@ The argument and return contracts. Deny-by-default on the way in: an argument no
 | `required` | boolean | no | Whether the argument must be present. Default: true. A missing required argument is a denial, not a None passed through to the tool. |
 | `sensitive` | `pii` \| `secret` | no | Return schemas only: redacted on the way out unless the principal may view this field. |
 | `type` | `string` \| `integer` \| `number` \| `boolean` \| `array` \| `object` \| `any` | no | The declared type, checked before the tool runs. 'object' is checked only for BEING an object - inner fields are not validated (see SECURITY.md); validate those inside the tool or keep arguments flat. |
+| `unique_items` | boolean | no | Whether every element of an array must be distinct. What a pydantic `set[T]` emits as `uniqueItems`. Compared by equality rather than by hash, so a list of objects is checked too. |
 
 ## `tools.<name>.resource`
 
