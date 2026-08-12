@@ -1,0 +1,133 @@
+# The one artifact this repository never gated was the one everybody installs.
+#
+# CI proves the working tree behaves; a `twine upload` from a laptop proves nothing
+# about the file that lands on PyPI. So publication happens here, from a tag, and the
+# wheel that gets uploaded is the wheel the suite just ran against — not the source
+# tree next to it. Publishing uses PyPI Trusted Publishing (OIDC), so there is no
+# long-lived API token to leak, and the upload carries a PEP 740 attestation binding
+# it to this workflow and this commit — the provenance property `histos drift` and the
+# tool lock exist to give this library's users, applied to the library itself.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The build job runs the suite, which is most of what CI proves — but not the lint and
+  # type gates, and a release that skips a gate the ordinary pushes have to pass is a
+  # hole in the same wall. Cheap, so it runs here rather than being assumed from a green
+  # commit that may not be the tagged one.
+  gates:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]" mypy
+      - run: python -m ruff check .
+      - run: python -m mypy
+
+  build:
+    name: build, then test what was built
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the build toolchain
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      # A tag that disagrees with `histos._version` would publish a distribution whose
+      # `gate_version` — stamped into every audit record — names a release that does
+      # not exist. Refuse the upload rather than reconcile it afterwards.
+      - name: The tag is the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          built="$(python -c 'import re,sys; sys.path.insert(0, "src"); from histos._version import __version__; print(__version__)')"
+          test "$tagged" = "$built" || {
+            echo "tag $GITHUB_REF_NAME does not match histos._version $built" >&2; exit 1; }
+          test -f "dist/histos-$built.tar.gz" && test -f "dist/histos-$built-py3-none-any.whl"
+
+      - name: twine check
+        run: twine check --strict dist/*
+
+      # The long description is the project page, and the project page for a version
+      # cannot be edited after upload. 0.1.0's README told visitors the package was not
+      # on PyPI and to install it from an unpinned git ref; that shipped once as a near
+      # miss, so it is now a release gate rather than a review item.
+      - name: The metadata does not deny its own release
+        run: |
+          python - <<'PY'
+          import pathlib, re, tarfile
+          sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist) as archive:
+              name = next(n for n in archive.getnames() if n.endswith("/PKG-INFO"))
+              handle = archive.extractfile(name)
+              assert handle is not None
+              metadata = handle.read().decode("utf-8")
+          for phrase in ("Not on PyPI", "not yet on PyPI", "git+https://github.com/Szesnasty/histos"):
+              assert phrase not in metadata, f"the long description still says {phrase!r}"
+          relative = [t for t in re.findall(r"\]\(([^)]+)\)", metadata) if not re.match(r"^(https?:|mailto:|#)", t)]
+          assert not relative, f"relative links 404 on pypi.org: {sorted(set(relative))}"
+          PY
+
+      # Against the built wheel in a clean venv, with `pythonpath` emptied: pytest's
+      # own config puts `src` first, which would test the source tree and let a
+      # packaging mistake — a module left out, package data not shipped — pass here and
+      # fail for the first person who installs it.
+      - name: The suite, against the wheel
+        run: |
+          python -m venv /tmp/release-check
+          /tmp/release-check/bin/pip install --upgrade pip
+          # `build` too: the packaging tests build an sdist of their own, and a test
+          # that skips itself on a release run is a test that is not there.
+          /tmp/release-check/bin/pip install "$(ls dist/*.whl)[yaml]" pytest build
+          installed="$(/tmp/release-check/bin/python -c 'import histos; print(histos.__file__)')"
+          case "$installed" in
+            *site-packages*) ;;
+            *) echo "the suite would have run against $installed, not the wheel" >&2; exit 1 ;;
+          esac
+          /tmp/release-check/bin/python -m pytest -q -o pythonpath=
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  publish:
+    name: publish to PyPI (trusted publishing)
+    needs: [build, gates]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The environment is where the PyPI Trusted Publisher is scoped and where a
+    # required reviewer can be attached, so an upload cannot happen because someone
+    # pushed a tag by accident.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/histos
+    permissions:
+      id-token: write   # OIDC for Trusted Publishing. No API token exists to steal.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

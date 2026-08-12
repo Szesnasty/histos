@@ -153,6 +153,45 @@ jobs:
             || { echo "the wheel pulled in a runtime dependency" >&2; \
                  /tmp/bare/bin/pip list --format=freeze >&2; exit 1; }
 
+  metadata:
+    name: the built metadata is the page nobody can edit later
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # `readme = "README.md"` makes the README the long description verbatim, and a
+      # released version's project page cannot be edited afterwards. 0.1.0 was one
+      # upload away from a page that said the package was not on PyPI and offered an
+      # unpinned `git+https` install instead, so the phrase is a build failure now.
+      - name: PKG-INFO does not deny its own release
+        run: |
+          tar -xOzf dist/*.tar.gz --wildcards '*/PKG-INFO' > /tmp/pkg-info
+          if grep -niE 'not (yet )?on pypi|git\+https://github\.com/Szesnasty/histos' /tmp/pkg-info; then
+            echo "the long description tells PyPI visitors the package is not on PyPI" >&2
+            exit 1
+          fi
+
+      # The sdist is what a distribution packager and an offline reader get. It ships
+      # the trust model and the normative artifacts or the README's links are dead for
+      # them too — MANIFEST.in says so, and this is what checks that it still does.
+      - name: The sdist ships what MANIFEST.in promises
+        run: |
+          files="$(tar -tzf dist/*.tar.gz | cut -d/ -f2-)"
+          for promised in SECURITY.md CHANGELOG.md CONTRIBUTING.md \
+                          examples/quickstart.py policies/README.md \
+                          spec/decision-codes.json conformance/manifest.json; do
+            echo "$files" | grep -qx "$promised" || { echo "sdist is missing $promised" >&2; exit 1; }
+          done
+
   typecheck:
     name: types (the py.typed marker has to mean something)
     runs-on: ubuntu-latest

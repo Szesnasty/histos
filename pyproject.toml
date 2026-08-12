@@ -45,10 +45,11 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage   = "https://github.com/Szesnasty/histos"
-Repository = "https://github.com/Szesnasty/histos"
-Issues     = "https://github.com/Szesnasty/histos/issues"
-Changelog  = "https://github.com/Szesnasty/histos/blob/main/CHANGELOG.md"
+Homepage      = "https://github.com/Szesnasty/histos"
+Repository    = "https://github.com/Szesnasty/histos"
+Documentation = "https://github.com/Szesnasty/histos/tree/main/docs"
+Issues        = "https://github.com/Szesnasty/histos/issues"
+Changelog     = "https://github.com/Szesnasty/histos/blob/main/CHANGELOG.md"
 
 [project.scripts]
 histos = "histos.cli:main"

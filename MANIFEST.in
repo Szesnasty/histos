@@ -1,0 +1,29 @@
+# The sdist carries what the README tells a reader to read, and what a second
+# implementation reads: the trust model, the changelog, the worked policies, the
+# format spec and the conformance corpus. Those were absent, so every link out of
+# the long description was a dead end for anyone who arrived by `pip install`.
+include CHANGELOG.md CONTRIBUTING.md SECURITY.md
+graft conformance
+graft docs
+graft examples
+graft policies
+graft spec
+
+# The tests do not ship, deliberately. setuptools' default discovery picked up
+# `tests/test*.py` from an old distutils glob and nothing else, so the tarball
+# carried 40 test modules without conftest.py, the conformance corpus or the policy
+# gallery — a suite that died at collection and told a source consumer this release
+# cannot verify itself. Making it runnable would mean shipping the repository: the
+# suite also reads demo/ and scripts/ from the tree root, and demo/ is five
+# applications with their own dependency sets and generated databases. So the
+# distribution stops half-shipping a suite; the suite runs against the tag it was
+# written for, https://github.com/Szesnasty/histos/tree/v0.1.0.
+prune tests
+
+# `src/histos.egg-info` is a gitignored artifact of a previous local build that was
+# landing in the tarball — a distribution carrying another build's PKG-INFO and
+# requires.txt. `SOURCES.txt` stays: setuptools copies it into the release tree after
+# this template is processed, and it describes this build rather than an older one.
+prune src/histos.egg-info
+
+global-exclude __pycache__/* *.py[cod] .DS_Store
