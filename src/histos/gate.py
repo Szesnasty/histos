@@ -115,6 +115,31 @@ def reset_principal(token: Token[Principal | None]) -> None:
 _GENERATOR_FRAME = inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR
 
 
+def _refuse_a_leaking_frame(caller: Any) -> None:
+    """Refuse to open in a generator the caller drives by hand.
+
+    Banning the frame *kind* outright was too broad: the two most ordinary ways to write
+    a request scope — `@contextlib.contextmanager` and a generator-style test fixture —
+    are generator frames, and under `contextlib` the generator is driven with strict
+    enter/exit discipline in the consumer's own context, which is the safe case and the
+    one the documentation should be recommending. So the check asks who is driving.
+    A generator nobody is driving that way is still refused, and `__exit__` carries the
+    backstop for whatever this cannot see.
+    """
+    if not caller.f_code.co_flags & _GENERATOR_FRAME:
+        return
+    driver = caller.f_back
+    if driver is not None and driver.f_code.co_filename == contextlib.__file__:
+        return
+    raise PolicyError(
+        f"use_principal() was opened inside the generator {caller.f_code.co_name!r}. A generator has no "
+        "context of its own — it runs in whichever context resumes it — so a binding that spans a `yield` "
+        "leaks into the consumer and two interleaved streams run as each other. Wrap the generator in "
+        "@contextlib.contextmanager, bind around whatever consumes it, or give the producer its own "
+        "context with contextvars.copy_context().run(...)."
+    )
+
+
 class use_principal:  # noqa: N801 — it is spelled and used as a function
     """Scope a trusted principal to a ``with`` block (e.g. one request).
 
@@ -129,29 +154,39 @@ class use_principal:  # noqa: N801 — it is spelled and used as a function
     ``contextlib``'s own generator machinery that index is a guess.
     """
 
-    __slots__ = ("_principal", "_token")
+    __slots__ = ("_principal", "_tokens")
 
     def __init__(self, principal: Principal) -> None:
         self._principal = principal
-        self._token: Token[Principal | None] | None = None
+        # A stack, not a slot. One instance entered twice — `scope = use_principal(p)`
+        # reused across two `with` blocks, or re-entered — overwrote the outer token
+        # with the inner one, so the inner exit reset the inner binding and the outer
+        # exit had nothing left to reset. The identity then outlived both blocks.
+        self._tokens: list[Token[Principal | None]] = []
 
     def __enter__(self) -> None:
-        caller = sys._getframe(1)
-        if caller.f_code.co_flags & _GENERATOR_FRAME:
-            raise PolicyError(
-                f"use_principal() was opened inside the generator {caller.f_code.co_name!r}. A generator "
-                "has no context of its own — it runs in whichever context resumes it — so this binding "
-                "would leak into the caller and two interleaved streams would run as each other. Bind "
-                "around whatever consumes the generator, or run the producer in its own context with "
-                "contextvars.copy_context().run(...)."
-            )
-        self._token = _current_principal.set(self._principal)
+        _refuse_a_leaking_frame(sys._getframe(1))
+        self._tokens.append(_current_principal.set(self._principal))
         return None
 
     def __exit__(self, *_exc: object) -> None:
-        if self._token is not None:
-            _current_principal.reset(self._token)
-            self._token = None
+        if not self._tokens:
+            return
+        token = self._tokens.pop()
+        try:
+            _current_principal.reset(token)
+        except ValueError as exc:
+            # contextvars refuses a token created in a different Context, which is
+            # exactly the hazard the frame check above cannot always see: the block was
+            # entered in one context and left in another, so the binding is still live
+            # somewhere it was never scoped to. Loud, because the alternative is a
+            # request running as somebody else.
+            raise PolicyError(
+                "use_principal() was entered in one context and left in another, so the identity it bound "
+                "is still set where it was never scoped. This is what happens when the `with` block spans "
+                "a `yield` in a generator the consumer drives. Bind around the consumer, or give the "
+                "producer its own context with contextvars.copy_context().run(...)."
+            ) from exc
 
 
 # ── policy / mode coercion ───────────────────────────────────────────────
@@ -356,8 +391,23 @@ def _defines(value: Any, method: str) -> bool:
     return any(method in klass.__dict__ for klass in type(value).__mro__)
 
 
+# Exact type identity, not `isinstance`, so a subclass still takes the slow path. These
+# are the leaves a real result is overwhelmingly made of, and none of them can hide a
+# payload behind an iteration.
+_INERT_LEAVES = frozenset({str, bytes, int, float, bool, type(None)})
+
+
 def _lazy_leaf_kind(value: Any) -> str | None:
-    """What kind of un-post-gateable thing a single value is, if it is one."""
+    """What kind of un-post-gateable thing a single value is, if it is one.
+
+    Ordered for the common case. This runs on every leaf of every returned structure,
+    in addition to the four traversals the engine already performs, and the predicate
+    chain below is not cheap — `inspect.isawaitable` is an ABC check at roughly three
+    times the cost of the others. Skipping it for the inert types took the walk over a
+    10 000-row result from 48 ms to under 5.
+    """
+    if type(value) in _INERT_LEAVES:
+        return None
     if inspect.isasyncgen(value):
         return "async generator"
     if inspect.isgenerator(value):
@@ -471,7 +521,13 @@ def _close_quietly(value: Any, _depth: int = 0, _seen: set[int] | None = None) -
             for child in children:
                 _close_quietly(child, _depth + 1, seen)
         return
-    if _depth and _lazy_leaf_kind(value) not in _LAZY_OWNED_BY_THE_RESULT:
+    # Ownership, not depth. `_depth` is `0` at the top level and therefore falsy, so the
+    # guard was skipped exactly where the value is most likely to be something the caller
+    # still owns: a refused ORM page or an open cursor had `close()` called on it, tearing
+    # down live state over a value the gate had merely declined to *inspect*. A generator,
+    # coroutine or async generator is built for this one return and is the only shape safe
+    # to close — which is all the docstring and SECURITY.md ever promised.
+    if _lazy_leaf_kind(value) not in _LAZY_OWNED_BY_THE_RESULT:
         return
     closer = getattr(value, "close", None)
     if callable(closer):
@@ -529,7 +585,14 @@ def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]
     A positional call to one of those is still refused, and now audited.
     """
     try:
-        signature = inspect.signature(_unwrap_target(tool))
+        # `inspect.signature(tool)`, not of its unwrap target. `_unwrap_target` is right
+        # for async/streaming detection, where the innermost `__code__` is the question,
+        # and wrong for naming arguments: for a `functools.partial` it hands back the
+        # underlying function with the already-supplied parameters still in it, so every
+        # positional argument is named one slot to the left. `partial(send, "sms")("+48111")`
+        # was named `channel="+48111"`. `inspect.signature` accounts for a partial's
+        # pre-bound arguments, bound methods, callable objects and classes already.
+        signature = inspect.signature(tool)
     except (TypeError, ValueError):
         return None
     if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in signature.parameters.values()):
@@ -538,6 +601,7 @@ def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]
     var_keyword = next(
         (p.name for p in signature.parameters.values() if p.kind is inspect.Parameter.VAR_KEYWORD), None
     )
+    positional_only = any(p.kind is inspect.Parameter.POSITIONAL_ONLY for p in signature.parameters.values())
 
     def bind(*args: Any, **kwargs: Any) -> dict[str, Any]:
         # Not `apply_defaults()`: a default the caller did not pass is the tool's own
@@ -551,7 +615,39 @@ def _positional_binder(tool: Callable[..., Any]) -> Callable[..., dict[str, Any]
             named.update(named.pop(var_keyword, {}))
         return named
 
+    def call(fn: Callable[..., Any], named: dict[str, Any]) -> Any:
+        """Invoke ``fn`` with ``named``, routing positional-only parameters positionally.
+
+        The gate reasons in names and the tool may not accept them: `def f(a, /, b)` —
+        and every C or pybind11 callable exposing a `__text_signature__` — rejects
+        `f(a=...)` with a TypeError. So the names are re-split through the same
+        signature they came from on the way back out.
+        """
+        if not positional_only:
+            return fn(**named)
+        # Walked in declaration order: a positional-only parameter cannot be passed by
+        # keyword at all, so `bind_partial(**named)` refuses it too and cannot be used
+        # to re-split. Everything else stays a keyword, including a `bind` field the
+        # signature does not name — the tool's own TypeError is a better error than one
+        # invented here.
+        rest = dict(named)
+        ordered: list[Any] = []
+        for parameter in signature.parameters.values():
+            if parameter.kind is not inspect.Parameter.POSITIONAL_ONLY:
+                break
+            if parameter.name not in rest:
+                break
+            ordered.append(rest.pop(parameter.name))
+        return fn(*ordered, **rest)
+
+    bind.call = call  # type: ignore[attr-defined]
     return bind
+
+
+def _invoke(tool: Callable[..., Any], binder: Any, named: dict[str, Any]) -> Any:
+    """Call ``tool`` with named arguments, however its signature wants to receive them."""
+    call = getattr(binder, "call", None)
+    return call(tool, named) if call is not None else tool(**named)
 
 
 def _gate_stamp(tool: Any) -> str | None:
@@ -851,7 +947,12 @@ class Gate:
         return GateDecision(Effect.DENY, "no_principal", "no trusted principal set; identity must be bound out-of-band")
 
     def _apply_bindings(
-        self, tool_name: str, active: Principal, call_args: dict[str, Any], rebound: list[str] | None = None
+        self,
+        tool_name: str,
+        active: Principal,
+        call_args: dict[str, Any],
+        rebound: list[str] | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> GateDecision | None:
         """Overwrite bound args with trusted principal attributes (Phase 0.1).
 
@@ -872,7 +973,14 @@ class Gate:
         contract = self.engine.policy.contract_for(tool_name)
         if contract is None or not contract.bindings:
             return None
-        overrides: dict[str, Any] = {}
+        # A caller that supplies `overrides` is asking for the rewrites rather than for
+        # them to be applied — the gate does that so observe can evaluate the bound
+        # arguments while executing the unbound ones. Everyone else, including the
+        # conformance corpus, gets the straightforward thing: `call_args` comes back
+        # bound.
+        apply_in_place = overrides is None
+        if overrides is None:
+            overrides = {}
         for b in contract.bindings:
             if b.principal_attr not in active.attributes:
                 return GateDecision(
@@ -892,14 +1000,7 @@ class Gate:
             if rebound is not None and (b.field not in call_args or call_args[b.field] != trusted):
                 rebound.append(b.field)
             overrides[b.field] = trusted
-        # Decided in both modes so the trail still records `rebound_args` and an
-        # `arg_binding_unresolved` denial, but written only when enforcing. Observe is
-        # documented as changing nothing, and this was the one place it did: the tool
-        # executed with the *bound* recipient while the ungated app it is being compared
-        # against would have used the model's. A dry run whose side effects differ from
-        # the real thing measures the wrong thing, and it did it even on calls the
-        # pre-gate had already decided to deny.
-        if self._enforce:
+        if apply_in_place:
             call_args.update(overrides)
         return None
 
@@ -1048,10 +1149,11 @@ class Gate:
                 self._emit(tool_name, call_args, decision, "pre", started, None, self._will_execute(decision))
                 if self._enforce:
                     raise GateDenied(decision)
-                return tool(**call_args)
+                return _invoke(tool, binder, call_args)
 
             rebound: list[str] = []
-            binding_denial = self._apply_bindings(tool_name, active, call_args, rebound)
+            overrides: dict[str, Any] = {}
+            binding_denial = self._apply_bindings(tool_name, active, call_args, rebound, overrides)
             if binding_denial is not None:
                 self._emit(
                     tool_name,
@@ -1065,7 +1167,20 @@ class Gate:
                 )
                 if self._enforce:
                     raise GateDenied(binding_denial)
-                return tool(**call_args)
+                return _invoke(tool, binder, call_args)
+
+            # Two dicts, because observe has to predict enforce and the two questions are
+            # different. `checked_args` is what the policy is evaluated against and what
+            # the trail records — always post-binding, so a dry run reports the decision
+            # the real thing would make. `exec_args` is what the tool actually receives,
+            # and only enforce rewrites that: observe is documented as changing nothing,
+            # and a dry run whose side effects differ from the ungated app measures the
+            # wrong thing. Deferring both was the first attempt, and it made observe
+            # evaluate the model's unbound arguments — so it stopped predicting enforce
+            # in both directions, which is the one thing observe is for.
+            checked_args = {**call_args, **overrides}
+            exec_args = checked_args if self._enforce else call_args
+            call_args = checked_args
 
             req = GateRequest(tool_name, call_args, active, phase="pre")
             pre = self.engine.pre(req)
@@ -1146,7 +1261,7 @@ class Gate:
 
             redacted: BaseException | None = None
             try:
-                result = tool(**call_args)
+                result = _invoke(tool, binder, exec_args)
             except Exception as exc:
                 outcome = self._finish_exception(tool_name, call_args, active, started, exc)
                 if outcome is exc:
@@ -1182,10 +1297,11 @@ class Gate:
                 self._emit(tool_name, call_args, decision, "pre", started, None, self._will_execute(decision))
                 if self._enforce:
                     raise GateDenied(decision)
-                return await tool(**call_args)
+                return await _invoke(tool, binder, call_args)
 
             rebound: list[str] = []
-            binding_denial = self._apply_bindings(tool_name, active, call_args, rebound)
+            overrides: dict[str, Any] = {}
+            binding_denial = self._apply_bindings(tool_name, active, call_args, rebound, overrides)
             if binding_denial is not None:
                 self._emit(
                     tool_name,
@@ -1199,7 +1315,13 @@ class Gate:
                 )
                 if self._enforce:
                     raise GateDenied(binding_denial)
-                return await tool(**call_args)
+                return await _invoke(tool, binder, call_args)
+
+            # See the sync path: the policy is evaluated against the bound arguments in
+            # both modes, and only enforce rewrites the ones the tool receives.
+            checked_args = {**call_args, **overrides}
+            exec_args = checked_args if self._enforce else call_args
+            call_args = checked_args
 
             req = GateRequest(tool_name, call_args, active, phase="pre")
             pre = await self.engine.apre(req)
@@ -1266,7 +1388,7 @@ class Gate:
 
             redacted: BaseException | None = None
             try:
-                result = await tool(**call_args)
+                result = await _invoke(tool, binder, exec_args)
             except Exception as exc:
                 outcome = self._finish_exception(tool_name, call_args, active, started, exc)
                 if outcome is exc:

@@ -472,6 +472,24 @@ class Policy:
     created_at: str | None = None  # ISO-8601, set by the exporter — not auto-stamped
     schema_version: str = SCHEMA_VERSION
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Materialise the read-only views so a Policy can be pickled and deep-copied.
+
+        A gate holds its ruleset behind `MappingProxyType` so an in-place edit cannot
+        take effect against a `policy_hash` computed before it. `mappingproxy` has no
+        pickle support, so that quietly cost `pickle.dumps(gate.policy)` and
+        `copy.deepcopy(gate.policy)` — both of which worked before, and both of which a
+        host doing multiprocessing reaches for. The read-only guarantee is about the
+        live object; a copy of it is a new object and gets plain dicts.
+        """
+        state = dict(self.__dict__)
+        for name in ("tools", "permissions", "role_inherits"):
+            state[name] = dict(state[name])
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
     def contract_for(self, tool_name: str) -> ToolContract | None:
         return self.tools.get(tool_name)
 

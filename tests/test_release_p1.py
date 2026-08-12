@@ -392,3 +392,137 @@ def test_the_audit_line_stays_machine_readable_under_a_hostile_argument_name(tmp
     with log.open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle]
     assert len(records) == 2
+
+
+# ── the review of the hardening diff: what the first cut of P1-8 and T-40 broke ──
+
+
+def test_a_partial_names_its_arguments_from_the_object_that_will_be_called():
+    """`_unwrap_target` hands back the underlying function with the pre-bound parameters
+    still in it, so every positional argument was named one slot to the left."""
+    import functools
+
+    def send(channel: str, to: str, body: str) -> str:
+        return f"{channel}->{to}:{body}"
+
+    policy = Policy(
+        tools={"send": ToolContract(name="send", args=Schema({}, allow_extra=True))},
+        permissions={"ok": frozenset({"send"})},
+    )
+    safe = gate(functools.partial(send, "sms"), policy=policy, name="send")
+    with use_principal(Principal(role="ok", identity="i")):
+        assert safe("+48111", "hi") == "sms->+48111:hi"
+
+
+def test_a_positional_only_parameter_is_handed_back_positionally():
+    """The gate reasons in names; `def f(a, /)` does not accept them."""
+
+    def posonly(a: str, /, b: str) -> str:
+        return f"{a}|{b}"
+
+    policy = Policy(
+        tools={"posonly": ToolContract(name="posonly", args=Schema({}, allow_extra=True))},
+        permissions={"ok": frozenset({"posonly"})},
+    )
+    safe = gate(posonly, policy=policy, name="posonly")
+    with use_principal(Principal(role="ok", identity="i")):
+        assert safe("x", "y") == "x|y"
+
+
+def test_observe_reaches_the_same_decision_as_enforce_on_a_bound_argument():
+    """Deferring the bind made observe evaluate the model's unbound arguments, so a dry
+    run predicted a denial enforce would never make — and the reverse."""
+
+    def send(to: str) -> str:
+        return to
+
+    policy = Policy(
+        tools={
+            "send": ToolContract(
+                name="send",
+                args=Schema({"to": Field(type="string", enum=("+48111",))}),
+                access="write",
+                bindings=(Binding(field="to", principal_attr="phone"),),
+            )
+        },
+        permissions={"ok": frozenset({"send"})},
+    )
+    who = Principal(role="ok", identity="i", attributes={"phone": "+48111"})
+    seen = {}
+    for mode in ("enforce", "observe"):
+        sink = InMemoryAuditSink()
+        with use_principal(who):
+            returned = gate(send, policy=policy, mode=mode, audit=sink, name="send")(to="+48999888777")
+        seen[mode] = (sink.entries[0]["effect"], tuple(sink.entries[0]["rebound_args"]), returned)
+    assert seen["enforce"][:2] == seen["observe"][:2], "observe must predict the decision enforce makes"
+    assert seen["enforce"][2] == "+48111" and seen["observe"][2] == "+48999888777", "observe must not rewrite"
+
+
+def test_the_contextmanager_idiom_for_a_request_scope_is_allowed():
+    import contextlib
+
+    @contextlib.contextmanager
+    def request_scope(principal):
+        with use_principal(principal):
+            yield
+
+    with request_scope(Principal(role="ok", identity="i")):
+        pass
+    from histos.gate import _current_principal
+
+    assert _current_principal.get() is None
+
+
+def test_a_generator_nobody_drives_with_enter_exit_discipline_is_still_refused():
+    def stream():
+        with use_principal(Principal(role="ok", identity="i")):
+            yield 1
+
+    with pytest.raises(PolicyError, match="generator"):
+        list(stream())
+
+
+def test_reusing_one_use_principal_instance_still_unbinds():
+    from histos.gate import _current_principal
+
+    scope = use_principal(Principal(role="ok", identity="i"))
+    with scope:
+        with scope:
+            pass
+    assert _current_principal.get() is None
+
+
+def test_a_refused_value_the_gate_does_not_own_is_not_closed():
+    """`close()` on a page wrapper or a cursor tears down live caller state over a value
+    the gate merely declined to inspect."""
+
+    class Page:
+        closed = False
+
+        def __iter__(self):
+            yield {"a": 1}
+
+        def close(self):
+            Page.closed = True
+
+    def tool() -> Page:
+        return Page()
+
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}))}, permissions={"ok": frozenset({"t"})}
+    )
+    with use_principal(Principal(role="ok", identity="i")), pytest.raises(GateDenied):
+        gate(tool, policy=policy, name="t")()
+    assert Page.closed is False
+
+
+def test_a_gate_owned_policy_can_still_be_pickled_and_copied():
+    import copy
+    import pickle
+
+    policy = Policy(tools={"t": ToolContract(name="t", args=Schema({}))}, permissions={"ok": frozenset({"t"})})
+    owned = Gate(policy).policy
+    assert pickle.loads(pickle.dumps(owned)).content_hash() == owned.content_hash()
+    assert copy.deepcopy(owned).content_hash() == owned.content_hash()
+    with pytest.raises(TypeError):
+        owned.tools["x"] = None  # type: ignore[index]
