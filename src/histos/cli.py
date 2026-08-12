@@ -22,9 +22,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from histos._version import __version__
 from histos.audit import verify_chain
 from histos.bundle import dump_bundle, load_policy
 from histos.contracts import GateRequest, Policy, Principal
+from histos.display import safe_text
 from histos.errors import PolicyError
 from histos.gate import Gate
 from histos.importers import KINDS, ToolSource, reader_for
@@ -55,7 +57,12 @@ def _cmd_review(args: argparse.Namespace) -> int:
     # all. `histos review` is the step between `import` and `protect`, and a policy
     # whose tools still carry the importer's assumption has not been through it — so
     # this is the check that stops such a policy reaching `enforce` in CI.
-    return 1 if review.blocked or review.unreviewed else 0
+    # `validate`'s own issues arrive here too, so a `review` that exits 0 on a file
+    # `validate` rejects is the weaker of two commands claiming to check the same thing
+    # — and it is the one the docs put in the middle of import→review→protect. Only the
+    # structural half fails the command; the advisory warnings are printed and are for a
+    # human to weigh.
+    return 1 if review.blocked or review.unreviewed or review.structural_issues else 0
 
 
 def _cmd_coverage(args: argparse.Namespace) -> int:
@@ -65,10 +72,12 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
     undeclared = sorted(exposed - declared)
     unwrapped = sorted(declared - exposed)
     print(f"{len(exposed & declared)}/{len(exposed)} exposed tools are covered by the policy")
+    # Every name below is source-authored, and this report is where a human decides
+    # whether to grant the tool. See `histos.display`.
     for t in undeclared:
-        print(f"  ✕ {t}: exposed to the agent but NOT in the policy (ungated gap)")
+        print(f"  ✕ {safe_text(t)}: exposed to the agent but NOT in the policy (ungated gap)")
     for t in unwrapped:
-        print(f"  · {t}: in the policy but not in the exposed set")
+        print(f"  · {safe_text(t)}: in the policy but not in the exposed set")
     return 1 if undeclared else 0
 
 
@@ -153,7 +162,7 @@ def _update_policy(policy_path: str, sources: list[ToolSource], *, locator: str,
 
     added = sorted(set(by_name) - set(policy.tools))
     for name in added:
-        print(f"NEW  {name} — in the source, not in the policy. Decide deliberately, then declare it.")
+        print(f"NEW  {safe_text(name)} — in the source, not in the policy. Decide deliberately, then declare it.")
 
     if not updated:
         print("no contract changes to apply" + (f"; {len(added)} new tool(s) above" if added else ""))
@@ -163,13 +172,14 @@ def _update_policy(policy_path: str, sources: list[ToolSource], *, locator: str,
     text = Path(policy_path).read_text(encoding="utf-8")
     if _has_comments(text) and not force:
         print(f"refusing to rewrite {policy_path}: it has comments this writer cannot preserve.", file=sys.stderr)
-        print(f"contract changed for: {', '.join(updated)}", file=sys.stderr)
+        print(f"contract changed for: {', '.join(safe_text(t) for t in updated)}", file=sys.stderr)
         print("apply those by hand, or re-run with --force to regenerate the file without them.", file=sys.stderr)
         return 1
 
     merged_policy = dataclasses.replace(policy, tools=tools)
     Path(policy_path).write_text(json.dumps(dump_bundle(merged_policy), indent=2, ensure_ascii=False) + "\n")
-    print(f"updated args/returns for {len(updated)} tool(s) → {policy_path}: {', '.join(updated)}")
+    print(f"updated args/returns for {len(updated)} tool(s) → {policy_path}: "
+          f"{', '.join(safe_text(t) for t in updated)}")
     print("review the diff — git is what approves this change.")
     _report_lock_written(_write_lock(sources, policy_path=policy_path, locator=locator))
     return 0
@@ -187,13 +197,13 @@ def _cmd_drift(args: argparse.Namespace) -> int:
 
     for drift in report.drifts:
         if drift.status == "added":
-            print(f"DRIFT  {drift.name}  ADDED — a tool the policy never declared")
+            print(f"DRIFT  {safe_text(drift.name)}  ADDED — a tool the policy never declared")
         elif drift.status == "removed":
-            print(f"DRIFT  {drift.name}  REMOVED — gone from the source, still in the lock")
+            print(f"DRIFT  {safe_text(drift.name)}  REMOVED — gone from the source, still in the lock")
         else:
             moved = ", ".join(h.removesuffix("_sha256") for h in drift.changed)
             reach = "  ← reaches enforcement" if drift.reaches_enforcement else ""
-            print(f"DRIFT  {drift.name}  changed: {moved}{reach}")
+            print(f"DRIFT  {safe_text(drift.name)}  changed: {moved}{reach}")
             # The difference itself, straight from the committed lock — no second
             # build of the source needed, which is the whole point of recording it.
             for line in drift.diff:
@@ -210,7 +220,7 @@ def _cmd_drift(args: argparse.Namespace) -> int:
         # A clean report must never read as coverage it does not have: hand-written
         # tools, and any defined in a language this process cannot re-read, are simply
         # not checked here.
-        print(f"unverifiable from here ({len(unverifiable)}): {', '.join(unverifiable)}")
+        print(f"unverifiable from here ({len(unverifiable)}): {', '.join(safe_text(t) for t in unverifiable)}")
 
     if report.clean:
         # State the fraction, not just the count: CI reads the exit code, but a human
@@ -263,6 +273,11 @@ def _cmd_audit_verify(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="histos", description="Inspect a histos policy without running an agent.")
+    # The version is stamped into every audit record as `gate_version`, so an operator
+    # correlating a trail back to a build needs to be able to ask for it. `histos
+    # --version` used to be an argparse usage error, exit 2, because the subcommand was
+    # required and nothing answered above it.
+    p.add_argument("--version", action="version", version=f"histos {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     v = sub.add_parser("validate", help="structural validity (CI gate)")
@@ -339,6 +354,13 @@ def main(argv: list[str] | None = None) -> int:
     # generic branch swallows it and the message loses its context.
     except json.JSONDecodeError as exc:
         print(f"error: not valid JSON ({exc})", file=sys.stderr)
+        return 2
+    except ImportError as exc:
+        # The YAML extra is optional and `bundle.py` already composes the sentence that
+        # tells you what to install. It used to reach the terminal as a traceback, so
+        # the one error a first-time user is most likely to hit looked like a crash in
+        # the library rather than a missing install.
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     except (PolicyError, ValueError) as exc:
         # A malformed input file is a user mistake, not a crash. Printing a

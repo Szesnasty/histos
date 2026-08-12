@@ -42,6 +42,17 @@ class LimitStore:
         self._budget_used: dict[tuple[str, str], int] = defaultdict(int)
         self._lock = threading.RLock()
 
+    @property
+    def window_seconds(self) -> float:
+        """The rolling window every ``rate_limit`` in the policy is counted against.
+
+        One window per store, not per tool, and it is not in the policy format — so
+        `rate_limit: 3` in a document means "3 per *this* many seconds" and the document
+        cannot say how many. Readable here, and named in the denial, until the format
+        carries it (see docs/roadmap.md, `limit_scope`).
+        """
+        return self._window
+
     def _key(self, identity: str | None, tool: str) -> tuple[str, str]:
         return (identity or "<anonymous>", tool)
 
@@ -60,10 +71,15 @@ class LimitStore:
         with self._lock:
             return self._check_locked(self._key(identity, tool), rate_limit, budget)
 
-    def consume(self, identity: str | None, tool: str) -> None:
-        """Record one allowed call against both the rate window and the budget."""
+    def consume(self, identity: str | None, tool: str, *, rate_limit: int | None = 1, budget: int | None = 1) -> None:
+        """Record one allowed call against the rate window and the budget.
+
+        The limits are passed so nothing is recorded for a limit the contract does not
+        declare; the defaults keep the bare ``consume(identity, tool)`` spelling meaning
+        "record against both", which is what a caller reaching for it expects.
+        """
         with self._lock:
-            self._consume_locked(self._key(identity, tool))
+            self._consume_locked(self._key(identity, tool), rate_limit, budget)
 
     def try_consume(self, identity: str | None, tool: str, *, rate_limit: int | None, budget: int | None) -> str | None:
         """Atomically check limits and, if within them, consume one slot.
@@ -75,7 +91,7 @@ class LimitStore:
             key = self._key(identity, tool)
             rule = self._check_locked(key, rate_limit, budget)
             if rule is None:
-                self._consume_locked(key)
+                self._consume_locked(key, rate_limit, budget)
             return rule
 
     def prune(self) -> int:
@@ -102,15 +118,23 @@ class LimitStore:
             return "rate_limit"
         return None
 
-    def _consume_locked(self, key: tuple[str, str]) -> None:
-        window = self._calls[key]
-        window.append(self._now())
-        # Prune where the state is already being written, so the deque for one key
-        # cannot outgrow its window even if `prune()` is never called.
-        cutoff = self._now() - self._window
-        while window and window[0] < cutoff:
-            window.popleft()
-        self._budget_used[key] += 1
+    def _consume_locked(self, key: tuple[str, str], rate_limit: int | None, budget: int | None) -> None:
+        # Only what a declared limit can read. Every allowed call used to write both a
+        # deque and a budget counter for every (identity, tool) pair, and budget
+        # counters are never pruned by design — so a tool with no `budget:` at all
+        # accumulated one permanent entry per identity that had ever called it, which
+        # on a multi-tenant server is unbounded growth `prune()` cannot reclaim and
+        # nothing reads.
+        if rate_limit is not None:
+            window = self._calls[key]
+            window.append(self._now())
+            # Prune where the state is already being written, so the deque for one key
+            # cannot outgrow its window even if `prune()` is never called.
+            cutoff = self._now() - self._window
+            while window and window[0] < cutoff:
+                window.popleft()
+        if budget is not None:
+            self._budget_used[key] += 1
 
     def _recent_count(self, key: tuple[str, str]) -> int:
         """Calls inside the window, without allocating or mutating anything.

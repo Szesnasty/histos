@@ -21,7 +21,8 @@ another tool may generate one, but the gate loads it with nothing else present.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -72,8 +73,11 @@ class Principal:
     a tool argument or model output. The gate is only as strong as this value.
 
     ``attributes`` carry trusted context used by resource-aware constraints
-    (e.g. ``{"tenant_id": "acme", "region": "eu"}``). ``can_view`` lists return
-    fields this principal may see in the clear even when marked sensitive.
+    (e.g. ``{"tenant_id": "acme", "region": "eu"}``). ``can_view`` lists the
+    **sensitivity classes** — ``"pii"``, ``"secret"`` — this principal may see in the
+    clear; it is not a list of field names, and putting one there unredacts nothing.
+    Attribute values are deep-copied on binding, so a value handed to a tool through a
+    ``bind`` is a copy and the trust anchor cannot be rewritten through it.
     """
 
     role: str
@@ -87,7 +91,21 @@ class Principal:
         # after the gate had been built from it. Take a snapshot behind a read-only
         # view, so a Principal handed to a gate cannot change under it and a caller
         # who kept the dict they passed in cannot change it either.
-        object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
+        #
+        # `deepcopy`, not `dict(...)`: that was a shallow copy behind a read-only view,
+        # so `{"tenants": [...]}` was still the caller's live list. Two ways that bites.
+        # `Gate._apply_bindings` writes the trusted value straight into the tool's
+        # arguments, so the tool body received the trust anchor itself and an ordinary
+        # `args["tenants"].append(...)` edited what the *next* call would be authorized
+        # against; and a host that kept its own dict could rewrite a bound principal
+        # mid-request. A snapshot has to be a snapshot all the way down.
+        object.__setattr__(self, "attributes", MappingProxyType(deepcopy(dict(self.attributes))))
+        # A list here is the natural thing to write and it silently half-worked: it
+        # compared as a member of nothing, and it made `hash(principal)` raise, which
+        # is the one thing `__hash__` below exists to allow. Coerce rather than refuse —
+        # the meaning of `["pii"]` is not in doubt.
+        if not isinstance(self.can_view, frozenset):
+            object.__setattr__(self, "can_view", frozenset(self.can_view))
 
     def __hash__(self) -> int:
         # The generated hash covered `attributes`, which is a mapping and unhashable,
@@ -376,6 +394,7 @@ def _schema_structure(schema: Schema | None) -> Any:
                 "min_length": f.min_length,
                 "pattern": f.pattern,
                 "sensitive": f.sensitive,
+                "nullable": f.nullable,
                 "item_type": f.item_type,
                 "minimum": f.minimum,
                 "maximum": f.maximum,
@@ -412,9 +431,13 @@ class Policy:
     can be tied back to the exact ruleset that produced it.
     """
 
-    tools: dict[str, ToolContract] = field(default_factory=dict)
-    permissions: dict[str, frozenset[str]] = field(default_factory=dict)
-    role_inherits: dict[str, str] = field(default_factory=dict)
+    # `Mapping`, not `dict`: a Gate hands its own ruleset out through `gate.policy`,
+    # and holds it as a read-only view so an in-place edit cannot take effect against a
+    # `policy_hash` computed before it. Callers building a Policy still pass plain
+    # dicts; only the type says what the gate is allowed to assume.
+    tools: Mapping[str, ToolContract] = field(default_factory=dict)
+    permissions: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    role_inherits: Mapping[str, str] = field(default_factory=dict)
     canaries: frozenset[str] = frozenset()
     policy_id: str | None = None
     policy_version: str = "0"
@@ -558,6 +581,11 @@ _REMEDY: dict[str, str] = {
     "escalation_denied": "the semantic tier refused this call",
     "escalation_error": "the escalate callback raised, or is async while the tool is sync",
     "output_schema": "the tool output did not match its declared return schema",
+    "confirm_suspended": "resume the run and retry once the approval is granted; nothing was decided",
+    "unnameable_args": "call the tool with keyword arguments — a policy names its fields, so the gate "
+    "cannot check what it cannot name",
+    "uninspectable_output": "return the collected result — the output half of the gate can only inspect a "
+    "materialised value",
 }
 
 

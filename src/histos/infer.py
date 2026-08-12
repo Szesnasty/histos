@@ -62,11 +62,33 @@ def _map_annotation(ann: Any) -> tuple[str, bool, str | None]:
 
     if isinstance(ann, type):
         if issubclass(ann, enum.Enum):
-            return "string", False, None
+            return _enum_type(ann), False, None
         if ann in _PY_TO_SCHEMA:
             return _PY_TO_SCHEMA[ann], False, None
 
     return "any", False, None
+
+
+def _enum_type(ann: type[enum.Enum]) -> str:
+    """The schema type an Enum's *values* actually have.
+
+    Assuming ``string`` built an unsatisfiable field for an ``IntEnum``: the type said
+    string, the enum listed integers, and no value could ever be both — so the tool was
+    dead on arrival with an `arg_schema` denial nobody could read a cause out of.
+    Anything mixed degrades to `any` with no enum rather than to a contradiction; a
+    schema that cannot be satisfied is worse than one that does not constrain, because
+    the second is visible in `histos review` and the first looks like a working policy.
+    """
+    values = [member.value for member in ann]
+    if values and all(isinstance(v, bool) for v in values):
+        return "boolean"
+    if values and all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+        return "integer"
+    if values and all(isinstance(v, str) for v in values):
+        return "string"
+    if values and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+        return "number"
+    return "any"
 
 
 def infer_schema(func: Callable[..., Any]) -> Schema:
@@ -102,10 +124,14 @@ def infer_schema(func: Callable[..., Any]) -> Schema:
         required = param.default is inspect.Parameter.empty and not optional
 
         enum_vals: tuple[Any, ...] | None = None
-        if isinstance(ann, type) and issubclass(ann, enum.Enum):
+        if isinstance(ann, type) and issubclass(ann, enum.Enum) and ftype != "any":
+            # Dropped along with the type when the members disagree: listing values the
+            # declared type cannot hold is the contradiction `_enum_type` exists to avoid.
             enum_vals = tuple(e.value for e in ann)
 
-        fields[pname] = Field(type=ftype, required=required, item_type=item_type, enum=enum_vals)
+        fields[pname] = Field(
+            type=ftype, required=required, item_type=item_type, enum=enum_vals, nullable=optional
+        )
 
     return Schema(fields, allow_extra=allow_extra)
 
