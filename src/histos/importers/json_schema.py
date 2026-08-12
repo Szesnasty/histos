@@ -139,8 +139,13 @@ _UNPROJECTED_AT_OBJECT_LEVEL = _UNPROJECTED_ASSERTIONS - {"properties", "require
 
 # Inside `items`: the element type, the scalar bounds `_bound` reads, and an element
 # `enum`/`const` (see `_element_enum_pattern`). A nested `items` is still a shape one
-# flat field cannot hold.
-_UNPROJECTED_IN_ITEMS = _UNPROJECTED_ASSERTIONS | {"items"}
+# flat field cannot hold — and so are `minItems`/`maxItems`, which are projected on the
+# *array* and have no meaning one level down. They are named here explicitly because
+# this set is derived from `_UNPROJECTED_ASSERTIONS`, so giving them a home on `Field`
+# and taking them off that list silently deleted the refusal covering the element
+# schema too. `_bound` reads them property-only, precisely so an element bound is never
+# mistaken for an array bound, which left `items: {maxItems: 3}` dropped in silence.
+_UNPROJECTED_IN_ITEMS = _UNPROJECTED_ASSERTIONS | {"items", "minItems", "maxItems"}
 
 # Every keyword that reaches the projection, carried or refused. Used to decide whether
 # a union branch holds *only* a set of allowed values — a branch that also writes a
@@ -428,6 +433,12 @@ def _is_stray_bool(member: Any, item_type: str) -> bool:
     return isinstance(member, bool) and item_type in ("integer", "number")
 
 
+# The sentinel `_resolve_type` returns for a property whose only permitted value is
+# `null`. Not a `Field` type — `_field` converts it to `any` plus an enum of exactly
+# `None`, which is what "admits null and nothing else" means to the engine.
+_NULL_ONLY = "\0null-only"
+
+
 def _resolve_type(js_type: Any, *, where: str = "an imported schema") -> tuple[str, bool]:
     """Return ``(schema_type, nullable)`` for a JSON Schema ``type`` value.
 
@@ -444,15 +455,22 @@ def _resolve_type(js_type: Any, *, where: str = "an imported schema") -> tuple[s
         nullable = "null" in js_type
         concrete = [t for t in js_type if t != "null"]
         if not concrete:
-            return "any", nullable
+            # `["null"]`, the list spelling of null-only. Same answer as the scalar one
+            # below, and for the same reason.
+            return _NULL_ONLY, True
         unknown = [t for t in concrete if t not in _JS_TYPES]
         if unknown:
             raise _malformed(f"{where} type", unknown[0], f"one of {', '.join(sorted(_JS_TYPES))}")
         return concrete[0], nullable
     if js_type == "null":
-        # The list form `["null"]` already imports as nullable-any; the scalar spelling
-        # is the same statement and was refused as an unknown type.
-        return "any", True
+        # A distinct answer, not `("any", True)`. Both spellings say the property admits
+        # exactly one value — `null` — and `any` + nullable says the opposite: no type
+        # check at all, so a field admitting only null projected to one admitting
+        # strings, objects, anything. Before the scalar spelling was accepted at all it
+        # was refused as an unknown type, which skipped the tool and was safe; accepting
+        # it by mapping it onto the list spelling's behaviour inherited that spelling's
+        # bug rather than fixing it. `_field` turns this into `enum=(None,)`.
+        return _NULL_ONLY, True
     if isinstance(js_type, str) and js_type in _JS_TYPES:
         return js_type, False
     raise _malformed(f"{where} type", js_type, f"one of {', '.join(sorted(_JS_TYPES))}")
@@ -563,6 +581,12 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
 
     ftype, nullable = _resolve_type(prop.get("type"), where=where)
     nullable = nullable or optional
+    # A property that admits only `null` becomes `any` plus an enum of exactly `None`,
+    # unless the document wrote an enum of its own — in which case that is what it says
+    # and `_checked_enum` below decides whether it is coherent.
+    null_only = ftype == _NULL_ONLY
+    if null_only:
+        ftype = "any"
 
     items: dict[str, Any] = {}
     item_type: str | None = None
@@ -586,13 +610,23 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
     # engine applies, which is what the source says.
     item_enum = _element_enum(items["enum"], item_type=item_type or "any", where=where) if "enum" in items else None
 
+    # Read on the element schema as well as the property. Every other element-level
+    # keyword reaches `Field` through `_bound`; this one did not, so an array of PII
+    # marked the only place it can be marked — on the element — imported un-redacted.
+    # It is also the one keyword whose absence is invisible downstream: nothing later
+    # can tell "not sensitive" from "meant to be sensitive", which is why the marker
+    # carries a near-miss screen at all. `secret` wins over `pii` when both are present.
     sensitive = _sensitivity_marker(prop, where=where)
+    if items:
+        element = _sensitivity_marker(items, where=f"{where} items")
+        if element is not None and (sensitive is None or element == "secret"):
+            sensitive = element
 
     return Field(
         type=ftype,
         required=required and not nullable,
         nullable=nullable,
-        enum=_checked_enum(prop.get("enum"), ftype, nullable=nullable),
+        enum=(None,) if null_only and "enum" not in prop else _checked_enum(prop.get("enum"), ftype, nullable=nullable),
         max_length=_length(*_bound(prop, items, "maxLength")),
         min_length=_length(*_bound(prop, items, "minLength")),
         pattern=pattern,
@@ -643,7 +677,16 @@ def schema_from_json_schema(obj: dict[str, Any], *, root: dict[str, Any] | None 
     properties = resolved.get("properties", {})
     if not isinstance(properties, dict):
         raise _malformed("properties", properties, "an object")
-    required = set(resolved.get("required", []))
+    # Type-checked for the same reason `{"name": 7}` is: `project_tools` catches
+    # `PolicyError` and nothing else, so a `required` that is a bool, an int or a string
+    # raises past the per-tool skip and takes every healthy tool in the manifest with it
+    # — the failure mode that machinery exists to prevent, reached through the type
+    # system. A bare string is the sharp one: it iterates character by character and
+    # every single letter becomes a required property name.
+    raw_required = resolved.get("required", [])
+    if not isinstance(raw_required, list) or not all(isinstance(n, str) for n in raw_required):
+        raise _malformed("required", raw_required, "a list of property names")
+    required = set(raw_required)
     fields = {
         name: _field(prop, required=name in required, documents=documents, name=name)
         for name, prop in properties.items()

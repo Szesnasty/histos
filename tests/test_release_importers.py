@@ -637,3 +637,150 @@ def test_a_value_type_union_is_still_refused():
 def test_an_optional_is_still_not_a_union():
     field = _one({"anyOf": [{"type": "string", "maxLength": 4}, {"type": "null"}]})
     assert (field.type, field.nullable, field.max_length) == ("string", True, 4)
+
+
+# ── round three: what the round-two importer fixes left open ─────────────
+
+
+def test_an_element_bound_that_has_no_home_is_still_refused():
+    """Giving `maxItems`/`minItems` a home on `Field` removed them from
+    `_UNPROJECTED_ASSERTIONS`, and `_UNPROJECTED_IN_ITEMS` is derived from that set — so
+    the refusal covering the *element* schema went with them, while `_bound` still reads
+    the two property-only so an element bound is never mistaken for an array bound.
+    Between the two, `items: {maxItems: 3}` was dropped in silence."""
+    for spec in (
+        {"type": "array", "items": {"type": "array", "maxItems": 3}},
+        {"type": "array", "items": {"type": "array", "minItems": 1}},
+    ):
+        with pytest.raises(PolicyError, match="does not carry"):
+            _one(spec)
+
+
+def test_a_sensitivity_marker_on_the_element_is_read():
+    """An array of PII can only be marked on the element, and `_sensitivity_marker` was
+    called on the property alone — so the marker that cannot be inferred from anything
+    downstream was dropped, and the array imported un-redacted."""
+    field = _one({"type": "array", "items": {"type": "string", "x-sensitive": "pii"}})
+    assert field.sensitive == "pii"
+
+    # `secret` wins when both levels are marked.
+    both = _one({"type": "array", "x-sensitive": "pii", "items": {"type": "string", "x-sensitive": "secret"}})
+    assert both.sensitive == "secret"
+
+    # And the near-miss screen now reaches one level down for free.
+    with pytest.raises(PolicyError):
+        _one({"type": "array", "items": {"type": "string", "x_sensitive": "pii"}})
+
+
+@pytest.mark.parametrize("bad", [True, 7, "petId", {"petId": True}])
+def test_a_required_list_that_is_not_a_list_is_a_policy_error(bad):
+    """`project_tools` catches `PolicyError` and nothing else, so this raising as a
+    `TypeError` took every healthy tool in the manifest with it. A bare string is the
+    sharp one: it iterates character by character into one required property per letter."""
+    with pytest.raises(PolicyError, match="required"):
+        schema_from_json_schema({"type": "object", "properties": {"a": {"type": "string"}}, "required": bad})
+
+
+def test_a_nameless_tool_is_skipped_rather_than_fatal():
+    """`_reject_unusable_name` raises `PolicyError` for a name of the wrong type and is
+    skipped per tool; the emptiness check above it raised `ValueError` and was not."""
+    ok = {"description": "d", "inputSchema": {"type": "object", "properties": {}}}
+    with pytest.warns(UserWarning):
+        got = sources_from_mcp([{"name": "healthy", **ok}, {**ok}, {"name": "", **ok}, {"name": "also_healthy", **ok}])
+    assert [s.name for s in got] == ["healthy", "also_healthy"]
+
+
+@pytest.mark.parametrize("spelling", [{"type": "null"}, {"type": ["null"]}])
+def test_a_property_that_admits_only_null_admits_only_null(spelling):
+    """Both spellings say the property permits exactly one value. Mapping them onto
+    `("any", True)` said the opposite — no type check at all — so a field admitting only
+    null accepted strings, objects, anything."""
+    from histos.schema import validate
+
+    schema = schema_from_json_schema({"type": "object", "properties": {"x": spelling}})
+    assert schema.fields["x"].enum == (None,)
+    assert not validate(schema, {"x": None})
+    for value in ("a string", 42, {"k": 1}, [1]):
+        assert validate(schema, {"x": value}), f"{value!r} was accepted by a null-only field"
+
+
+def test_a_path_item_parameter_reaches_the_contract():
+    """OpenAPI lets a path item carry `parameters` for every operation under it — the
+    normal place for a shared path variable. Reading only `op["parameters"]` left that
+    variable out of a closed schema, so the caller had an argument the tool needs and
+    the gate denies, with nothing saying why."""
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/pets/{petId}": {
+                "parameters": [
+                    {"name": "petId", "in": "path", "required": True, "schema": {"type": "string", "maxLength": 12}}
+                ],
+                "get": {
+                    "operationId": "getPet",
+                    "parameters": [{"name": "verbose", "in": "query", "schema": {"type": "boolean"}}],
+                },
+            }
+        },
+    }
+    fields = contracts_from_openapi(spec)[0].args.fields
+    assert set(fields) == {"petId", "verbose"}
+    assert fields["petId"].required and fields["petId"].max_length == 12
+
+
+def test_an_operation_parameter_overrides_the_path_item_one():
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/x": {
+                "parameters": [{"name": "mode", "in": "query", "schema": {"type": "string", "maxLength": 4}}],
+                "get": {
+                    "operationId": "getX",
+                    "parameters": [{"name": "mode", "in": "query", "schema": {"type": "string", "maxLength": 99}}],
+                },
+            }
+        },
+    }
+    assert contracts_from_openapi(spec)[0].args.fields["mode"].max_length == 99
+
+
+def test_a_content_form_parameter_keeps_the_bounds_the_document_wrote():
+    """`schema` absent and the schema one level down under `content`. It fell through to
+    `{}` — an untyped `any` carrying none of the document's bounds."""
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/y": {
+                "get": {
+                    "operationId": "getY",
+                    "parameters": [
+                        {
+                            "name": "filter",
+                            "in": "query",
+                            "content": {"application/json": {"schema": {"type": "string", "maxLength": 20}}},
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    field = contracts_from_openapi(spec)[0].args.fields["filter"]
+    assert (field.type, field.max_length) == ("string", 20)
+
+
+def test_a_content_block_this_projection_cannot_read_is_refused():
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/z": {
+                "get": {
+                    "operationId": "getZ",
+                    "parameters": [
+                        {"name": "blob", "in": "query", "content": {"application/xml": {"schema": {"type": "string"}}}}
+                    ],
+                }
+            }
+        },
+    }
+    with pytest.raises(PolicyError):
+        contracts_from_openapi(spec)
