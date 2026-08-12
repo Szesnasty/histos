@@ -151,6 +151,12 @@
     "schema": {
       "description": "A deliberately tiny validator — not JSON Schema. Field names follow JSON Schema vocabulary so imported OpenAPI/MCP schemas map across without a rename. Nested objects are shallow-checked; see SECURITY.md.",
       "type": "object",
+      "properties": {
+        "$allow_extra": {
+          "description": "Whether arguments the schema does not declare are accepted. Closed by default — an undeclared argument is denied — and set only where a source said otherwise (`additionalProperties: true`, or a `**kwargs` signature). Reserved under a `$` prefix so a tool may still have an argument named `allow_extra`.",
+          "type": "boolean"
+        }
+      },
       "additionalProperties": {
         "$ref": "#/$defs/field"
       }
@@ -159,65 +165,23 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "type": {
-          "description": "The declared type, checked before the tool runs. 'object' is checked only for BEING an object - inner fields are not validated (see SECURITY.md); validate those inside the tool or keep arguments flat.",
-          "enum": [
-            "string",
-            "integer",
-            "number",
-            "boolean",
-            "array",
-            "object",
-            "any"
-          ],
-          "default": "string"
-        },
-        "required": {
-          "description": "Whether the argument must be present. Default: true. A missing required argument is a denial, not a None passed through to the tool.",
-          "type": "boolean",
-          "default": true
-        },
         "enum": {
           "description": "The complete set of permitted values. Anything else is denied - this is an allow-list, like every other construct in the format.",
           "type": "array",
           "minItems": 1
         },
-        "min_length": {
-          "description": "Minimum string length, inclusive.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "max_length": {
-          "description": "Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "pattern": {
-          "description": "Compiled at load, so an invalid regex fails loudly. NOT ReDoS-safe: treat patterns imported from third-party schemas as untrusted.",
-          "type": "string"
-        },
-        "minimum": {
-          "description": "Inclusive lower bound for a number. Expressed in the tool's own units - keep money in minor units so no implementation has to agree about floats.",
-          "type": "number"
-        },
-        "maximum": {
-          "description": "Inclusive upper bound for a number. This is the ceiling a hijacked model cannot raise, and it belongs here rather than in application code precisely so a reviewer can find it.",
+        "exclusive_maximum": {
+          "description": "Exclusive upper bound for a number: the value must be strictly less.",
           "type": "number"
         },
         "exclusive_minimum": {
           "description": "Exclusive lower bound for a number: the value must be strictly greater.",
           "type": "number"
         },
-        "exclusive_maximum": {
-          "description": "Exclusive upper bound for a number: the value must be strictly less.",
-          "type": "number"
-        },
-        "multiple_of": {
-          "description": "The number must be an exact multiple of this. Useful for step sizes and whole-unit amounts.",
-          "type": "number",
-          "not": {
-            "const": 0
-          }
+        "item_enum": {
+          "description": "The complete set of permitted values for each *element* of an array. The element twin of `enum`: an array argument is denied if any element is outside this set.",
+          "type": "array",
+          "minItems": 1
         },
         "item_type": {
           "description": "Element type for an array. String elements are bounded by the same length/pattern caps as a scalar string.",
@@ -230,12 +194,73 @@
             "any"
           ]
         },
+        "max_items": {
+          "description": "Maximum number of elements in an array, inclusive. Without it an array argument is unbounded, and the pre-gate's scan budget is the only thing standing between a manipulated model and a stalled worker.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_length": {
+          "description": "Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximum": {
+          "description": "Inclusive upper bound for a number. This is the ceiling a hijacked model cannot raise, and it belongs here rather than in application code precisely so a reviewer can find it.",
+          "type": "number"
+        },
+        "min_items": {
+          "description": "Minimum number of elements in an array, inclusive.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "min_length": {
+          "description": "Minimum string length, inclusive.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "minimum": {
+          "description": "Inclusive lower bound for a number. Expressed in the tool's own units - keep money in minor units so no implementation has to agree about floats.",
+          "type": "number"
+        },
+        "multiple_of": {
+          "description": "The number must be an exact multiple of this. Useful for step sizes and whole-unit amounts.",
+          "type": "number",
+          "not": {
+            "const": 0
+          }
+        },
+        "nullable": {
+          "description": "Whether the argument may be null. A field that accepts null accepts something a field that does not accept null refuses, so this is part of the hashed argument shape. Inferred from `T | None` and from `anyOf: [T, null]`.",
+          "type": "boolean"
+        },
+        "pattern": {
+          "description": "Compiled at load, so an invalid regex fails loudly. NOT ReDoS-safe: treat patterns imported from third-party schemas as untrusted.",
+          "type": "string"
+        },
+        "required": {
+          "description": "Whether the argument must be present. Default: true. A missing required argument is a denial, not a None passed through to the tool.",
+          "type": "boolean",
+          "default": true
+        },
         "sensitive": {
           "description": "Return schemas only: redacted on the way out unless the principal may view this field.",
           "enum": [
             "pii",
             "secret"
           ]
+        },
+        "type": {
+          "description": "The declared type, checked before the tool runs. 'object' is checked only for BEING an object - inner fields are not validated (see SECURITY.md); validate those inside the tool or keep arguments flat.",
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "array",
+            "object",
+            "any"
+          ],
+          "default": "string"
         }
       }
     },

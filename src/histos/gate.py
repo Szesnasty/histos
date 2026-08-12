@@ -54,7 +54,6 @@ or long-lived worker.
 from __future__ import annotations
 
 import contextlib
-import copy
 import enum
 import functools
 import inspect
@@ -76,7 +75,15 @@ from histos._version import __version__
 from histos.audit import AuditRecord, AuditSink, InMemoryAuditSink, digest_args
 from histos.bundle import load_policy
 from histos.content_rules import ContentRules
-from histos.contracts import Effect, GateDecision, GateRequest, Policy, Principal, ToolContract
+from histos.contracts import (
+    Effect,
+    GateDecision,
+    GateRequest,
+    Policy,
+    Principal,
+    ToolContract,
+    _snapshot_value,
+)
 from histos.engine import _MAX_OUTPUT_SCAN_CHARS as _DEFAULT_OUTPUT_BUDGET
 from histos.engine import Engine, EscalationTier, ResourceResolver, for_callback
 from histos.errors import GateConfirmationRequired, GateDenied, PolicyError, ToolErrorRedacted
@@ -1034,7 +1041,13 @@ class Gate:
             # next call in the same request would be authorized against — the one value
             # in the library that must not be reachable from anything the model can
             # influence.
-            trusted = copy.deepcopy(active.attributes[b.principal_attr])
+            # The same walk `Principal` snapshots with, and for the same reason twice
+            # over. A bare `copy.deepcopy` here raised on any attribute holding an
+            # uncopyable descendant — a lock, a session, an open file — so teaching the
+            # *constructor* to tolerate one only moved the outage from construction to
+            # call time, where it arrived as an uncaught TypeError out of the wrapper
+            # with no audit record for a call the policy had already allowed.
+            trusted = _snapshot_value(active.attributes[b.principal_attr])
             if rebound is not None and (b.field not in call_args or call_args[b.field] != trusted):
                 rebound.append(b.field)
             overrides[b.field] = trusted

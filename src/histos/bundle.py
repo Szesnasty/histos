@@ -23,7 +23,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from histos.contracts import SCHEMA_VERSION, Binding, Constraint, Policy, Sensitivity, ToolContract
+from histos.contracts import (
+    _MIN_CANARY_LENGTH,
+    SCHEMA_VERSION,
+    Binding,
+    Constraint,
+    Policy,
+    Sensitivity,
+    ToolContract,
+)
 from histos.errors import PolicyError
 from histos.importers.json_schema import schema_from_json_schema
 from histos.schema import Field, Schema
@@ -290,6 +298,13 @@ def _field_from_compact(where: str, spec: Any) -> Field:
     enum = spec.get("enum")
     if enum is not None:
         enum = tuple(_as_list(f"`enum` on {where}", enum))
+    # `item_enum` arrived three lines below its twin and without the twin's guard, which
+    # is the whole hazard `_as_list` was written for: `item_enum: read` — one missing
+    # pair of brackets — became ('r','e','a','d'), so the gate denied `["read"]`, the
+    # value the policy says is allowed, and allowed `["r"]`, which it does not.
+    item_enum = spec.get("item_enum")
+    if item_enum is not None:
+        item_enum = tuple(_as_list(f"`item_enum` on {where}", item_enum))
     return Field(
         type=spec.get("type", "string"),
         required=spec.get("required", True),
@@ -299,7 +314,7 @@ def _field_from_compact(where: str, spec: Any) -> Field:
         pattern=spec.get("pattern"),
         sensitive=spec.get("sensitive"),
         nullable=spec.get("nullable", False),
-        item_enum=tuple(spec["item_enum"]) if spec.get("item_enum") is not None else None,
+        item_enum=item_enum,
         item_type=spec.get("item_type"),
         max_items=spec.get("max_items"),
         min_items=spec.get("min_items"),
@@ -318,7 +333,22 @@ def _schema_from_node(where: str, node: Any) -> Schema | None:
     # allow an inline standard JSON Schema via {"json_schema": {...}}
     if set(node.keys()) == {"json_schema"}:
         return schema_from_json_schema(_as_mapping(f"`json_schema` in {where}", node["json_schema"]))
-    return Schema({name: _field_from_compact(f"field {name!r} of {where}", spec) for name, spec in node.items()})
+    # `$allow_extra` rather than a field named `allow_extra`, so a tool really can have
+    # an argument called that. It is the one Schema attribute that is not a field, and
+    # it had nowhere to go: `_schema_to_node` emitted only the field map, so a schema
+    # imported from `additionalProperties: true` (or inferred from `**kwargs`) came back
+    # from a dump/load closed. `histos import --out` therefore wrote a policy that denies
+    # arguments the imported source explicitly allows, and `histos import --update` never
+    # converged — it re-dumped a different policy every run.
+    allow_extra = bool(node.get("$allow_extra", False))
+    return Schema(
+        {
+            name: _field_from_compact(f"field {name!r} of {where}", spec)
+            for name, spec in node.items()
+            if name != "$allow_extra"
+        },
+        allow_extra=allow_extra,
+    )
 
 
 def _required(where: str, d: dict[str, Any], key: str) -> Any:
@@ -608,10 +638,6 @@ def load_policy(source: str | Path | dict[str, Any]) -> Policy:
 
 # ── load ─────────────────────────────────────────────────────────────────
 
-# A canary is a token planted to be conspicuous; anything this short is a fragment
-# of one, and matching it turns every ordinary argument into an exfiltration alert.
-_MIN_CANARY_LENGTH = 6
-
 
 def _canaries(node: Any) -> list[str]:
     tokens = _as_list("`canaries`", node)
@@ -766,7 +792,12 @@ def _field_to_compact(field: Field) -> dict[str, Any]:
 def _schema_to_node(schema: Schema | None) -> dict[str, Any] | None:
     if schema is None:
         return None
-    return {name: _field_to_compact(field) for name, field in schema.fields.items()}
+    node: dict[str, Any] = {name: _field_to_compact(field) for name, field in schema.fields.items()}
+    # Emitted only when true, so every closed schema — which is all of them unless a
+    # source said otherwise — dumps byte-identically to how it always did.
+    if schema.allow_extra:
+        node["$allow_extra"] = True
+    return node
 
 
 def _condition_to_dict(c: Constraint) -> dict[str, Any]:

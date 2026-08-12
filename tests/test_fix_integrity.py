@@ -75,7 +75,9 @@ from histos.schema import Schema
 p = Policy(
     tools={"t": ToolContract(name="t", args=Schema({}), access="write")},
     permissions={"r": frozenset({"t"})},
-    canaries=frozenset({"A", "B", "C", "D", "E", "F", "G"}),
+    # Seven of them, so set iteration order has something to vary; real length,
+    # because `Policy` now refuses a canary short enough to appear in ordinary text.
+    canaries=frozenset({f"CANARY-{c}-TOKEN" for c in "ABCDEFG"}),
 )
 print(p.content_hash())
 """

@@ -71,3 +71,57 @@ def test_enums_are_documented_where_the_values_are_not_obvious():
     for path, prop in _every_property():
         if isinstance(prop, dict) and prop.get("enum"):
             assert prop.get("description"), f"{path} has a fixed set of values and no explanation"
+
+
+def test_the_published_field_keys_are_exactly_the_ones_the_loader_accepts():
+    """The two drifted, and nothing said so. `_FIELD_KEYS` learned `nullable`,
+    `item_enum`, `max_items` and `min_items`; `spec/policy-0.1.schema.json` did not,
+    and it declares `additionalProperties: false` — so `histos import --out` wrote a
+    bundle that is invalid against the library's own published format, under an
+    unchanged `histos.policy/0.1` version string. A second implementation reading the
+    spec would have refused a file this one writes."""
+    from histos.bundle import _FIELD_KEYS
+
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    published = set(schema["$defs"]["field"]["properties"])
+    assert published == set(_FIELD_KEYS), (
+        f"in the loader but not the spec: {sorted(set(_FIELD_KEYS) - published)}; "
+        f"in the spec but not the loader: {sorted(published - set(_FIELD_KEYS))}"
+    )
+
+
+def test_a_dumped_policy_validates_against_the_published_format():
+    """The round trip the spec exists for, run rather than assumed."""
+    from histos import Field, Policy, Schema, ToolContract, dump_bundle
+
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    field_props = set(schema["$defs"]["field"]["properties"])
+    schema_props = set(schema["$defs"]["schema"].get("properties", {}))
+
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t",
+                args=Schema(
+                    {
+                        "tags": Field(
+                            type="array",
+                            item_type="string",
+                            item_enum=("read", "write"),
+                            max_items=4,
+                            min_items=1,
+                            nullable=True,
+                        )
+                    },
+                    allow_extra=True,
+                ),
+            )
+        },
+        permissions={"ok": frozenset({"t"})},
+    )
+    node = dump_bundle(policy)["tools"]["t"]["args"]
+    for key, value in node.items():
+        if key.startswith("$"):
+            assert key in schema_props, f"{key} is emitted but undocumented"
+            continue
+        assert set(value) <= field_props, f"field {key} emits undocumented keys: {sorted(set(value) - field_props)}"
