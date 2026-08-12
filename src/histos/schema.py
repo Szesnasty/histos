@@ -17,15 +17,17 @@ import math
 import re
 import re._constants as _re_const
 import re._parser as _re_parser
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from histos.errors import PolicyError
 
-# Cap the input a regex ever sees. This is a size bound, not a time bound — a
-# pattern that backtracks exponentially turns 4 KiB into years — so the real
-# defence is `_reject_catastrophic_backtracking` below, which refuses such a
-# pattern at policy-load time. Both apply.
+# Cap the input a regex ever sees. This is a size bound and nothing more: at a
+# backtracking degree of three or four, 4 KiB is not a bound at all — a merely
+# *polynomial* pattern turns it into hours, and an exponential one into years. The
+# time bound is `_reject_catastrophic_backtracking` below, which refuses such a
+# pattern at policy-load time. Both apply; only the second one bounds time.
 _MAX_PATTERN_INPUT = 4_096
 
 # Largest magnitude a numeric bound may carry. Beyond this, `float()` on the value
@@ -53,24 +55,69 @@ _TYPE_CHECKS: dict[str, type | tuple[type, ...]] = {
 # available without a new engine is to refuse the pattern *before* it can run.
 #
 # So the pattern is parsed with the stdlib's own parser and refused when its shape
-# admits exponential backtracking. Three shapes cover the catastrophic families:
+# admits runaway backtracking. Four shapes cover the catastrophic families:
 #
-#   nested variable repeat   (a+)+      — 2ⁿ ways to split the input
-#   alternation in a repeat  (a|ab)*    — same, via ambiguous branches
-#   repeat of the same thing \d+\d+     — every split of the run has to be tried
+#   nested variable repeat   (a+)+           — 2ⁿ ways to split the input
+#   alternation in a repeat  (a|ab)*         — same, via ambiguous branches
+#   repeat of the same thing \d+\d+          — every split of the run has to be tried
+#   overlapping neighbours   [a-z]+[a-z0-9]+ — likewise, once per shared character
 #
-# The screen is deliberately conservative: it rejects some patterns that happen to
-# be safe (`(a|b)*`, which a character class expresses anyway). A false positive is
-# a loud load-time error with a suggested rewrite; a false negative is a hung
-# process holding the GIL. Atomic groups and possessive quantifiers cannot be
-# backtracked into, so they reset the analysis rather than tripping it.
+# The last of those used to be allowed, on the theory that `_MAX_PATTERN_INPUT` bounded
+# it. It does not: adjacency is a *degree*, not a constant. Three overlapping repeats in
+# a row is O(n³) and four is O(n⁴), and the perfectly ordinary
+# `^[A-Za-z0-9]+[A-Za-z0-9_-]+[A-Za-z0-9]+$` took 48 seconds on a single 4 KiB argument,
+# with the GIL held for all of it. So neighbours are now compared by the *characters they
+# can match* rather than by parse-tree equality: any overlap at all is refused, which
+# still lets `\w+\s+\w+` — adjacent but disjoint, so unambiguous — load.
 #
-# Adjacency is judged on the repeated body, so `\d+\d+` is refused while `\w+\s+\w+`
-# — adjacent but unambiguous — loads. Two adjacent repeats over *overlapping but
-# unequal* classes (`[a-z]+[a-z0-9]+`) still pass and remain quadratic; that is the
-# one case where `_MAX_PATTERN_INPUT` is doing the bounding rather than this screen.
+# Two repeats also count as neighbours across anything that can match empty, because
+# `[a-z]+_?[a-z]+` is the quadratic pattern with a decoration in the middle.
+#
+# The screen is deliberately conservative: it rejects some patterns that happen to be
+# safe (`(a|b)*`, which a character class expresses anyway). A false positive is a loud
+# load-time error with a suggested rewrite; a false negative is a hung process holding
+# the GIL. Atomic groups and possessive quantifiers cannot be backtracked into, so they
+# reset the analysis rather than tripping it.
+#
+# Conservative is not the same as coarse, though, and the one relaxation below is there
+# because being coarse cost real patterns: `.` intersects almost every class, so treating
+# a trailing `.*`/`.+` as an overlap refused `^\w+.+$` and `^\s*[-*]\s+.+$` — log rules
+# that cost 0.00 s on 4 KiB of anything. A screen that refuses honest input gets switched
+# off, and a screen that is switched off catches nothing.
 _BACKTRACKING_REPEATS = frozenset({_re_const.MAX_REPEAT, _re_const.MIN_REPEAT})
 _ATOMIC_REPEATS = frozenset({_re_const.POSSESSIVE_REPEAT})
+
+# The alphabet the overlap test reasons over. ASCII is carried exactly; everything above
+# it collapses into four buckets, one per distinction `\d`/`\w`/`\s` and their negations
+# can draw. Four buckets rather than one because collapsing the whole tail into a single
+# "non-ASCII" atom would make `\d+\D+` — exact complements, and unambiguous — look like
+# an overlap and refuse it.
+_NON_ASCII_DIGIT = 0x110000
+_NON_ASCII_WORD = 0x110001  # word, but not a digit
+_NON_ASCII_SPACE = 0x110002
+_NON_ASCII_OTHER = 0x110003
+_NON_ASCII = frozenset({_NON_ASCII_DIGIT, _NON_ASCII_WORD, _NON_ASCII_SPACE, _NON_ASCII_OTHER})
+_ALPHABET = frozenset(range(128)) | _NON_ASCII
+
+_ASCII_DIGIT = frozenset(c for c in range(128) if chr(c).isdigit())
+_ASCII_SPACE = frozenset(c for c in range(128) if chr(c).isspace())
+_ASCII_WORD = frozenset(c for c in range(128) if chr(c).isalnum() or chr(c) == "_")
+
+_CATEGORY_SETS: dict[Any, frozenset[int]] = {
+    _re_const.CATEGORY_DIGIT: _ASCII_DIGIT | {_NON_ASCII_DIGIT},
+    _re_const.CATEGORY_SPACE: _ASCII_SPACE | {_NON_ASCII_SPACE},
+    _re_const.CATEGORY_WORD: _ASCII_WORD | {_NON_ASCII_DIGIT, _NON_ASCII_WORD},
+}
+_CATEGORY_SETS.update(
+    {
+        negated: _ALPHABET - _CATEGORY_SETS[positive]
+        for positive, negated in (
+            (_re_const.CATEGORY_DIGIT, _re_const.CATEGORY_NOT_DIGIT),
+            (_re_const.CATEGORY_SPACE, _re_const.CATEGORY_NOT_SPACE),
+            (_re_const.CATEGORY_WORD, _re_const.CATEGORY_NOT_WORD),
+        )
+    }
+)
 
 
 def _variable_width(av: tuple[Any, ...]) -> bool:
@@ -85,53 +132,471 @@ def _shape_key(node: Any) -> Any:
     return node
 
 
-def _backtracking_risk(seq: Any, *, in_repeat: bool) -> str | None:
-    """Describe the first exponential-backtracking shape in a parsed pattern, if any."""
-    previous_body: Any = None
-    for op, av in seq:
-        body_key: Any = None
+def _bucket(codepoint: int) -> int:
+    """A single codepoint as an ``_ALPHABET`` member: itself if ASCII, else its bucket."""
+    if codepoint < 128:
+        return codepoint
+    ch = chr(codepoint)
+    if ch.isdigit():
+        return _NON_ASCII_DIGIT
+    if ch.isalnum() or ch == "_":
+        return _NON_ASCII_WORD
+    if ch.isspace():
+        return _NON_ASCII_SPACE
+    return _NON_ASCII_OTHER
+
+
+def _class_codepoints(items: Any) -> frozenset[int] | None:
+    """The ``_ALPHABET`` members a parsed character class can match, or None if unclear.
+
+    Ranges reaching past ASCII contribute all four non-ASCII buckets, so an exotic range
+    is over-approximated rather than assumed disjoint. None means "do not know", and the
+    caller falls back to the older parse-tree comparison rather than refusing blind.
+    """
+    negate = False
+    points: set[int] = set()
+    for op, av in items:
+        if op is _re_const.NEGATE:
+            negate = True
+        elif op is _re_const.LITERAL:
+            points.add(_bucket(av))
+        elif op is _re_const.RANGE:
+            low, high = av
+            points.update(range(low, min(high, 127) + 1))
+            if high > 127:
+                points |= _NON_ASCII
+        elif op is _re_const.CATEGORY:
+            known = _CATEGORY_SETS.get(av)
+            if known is None:
+                return None
+            points |= known
+        else:
+            return None
+    return frozenset(_ALPHABET - points if negate else points)
+
+
+# What a subtree can match at each of its two ends, plus whether it can match nothing at
+# all: (first characters, last characters, nullable). None means "cannot analyse this",
+# and the caller falls back to parse-tree equality rather than refusing blind.
+_Edges = tuple[frozenset[int], frozenset[int], bool]
+
+_ZERO_WIDTH: _Edges = (frozenset(), frozenset(), True)
+
+
+def _edges(node: Any) -> _Edges | None:
+    """The characters a repeat body can begin and end with, and whether it can be empty.
+
+    This used to be a single set and only answered for one-character bodies, which meant
+    every multi-character body — `(zz)+`, `([b-d]{2})+`, `(xx)+` — came back "do not know"
+    and skipped the overlap test entirely, so `^(?:zz)+(?:zzz)+(?:zzzzz)+$` loaded and then
+    spent seconds per argument. A body is a *sequence*, though, and a sequence's ends are
+    derivable: what it can start with, what it can end with, and whether it can vanish.
+    Two adjacent repeats are ambiguous exactly when the run of the first can hand a
+    character to the second, so the ends are what the overlap test actually needs — the
+    middle of a body never sits on the boundary between two repeats.
+    """
+    if isinstance(node, list | _re_parser.SubPattern):
+        return _sequence_edges(node)
+    if not (isinstance(node, tuple) and len(node) == 2):
+        return None
+    op, av = node
+    if op is _re_const.LITERAL:
+        single = frozenset({_bucket(av)})
+        return (single, single, False)
+    if op is _re_const.NOT_LITERAL:
+        rest = _ALPHABET - {_bucket(av)}
+        return (rest, rest, False)
+    if op in (_re_const.ANY, _re_const.ANY_ALL):
+        any_char = _ALPHABET if op is _re_const.ANY_ALL else _ALPHABET - {ord("\n")}
+        return (any_char, any_char, False)
+    if op is _re_const.IN:
+        points = _class_codepoints(av)
+        return None if points is None else (points, points, False)
+    if op in _BACKTRACKING_REPEATS or op in _ATOMIC_REPEATS:
+        inner = _edges(av[2])
+        return None if inner is None else (inner[0], inner[1], inner[2] or av[0] == 0)
+    if op is _re_const.SUBPATTERN:
+        # av is (group, add_flags, del_flags, body); an inline `(?i:...)` changes which
+        # characters the body matches in a way this analysis does not model, so it is a
+        # "do not know" rather than a wrong answer.
+        return None if av[1] or av[2] else _edges(av[3])
+    if op is _re_const.ATOMIC_GROUP:
+        return _edges(av)
+    if op is _re_const.BRANCH:
+        return _branch_edges(av[1])
+    if op is _re_const.AT or op in (_re_const.ASSERT, _re_const.ASSERT_NOT):
+        return _ZERO_WIDTH  # zero-width: it constrains the boundary but never occupies it
+    return None
+
+
+def _sequence_edges(seq: Any) -> _Edges | None:
+    """Fold a sequence's items into one ``_Edges``, from both ends inwards."""
+    items = list(seq)
+    first: set[int] = set()
+    last: set[int] = set()
+    nullable = True
+    for item in items:
+        edges = _edges(item)
+        if edges is None:
+            return None
+        first |= edges[0]
+        if not edges[2]:
+            break
+    for item in reversed(items):
+        edges = _edges(item)
+        if edges is None:
+            return None
+        last |= edges[1]
+        if not edges[2]:
+            nullable = False
+            break
+    return (frozenset(first), frozenset(last), nullable)
+
+
+def _branch_edges(branches: Any) -> _Edges | None:
+    first: set[int] = set()
+    last: set[int] = set()
+    nullable = False
+    for branch in branches:
+        edges = _edges(branch)
+        if edges is None:
+            return None
+        first |= edges[0]
+        last |= edges[1]
+        nullable = nullable or edges[2]
+    return (frozenset(first), frozenset(last), nullable)
+
+
+# A variable repeat still adjacent to whatever comes next: its shape, its ends, and
+# whether its body is a bare `.` (which the trailing-repeat exemption below has to know).
+_Neighbour = tuple[Any, _Edges | None, bool]
+
+
+def _neighbour_clash(neighbours: list[_Neighbour], candidate: _Neighbour) -> str | None:
+    """Whether a variable repeat is ambiguous against one still adjacent to it.
+
+    The boundary between a run of the earlier repeat and the later one can move only if
+    some character is both a legal *end* of the earlier body and a legal *start* of the
+    later one — which is why `(?:ab)+(?:cd)+` is fine and `(?:ab)+(?:bc)+` is not.
+    """
+    key, edges, _ = candidate
+    for prev_key, prev_edges, _ in neighbours:
+        if edges is not None and prev_edges is not None:
+            if prev_edges[1] & edges[0]:
+                return "two repeats in a row that can match the same character, e.g. `[a-z]+[a-z0-9]+`"
+        elif prev_key == key:
+            return "the same thing repeated twice in a row, e.g. `\\d+\\d+`"
+    return None
+
+
+def _is_dot(body: Any) -> bool:
+    """True for a repeat body that is exactly `.` — the one thing a trailing repeat may be."""
+    while isinstance(body, tuple | list | _re_parser.SubPattern) and len(body) == 1:
+        body = body[0]
+    return isinstance(body, tuple) and len(body) == 2 and body[0] in (_re_const.ANY, _re_const.ANY_ALL)
+
+
+def _backtracking_risk(
+    seq: Any, *, in_repeat: bool, at_tail: bool, neighbours: list[_Neighbour] | None = None
+) -> str | None:
+    """Describe the first runaway-backtracking shape in a parsed pattern, if any.
+
+    ``at_tail`` says this sequence's end is also the end of the whole pattern; ``neighbours``
+    is the caller's own adjacency list, threaded through so a group is transparent to it.
+    """
+    # variable repeats reachable from here without consuming a character; anything that
+    # must consume one clears the list, since it is what disambiguates the two sides.
+    if neighbours is None:
+        neighbours = []
+    items = list(seq)
+    # the last item that can occupy a character: an anchor after it is not "after" it in
+    # any sense that matters, so `[a-z]+.*$` has `.*` in tail position just like `[a-z]+.*`.
+    final = max((i for i, (op, _) in enumerate(items) if op is not _re_const.AT), default=-1)
+    for index, (op, av) in enumerate(items):
+        tail = at_tail and index == final
         if op in _BACKTRACKING_REPEATS:
             variable_repeat = _variable_width(av)
             if in_repeat and variable_repeat:
                 return "a variable-length repeat nested inside another repeat, e.g. `(a+)+`"
-            if variable_repeat:
-                body_key = _shape_key(av[2])
-                if body_key == previous_body:
-                    return "the same thing repeated twice in a row, e.g. `\\d+\\d+`"
-            risk = _backtracking_risk(av[2], in_repeat=in_repeat or variable_repeat)
+            dot_repeat = _is_dot(av[2])
+            trailing_dot = variable_repeat and tail and op is _re_const.MAX_REPEAT and dot_repeat
+            if trailing_dot and not any(previous_dot for _, _, previous_dot in neighbours):
+                # a greedy `.`-repeat with nothing after it swallows the rest of the input on
+                # its first try and never has to give any of it back, so it cannot be the
+                # second half of an ambiguous pair. Refusing it cost `^\s*[-*]\s+.+$` and
+                # `^\w+.+$` — ordinary log/markdown rules, measured at 0.00 s on 4 KiB of
+                # anything — and bought nothing, because `.` intersects almost every class
+                # and so clashed with whatever preceded it. The worst input it still admits
+                # is a newline, which `.` will not cross: 30 ms at the 4 KiB cap, quadratic
+                # with a tiny constant, and that is the trade being made here.
+                #
+                # It does not extend to a `.`-repeat that *follows another one*. `.*.+` is one
+                # greedy run split two ways — the same thing repeated twice — and the "nothing
+                # after it" argument says nothing about the pair. `^[^/]+[b-d]{3}?.*.+$` is
+                # 39 s at 4 KiB and was found by exempting it.
+                continue
+            neighbour = (_shape_key(av[2]), _edges(av[2]), dot_repeat) if variable_repeat else None
+            if neighbour is not None:
+                clash = _neighbour_clash(neighbours, neighbour)
+                if clash is not None:
+                    return clash
+            if av[0] != 0:
+                neighbours.clear()
+            if neighbour is not None:
+                neighbours.append(neighbour)
+            risk = _backtracking_risk(av[2], in_repeat=in_repeat or variable_repeat, at_tail=False)
         elif op is _re_const.BRANCH:
             if in_repeat:
                 return "an alternation inside a repeat, e.g. `(a|ab)*` — use a character class"
-            risk = next((r for b in av[1] if (r := _backtracking_risk(b, in_repeat=False))), None)
+            neighbours.clear()
+            risk = next((r for b in av[1] if (r := _backtracking_risk(b, in_repeat=False, at_tail=tail))), None)
         elif op is _re_const.SUBPATTERN:
-            risk = _backtracking_risk(av[3], in_repeat=in_repeat)
+            # a group is transparent here. It used to clear the adjacency list and recurse
+            # into a fresh one, so `([a-z]+)[a-z0-9]+` — the same quadratic pattern as
+            # `[a-z]+[a-z0-9]+`, with one pair of parentheses — was invisible to the shape
+            # screen and left to the timing probe, which decided it by wall clock.
+            risk = _backtracking_risk(av[3], in_repeat=in_repeat, at_tail=tail, neighbours=neighbours)
         elif op in (_re_const.ASSERT, _re_const.ASSERT_NOT):
-            # A lookaround runs its own match, so it starts a fresh analysis.
-            risk = _backtracking_risk(av[1], in_repeat=False)
+            # A lookaround runs its own match, so it starts a fresh analysis. It consumes
+            # nothing, so it does not separate the repeats on either side of it either.
+            risk = _backtracking_risk(av[1], in_repeat=False, at_tail=False)
         elif op is _re_const.ATOMIC_GROUP or op in _ATOMIC_REPEATS:
+            neighbours.clear()
             body = av[2] if op in _ATOMIC_REPEATS else av
-            risk = _backtracking_risk(body, in_repeat=False)
+            risk = _backtracking_risk(body, in_repeat=False, at_tail=False)
         elif op is _re_const.GROUPREF_EXISTS:
-            risk = next((r for b in av[1:] if b and (r := _backtracking_risk(b, in_repeat=in_repeat))), None)
+            neighbours.clear()
+            branches = (b for b in av[1:] if b)
+            risk = next((r for b in branches if (r := _backtracking_risk(b, in_repeat=in_repeat, at_tail=tail))), None)
+        elif op is _re_const.AT:
+            risk = None  # an anchor matches the empty string, so it separates nothing
         else:
-            risk = None  # every remaining opcode is a leaf (literal, class, anchor, backref)
+            neighbours.clear()
+            risk = None  # every remaining opcode is a leaf (literal, class, backref)
         if risk is not None:
             return risk
-        previous_body = body_key
     return None
 
 
-def _reject_catastrophic_backtracking(pattern: str) -> None:
-    risk = _backtracking_risk(_re_parser.parse(pattern), in_repeat=False)
-    if risk is None:
-        return
-    raise PolicyError(
-        f"pattern {pattern!r} can backtrack exponentially — refusing it. It contains {risk}. "
-        "`re` has no step budget and does not release the GIL, so one crafted argument would "
-        "stall this process; the pattern is refused at load rather than at 4 KiB of input. "
-        "Rewrite it with a character class, a bounded repeat `{m,n}`, or an atomic group `(?>...)`.",
+# The AST screen reasons about shape, and some ambiguity is invisible to it: an inline
+# `(?i)` it does not model, overlapping ranges finer-grained than the four non-ASCII
+# buckets. So a pattern that survives the screen is also *run*, once, at load time,
+# against synthetic worst cases — runs of one character ending in a byte that forces the
+# match to fail and backtrack.
+#
+# The filler used to be the fixed list ("a", "0", " ", "aA0_.-"), which had nothing to do
+# with the pattern in front of it: a pattern over `[b-d]` was probed with characters it
+# can never match, matched nothing, returned instantly, and loaded. The exact same shape
+# spelled with `\w` was caught, which is the whole tell. The filler now comes out of the
+# pattern's own alphabet, and the terminator is chosen to be a character the pattern cannot
+# match at all, so the probe reaches the backtracking rather than failing in front of it.
+_PROBE_BUDGET_S = 0.05
+# The ladder starts at 8, not at 64. Eight characters cannot be expensive for any pattern
+# — that is the point of starting there — whereas 64 already is: a degree-8 pattern spends
+# 45 s on its *first* probe at 64, so a ladder that starts there has nothing to measure
+# before it is already hung. Starting small buys two cheap rungs to read the growth rate
+# off before any rung can cost real time.
+_PROBE_SIZES = (8, 16, 32, 64, 128, 256, 512, 1024, 2048, _MAX_PATTERN_INPUT)
+# Four characters, so five probe strings. Enough to cover a pattern's repeats and the
+# literals wedged between them; more than that and the probe set costs more than it finds.
+_MAX_PROBE_CHARS = 4
+
+# Which character to stand in for a set, most legible first. Any member would do; a
+# deterministic choice keeps the probe reproducible from one load to the next.
+_FILLER_PREFERENCE = tuple(
+    dict.fromkeys(
+        [ord(c) for c in "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_-. "]
+        + list(range(33, 127))
+        + list(range(128))
+    )
+)
+# One real character per non-ASCII bucket, for a pattern whose repeats are entirely
+# outside ASCII — otherwise `[一-鿿]+` gets probed with nothing at all.
+_BUCKET_SAMPLES = {
+    _NON_ASCII_DIGIT: "٣",
+    _NON_ASCII_WORD: "é",
+    _NON_ASCII_SPACE: " ",
+    _NON_ASCII_OTHER: "→",
+}
+# Terminators, tried in order until one lands outside everything the pattern can match.
+# Newline first: it is the one character `.` refuses, and `\w`, `\d`, `[a-z]` and most
+# negated classes refuse it too, so it is the terminator most patterns cannot swallow.
+_TERMINATORS = ("\n", "!", "\x00", "\x01", "\U0010fffe")
+
+
+def _contained_codepoints(seq: Any) -> frozenset[int]:
+    """Every ``_ALPHABET`` member anywhere inside a subtree.
+
+    Deliberately an over-approximation in both of its uses: too wide a set only picks a
+    filler the pattern will not chew on, or drives the terminator down to the last
+    fallback. Too narrow a one would pick a *terminator the pattern matches*, and then
+    the probe never reaches the backtracking it exists to measure.
+    """
+    points: set[int] = set()
+    for op, av in seq:
+        if op is _re_const.LITERAL:
+            points.add(_bucket(av))
+        elif op is _re_const.NOT_LITERAL:
+            points |= _ALPHABET - {_bucket(av)}
+        elif op in (_re_const.ANY, _re_const.ANY_ALL):
+            # `.` is counted as matching the newline it actually refuses, deliberately. Being
+            # exact here would make `\n` the terminator for every pattern containing a `.`,
+            # and probing `^[a-z]+.*$` with it costs 38 ms of the 50 ms budget — so the
+            # ordinary log rules this screen was just taught to accept would start being
+            # refused on any machine a third slower than this one. The cost is that a pattern
+            # whose only forcing character is a newline *and* which contains a `.` is probed
+            # with something it can swallow; the shape screen is what covers that case.
+            points |= _ALPHABET
+        elif op is _re_const.IN:
+            known = _class_codepoints(av)
+            points |= _ALPHABET if known is None else known
+        elif op in _BACKTRACKING_REPEATS or op in _ATOMIC_REPEATS:
+            points |= _contained_codepoints(av[2])
+        elif op is _re_const.SUBPATTERN:
+            points |= _contained_codepoints(av[3])
+        elif op is _re_const.ATOMIC_GROUP:
+            points |= _contained_codepoints(av)
+        elif op is _re_const.BRANCH:
+            for branch in av[1]:
+                points |= _contained_codepoints(branch)
+        elif op in (_re_const.ASSERT, _re_const.ASSERT_NOT):
+            points |= _contained_codepoints(av[1])
+        elif op is _re_const.GROUPREF_EXISTS:
+            for branch in av[1:]:
+                if branch:
+                    points |= _contained_codepoints(branch)
+    return frozenset(points)
+
+
+def _sample(points: frozenset[int]) -> str:
+    """One character out of a set of ``_ALPHABET`` members, or "" if there is none."""
+    for codepoint in _FILLER_PREFERENCE:
+        if codepoint in points:
+            return chr(codepoint)
+    for bucket, sample in _BUCKET_SAMPLES.items():
+        if bucket in points:
+            return sample
+    return ""
+
+
+def _probe_alphabets(seq: Any, found: list[tuple[bool, frozenset[int]]]) -> None:
+    """Collect ``(drives backtracking, alphabet)`` for every atom, in source order.
+
+    The variable repeats are the ones that can backtrack, so their characters are worth
+    the most and go first. Everything else still has to be in the list, though: the run
+    has to get *past* `x` and `[b-d]{3}` before the repeats around them can blow up, and
+    a filler that cannot spell them fails in front of the interesting part and reports a
+    fast pattern. That is the same mistake the fixed filler list made, one level in.
+    """
+    for op, av in seq:
+        if op in _BACKTRACKING_REPEATS or op in _ATOMIC_REPEATS:
+            found.append((_variable_width(av), _contained_codepoints(av[2])))
+            _probe_alphabets(av[2], found)
+        elif op is _re_const.LITERAL:
+            found.append((False, frozenset({_bucket(av)})))
+        elif op is _re_const.IN:
+            known = _class_codepoints(av)
+            found.append((False, _ALPHABET if known is None else known))
+        elif op is _re_const.SUBPATTERN:
+            _probe_alphabets(av[3], found)
+        elif op is _re_const.ATOMIC_GROUP:
+            _probe_alphabets(av, found)
+        elif op is _re_const.BRANCH:
+            for branch in av[1]:
+                _probe_alphabets(branch, found)
+        elif op in (_re_const.ASSERT, _re_const.ASSERT_NOT):
+            _probe_alphabets(av[1], found)
+        elif op is _re_const.GROUPREF_EXISTS:
+            for branch in av[1:]:
+                if branch:
+                    _probe_alphabets(branch, found)
+
+
+def _probe_inputs(parsed: Any) -> tuple[str, ...]:
+    """Fillers to build probe strings from, drawn from the pattern's own alphabet."""
+    atoms: list[tuple[bool, frozenset[int]]] = []
+    _probe_alphabets(parsed, atoms)
+    chars: list[str] = []
+    for points in [p for drives, p in atoms if drives] + [p for drives, p in atoms if not drives]:
+        char = _sample(points)
+        if char and char not in chars:
+            chars.append(char)
+        if len(chars) == _MAX_PROBE_CHARS:
+            break
+    if not chars:
+        return ("a",)
+    # each character on its own, then all of them interleaved, because a boundary between
+    # two repeats only backtracks when the run reaches across it.
+    return (*chars, "".join(chars)) if len(chars) > 1 else (chars[0],)
+
+
+def _probe_terminator(parsed: Any) -> str:
+    """A character the pattern cannot match, so the probe ends in a forced failure."""
+    matchable = _contained_codepoints(parsed)
+    return next((t for t in _TERMINATORS if _bucket(ord(t)) not in matchable), _TERMINATORS[-1])
+
+
+def _slow_pattern_error(pattern: str, elapsed: float, size: int) -> PolicyError:
+    return PolicyError(
+        f"pattern {pattern!r} spent {elapsed * 1000:.0f} ms of a {_PROBE_BUDGET_S * 1000:.0f} ms budget "
+        f"to reject a {size}-character string, and an argument may be {_MAX_PATTERN_INPUT} characters — "
+        "refusing it. `re` has no step budget and does not release the GIL, so the cost this pattern "
+        "already shows at load would be paid, larger, inside the gate with the whole process stopped. "
+        "Anchor it, bound its repeats with `{m,n}`, or make adjacent repeats match disjoint characters.",
         code="unsafe_pattern",
     )
+
+
+def _reject_slow_pattern(pattern: str, compiled: re.Pattern[str], parsed: Any) -> None:
+    """Refuse a pattern that is measurably slow on a synthetic worst case.
+
+    A timing check is a blunt instrument, and this one only sees the worst cases it
+    thinks to build — a pattern that is quadratic on some other input still gets
+    through. It is here for the shapes the parse-tree screen structurally cannot see,
+    not as a replacement for it.
+
+    The budget used to be checked only *between* probes, which bounded nothing: the run
+    that blew it was already running, and a pattern tuned to the probe spent 1.35 s of
+    load time inside a 50 ms budget — 27x — with a hostile manifest free to multiply that
+    by the number of tools it declares. So each size is now also gated on what the
+    previous two cost: the ratio between them is the pattern's polynomial degree showing
+    itself, and a degree that projects past the budget is refused instead of measured.
+    Total load-time cost is bounded by roughly twice the budget rather than by nothing.
+    """
+    fillers = _probe_inputs(parsed)
+    terminator = _probe_terminator(parsed)
+    previous = before = 0.0  # slowest single probe at the last size, and the one before it
+    elapsed = 0.0
+    for size in _PROBE_SIZES:
+        growth = max(2.0, previous / before) if before > 0 else 2.0
+        if previous * growth * len(fillers) > _PROBE_BUDGET_S:
+            raise _slow_pattern_error(pattern, elapsed, size)
+        worst = 0.0
+        for filler in fillers:
+            probe = (filler * (size // len(filler) + 1))[: size - len(terminator)] + terminator
+            started = time.perf_counter()
+            compiled.fullmatch(probe)
+            took = time.perf_counter() - started
+            elapsed += took
+            worst = max(worst, took)
+            if elapsed > _PROBE_BUDGET_S:
+                raise _slow_pattern_error(pattern, elapsed, size)
+        before, previous = previous, worst
+
+
+def _reject_catastrophic_backtracking(pattern: str, compiled: re.Pattern[str]) -> None:
+    parsed = _re_parser.parse(pattern)
+    risk = _backtracking_risk(parsed, in_repeat=False, at_tail=True)
+    if risk is not None:
+        raise PolicyError(
+            f"pattern {pattern!r} can backtrack exponentially, or polynomially in a way 4 KiB of "
+            f"input turns into hours — refusing it. It contains {risk}. "
+            "`re` has no step budget and does not release the GIL, so one crafted argument would "
+            "stall this process; the pattern is refused at load rather than at 4 KiB of input. "
+            "Rewrite it with a character class, a bounded repeat `{m,n}`, or an atomic group `(?>...)`.",
+            code="unsafe_pattern",
+        )
+    _reject_slow_pattern(pattern, compiled, parsed)
 
 
 def _check_bound(name: str, value: Any) -> None:
@@ -184,6 +649,14 @@ class Field:
     min_length: int | None = None
     pattern: str | None = None
     sensitive: str | None = None  # None | "pii" | "secret"
+    #: Whether an explicit ``None`` is a legal value for this field.
+    #:
+    #: Distinct from ``required``, which is about the key being *present*. An optional
+    #: Python parameter (`note: str | None = None`) and a JSON Schema
+    #: `anyOf: [T, null]` both say the value may be null, and both imported as a plain
+    #: `string` — so a caller passing the null the source explicitly allows was denied
+    #: `arg_schema`, with nothing in the policy format able to express what it wanted.
+    nullable: bool = False
     item_type: str | None = None  # element type for "array"
     # Numeric value bounds (integer/number, and per numeric array element). A
     # non-finite value (NaN/±Inf) is denied outright — a NaN makes every IEEE
@@ -217,10 +690,10 @@ class Field:
             # for catastrophic backtracking in the same pass — an imported pattern
             # is attacker-influenced input and gets checked before it can run.
             try:
-                re.compile(self.pattern)
+                compiled = re.compile(self.pattern)
             except re.error as exc:
                 raise PolicyError(f"invalid regex pattern {self.pattern!r}: {exc}", code="invalid_field") from exc
-            _reject_catastrophic_backtracking(self.pattern)
+            _reject_catastrophic_backtracking(self.pattern, compiled)
 
 
 @dataclass(frozen=True)
@@ -282,6 +755,10 @@ def _check_number(name: str, spec: Field, value: int | float) -> list[str]:
 
 def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
     errors: list[str] = []
+    # A declared-nullable field accepts the null and stops there: every bound below
+    # describes a value, and `None` is the absence of one.
+    if value is None and spec.nullable:
+        return errors
     expected = _TYPE_CHECKS[spec.type]
 
     # bool is a subclass of int/float — keep numbers distinct from booleans.
