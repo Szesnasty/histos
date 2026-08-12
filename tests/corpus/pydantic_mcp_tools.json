@@ -1,0 +1,304 @@
+{
+  "tools": [
+    {
+      "description": "pydantic-generated: SearchArgs",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "maxLength": 200,
+            "title": "Query",
+            "type": "string"
+          },
+          "top_k": {
+            "default": 5,
+            "maximum": 50,
+            "minimum": 1,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "SearchArgs",
+        "type": "object"
+      },
+      "name": "search"
+    },
+    {
+      "description": "pydantic-generated: OptionalArgs",
+      "inputSchema": {
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Note"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tag"
+          }
+        },
+        "title": "OptionalArgs",
+        "type": "object"
+      },
+      "name": "optional_fields"
+    },
+    {
+      "description": "pydantic-generated: EnumArgs",
+      "inputSchema": {
+        "$defs": {
+          "Mode": {
+            "enum": [
+              "read",
+              "write"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "Priority": {
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Priority",
+            "type": "integer"
+          }
+        },
+        "properties": {
+          "mode": {
+            "$ref": "#/$defs/Mode"
+          },
+          "priority": {
+            "$ref": "#/$defs/Priority"
+          }
+        },
+        "required": [
+          "mode",
+          "priority"
+        ],
+        "title": "EnumArgs",
+        "type": "object"
+      },
+      "name": "enums"
+    },
+    {
+      "description": "pydantic-generated: ConstArgs",
+      "inputSchema": {
+        "properties": {
+          "kind": {
+            "const": "refund",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ConstArgs",
+        "type": "object"
+      },
+      "name": "const_literal"
+    },
+    {
+      "description": "pydantic-generated: ScopeArgs",
+      "inputSchema": {
+        "$defs": {
+          "Mode": {
+            "enum": [
+              "read",
+              "write"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "properties": {
+          "scopes": {
+            "items": {
+              "$ref": "#/$defs/Mode"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scopes",
+          "tags"
+        ],
+        "title": "ScopeArgs",
+        "type": "object"
+      },
+      "name": "scopes"
+    },
+    {
+      "description": "pydantic-generated: NestedArgs",
+      "inputSchema": {
+        "$defs": {
+          "Address": {
+            "properties": {
+              "city": {
+                "title": "City",
+                "type": "string"
+              },
+              "street": {
+                "title": "Street",
+                "type": "string"
+              }
+            },
+            "required": [
+              "street",
+              "city"
+            ],
+            "title": "Address",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "to": {
+            "$ref": "#/$defs/Address"
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "title": "NestedArgs",
+        "type": "object"
+      },
+      "name": "nested_model"
+    },
+    {
+      "description": "pydantic-generated: UnionArgs",
+      "inputSchema": {
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Amount"
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "title": "UnionArgs",
+        "type": "object"
+      },
+      "name": "union"
+    },
+    {
+      "description": "pydantic-generated: RecursiveArgs",
+      "inputSchema": {
+        "$defs": {
+          "Node": {
+            "properties": {
+              "child": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Node"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "title": "Node",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "root": {
+            "$ref": "#/$defs/Node"
+          }
+        },
+        "required": [
+          "root"
+        ],
+        "title": "RecursiveArgs",
+        "type": "object"
+      },
+      "name": "recursive"
+    },
+    {
+      "description": "pydantic-generated: ExtraArgs",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "only_this": {
+            "title": "Only This",
+            "type": "string"
+          }
+        },
+        "required": [
+          "only_this"
+        ],
+        "title": "ExtraArgs",
+        "type": "object"
+      },
+      "name": "extra_forbid"
+    },
+    {
+      "description": "pydantic-generated: PatternArgs",
+      "inputSchema": {
+        "properties": {
+          "count": {
+            "exclusiveMaximum": 1000,
+            "exclusiveMinimum": 0,
+            "multipleOf": 0.5,
+            "title": "Count",
+            "type": "number"
+          },
+          "email": {
+            "pattern": "^[^@]+@[^@]+$",
+            "title": "Email",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "count"
+        ],
+        "title": "PatternArgs",
+        "type": "object"
+      },
+      "name": "patterns"
+    }
+  ]
+}
