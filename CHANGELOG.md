@@ -76,6 +76,12 @@ nothing is on PyPI yet — which is exactly why they land now rather than in 0.2
   will actually cover, which a host holding only its own arguments cannot derive
   when the tool has a `bind`.
 - `uninspectable_output`, `unnameable_args` and `confirm_suspended` decision codes.
+- Python 3.14 is tested and declared. The supported range is 3.12 – 3.14.
+- macOS and Windows are tested, not only asserted by the `OS Independent`
+  classifier. Two guarantees are POSIX-shaped and remain so, both documented in
+  SECURITY.md: the audit log's cross-process `flock`, and its owner-only `0o600`
+  creation mode. On Windows the sink degrades to in-process locking rather than
+  failing, which is what the suite now runs and checks.
 
 The engine as first extracted into its own repository: RBAC with role
 inheritance, argument-schema validation, resource-aware (Cedar-style) constraints
