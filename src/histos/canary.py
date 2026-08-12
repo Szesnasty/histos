@@ -22,7 +22,7 @@ from collections.abc import Iterable
 DEFAULT_MARK = "[REDACTED-CANARY]"
 
 # A fixed, documented normalization set (Phase 0.1). Zero-width / invisible chars…
-_ZERO_WIDTH = {"​", "‌", "‍", "⁠", "﻿"}
+_ZERO_WIDTH = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"}
 # …and a closed separator set, stripped so a spaced-out token still matches.
 _SEPARATORS = set(" \t\r\n-_.·•|,")
 # One prebuilt deletion table for both sets: str.translate runs in C, while the
