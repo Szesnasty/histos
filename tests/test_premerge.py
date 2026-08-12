@@ -35,7 +35,7 @@ def _confirm_policy() -> Policy:
 
 
 def test_confirmation_requires_out_of_band_grant():
-    store = ApprovalStore()
+    store = ApprovalStore(_confirm_policy())
     calls = []
 
     def wire_money(to):
@@ -60,7 +60,7 @@ def test_confirmation_requires_out_of_band_grant():
 
 
 def test_approval_is_single_use_and_action_bound():
-    store = ApprovalStore()
+    store = ApprovalStore(_confirm_policy())
 
     def wire_money(to):
         return {"ok": True}

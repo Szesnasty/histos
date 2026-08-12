@@ -155,10 +155,21 @@ def test_async_missing_principal_fails_closed():
     assert exc.value.decision.rule == "no_principal"
 
 
-def test_async_positional_arguments_are_rejected():
+def test_async_positional_arguments_are_bound_by_name():
+    """The async path names positional arguments the same way the sync one does."""
     safe = gate(echo, policy=_echo_policy())
-    with use_principal(Principal(role="r")), pytest.raises(PolicyError):
+    with use_principal(Principal(role="r")):
+        assert asyncio.run(safe(1)) == 1
+
+
+def test_async_positional_call_the_gate_cannot_name_is_denied():
+    async def splat(*args):
+        return {"x": 1}
+
+    safe = gate(splat, policy=_echo_policy(), name="echo")
+    with use_principal(Principal(role="r")), pytest.raises(GateDenied) as exc:
         asyncio.run(safe(1))
+    assert exc.value.decision.rule == "unnameable_args"
 
 
 def test_async_arg_schema_is_enforced():

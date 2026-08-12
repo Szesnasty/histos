@@ -62,7 +62,7 @@ def build_gate() -> tuple[Gate, ApprovalStore]:
         },
         permissions={"support": frozenset({"make_refund"})},
     )
-    approvals = ApprovalStore()
+    approvals = ApprovalStore(policy)
     gate = Gate(policy, resource_resolver=_resolver, confirm=approvals.as_confirm())
     return gate, approvals
 
