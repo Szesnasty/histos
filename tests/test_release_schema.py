@@ -446,3 +446,37 @@ def test_a_must_consume_repeat_separates_only_what_it_is_disjoint_from():
     Field(type="string", pattern=r"^[a-z]+[0-9]+[a-z]+$")
     with pytest.raises(PolicyError, match="backtrack"):
         Field(type="string", pattern=r"^.+,[^\n]+,[^\n]+$")
+
+
+def test_the_timing_probe_does_not_refuse_a_linear_pattern_on_a_busy_machine():
+    """The probe compared wall-clock time against an absolute budget, so fifty
+    descheduled `fullmatch` calls on a loaded CI runner added up to 50 ms of elapsed
+    time while costing microseconds of CPU — and `ORD-[0-9]+`, a linear pattern with
+    nothing wrong with it, was refused at policy-load time. A policy that loads on one
+    worker and not on another is a coin toss, and the direction it lands is an outage.
+
+    It measures CPU burned by this thread now, which is the quantity `re` actually holds
+    the GIL for, and confirms a verdict before acting on it."""
+    import threading
+    import time
+
+    stop = threading.Event()
+
+    def burn() -> None:
+        while not stop.is_set():
+            pass
+
+    threads = [threading.Thread(target=burn, daemon=True) for _ in range(8)]
+    for t in threads:
+        t.start()
+    try:
+        time.sleep(0.2)
+        for pattern in (r"ORD-[0-9]+", r"^\d{4}-\d{2}-\d{2}$", r"^[A-Z]{2}\d{6}$", r"^[a-z0-9_-]{3,32}$"):
+            Field(type="string", pattern=pattern)
+        # ...and the probe still refuses what it exists for, under the same load.
+        with pytest.raises(PolicyError):
+            Field(type="string", pattern=r"^(a+)+$")
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(timeout=2)
