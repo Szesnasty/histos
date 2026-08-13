@@ -526,26 +526,22 @@ def test_the_probe_refuses_a_clock_too_coarse_to_see_its_own_budget():
     costing 4 ms here cost 8.7 seconds there, inside `Field.__post_init__`, once per tool
     in the manifest. A self-bounding probe that cannot see its own budget is not bounded.
     """
-    import types
-
     from histos import schema as schema_module
 
-    real = time.get_clock_info
+    # Measured by spinning, not read from `time.get_clock_info` — which reports the
+    # clock's *nominal* resolution and answers 100 ns for `thread_time` on Windows while
+    # `GetThreadTimes` only advances on the scheduler tick. Reading that number is how
+    # the first version of this check passed on Windows and changed nothing.
+    tick = 0.015625
+    origin = time.perf_counter()
 
-    def coarse(name: str):  # what Windows reports
-        if name == "thread_time":
-            return types.SimpleNamespace(
-                resolution=0.015625, monotonic=True, adjustable=False, implementation="GetThreadTimes()"
-            )
-        return real(name)
+    def windows_thread_time() -> float:  # advances only on the 15.6 ms tick
+        return ((time.perf_counter() - origin) // tick) * tick
 
-    time.get_clock_info = coarse
-    try:
-        assert schema_module._probe_clock() is time.perf_counter
-    finally:
-        time.get_clock_info = real
+    assert not schema_module._granularity_under(windows_thread_time, _PROBE_BUDGET_S / 50)
+    assert schema_module._granularity_under(time.perf_counter, _PROBE_BUDGET_S / 50)
 
-    # ...and where CPU can be read finely, that is what it uses.
+    # ...and where CPU can be read finely, that is what gets used.
     assert schema_module._probe_clock() is time.thread_time
 
 
