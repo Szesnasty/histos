@@ -628,6 +628,13 @@ def _backtracking_risk(
 # spelled with `\w` was caught, which is the whole tell. The filler now comes out of the
 # pattern's own alphabet, and the terminator is chosen to be a character the pattern cannot
 # match at all, so the probe reaches the backtracking rather than failing in front of it.
+# CPU burned by this thread, not time elapsed on the wall. The bound exists because
+# `re` holds the GIL while it backtracks, so CPU is the quantity that matters and wall
+# clock is a proxy that a loaded machine makes worthless. `thread_time` is available on
+# Linux, macOS and Windows; the fallback is only reached on an exotic platform, where
+# the confirmation pass above is what stops a hiccup becoming a refusal.
+_cpu_clock = getattr(time, "thread_time", time.perf_counter)
+
 _PROBE_BUDGET_S = 0.05
 # The ladder starts at 8, not at 64. Eight characters cannot be expensive for any pattern
 # — that is the point of starting there — whereas 64 already is: a degree-8 pattern spends
@@ -801,6 +808,29 @@ def _reject_slow_pattern(pattern: str, compiled: re.Pattern[str], parsed: Any) -
     itself, and a degree that projects past the budget is refused instead of measured.
     Total load-time cost is bounded by roughly twice the budget rather than by nothing.
     """
+    # Measured twice before it can refuse, because this is a clock and clocks lie about
+    # a busy machine. The first run on a loaded CI runner refused `ORD-[0-9]+` — a
+    # linear pattern with nothing wrong with it — because fifty descheduled `fullmatch`
+    # calls added up to 50 ms of *wall* time while costing microseconds of CPU. A policy
+    # that loads on one worker and not on another is not a security control, it is a
+    # coin toss, and the direction it lands is an outage.
+    #
+    # So: the clock is `thread_time`, which counts only CPU this thread actually burned
+    # and is exactly the quantity being bounded — `re` holds the GIL for it. And a
+    # verdict is confirmed before it is acted on. A genuinely catastrophic pattern
+    # exceeds the budget by orders of magnitude on every attempt; a scheduling hiccup
+    # does not survive being asked again.
+    verdict = _probe_once(pattern, compiled, parsed)
+    if verdict is None:
+        return
+    confirmation = _probe_once(pattern, compiled, parsed)
+    if confirmation is None:
+        return
+    raise confirmation
+
+
+def _probe_once(pattern: str, compiled: re.Pattern[str], parsed: Any) -> PolicyError | None:
+    """One full ladder. Returns the error it would raise, or None if the pattern is fast."""
     fillers = _probe_inputs(parsed)
     terminator = _probe_terminator(parsed)
     previous = before = 0.0  # slowest single probe at the last size, and the one before it
@@ -808,18 +838,19 @@ def _reject_slow_pattern(pattern: str, compiled: re.Pattern[str], parsed: Any) -
     for size in _PROBE_SIZES:
         growth = max(2.0, previous / before) if before > 0 else 2.0
         if previous * growth * len(fillers) > _PROBE_BUDGET_S:
-            raise _slow_pattern_error(pattern, elapsed, size)
+            return _slow_pattern_error(pattern, elapsed, size)
         worst = 0.0
         for filler in fillers:
             probe = (filler * (size // len(filler) + 1))[: size - len(terminator)] + terminator
-            started = time.perf_counter()
+            started = _cpu_clock()
             compiled.fullmatch(probe)
-            took = time.perf_counter() - started
+            took = _cpu_clock() - started
             elapsed += took
             worst = max(worst, took)
             if elapsed > _PROBE_BUDGET_S:
-                raise _slow_pattern_error(pattern, elapsed, size)
+                return _slow_pattern_error(pattern, elapsed, size)
         before, previous = previous, worst
+    return None
 
 
 def _reject_catastrophic_backtracking(pattern: str, compiled: re.Pattern[str]) -> None:
