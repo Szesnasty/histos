@@ -1237,3 +1237,37 @@ def test_the_normative_artifacts_know_about_the_pattern_screen():
 
     cases = list((root / "conformance" / "invalid-policy").glob("pattern-*.json"))
     assert len(cases) >= 5, "the biggest new refusal class has no conformance cases"
+
+
+def test_or_equals_cannot_edit_a_live_ruleset():
+    """`d |= {...}` calls `__ior__`, which for a dict mutates IN PLACE and then returns
+    self for the assignment. On a frozen dataclass field that assignment fails — and the
+    mutation has already landed. So this raised, looked refused, and left the grant live
+    under the `policy_hash` computed before it: a role with no grant executing a write
+    tool, with the trail naming the same ruleset for the denial and the allow.
+
+    The override was removed to silence a mypy variance complaint about a method whose
+    only job is to raise. Every mutator is checked here so the next one cannot go the
+    same way."""
+    sink = InMemoryAuditSink()
+    g = Gate(_policy(), audit=sink)
+    safe = g.wrap(_tool, name="t")
+    before = dict(g.policy.permissions)
+
+    for mutate in (
+        lambda: g.policy.permissions.__ior__({"evil": frozenset({"t"})}),
+        lambda: g.policy.permissions.update({"evil": frozenset({"t"})}),
+        lambda: g.policy.permissions.__setitem__("evil", frozenset({"t"})),
+        lambda: g.policy.permissions.setdefault("evil", frozenset({"t"})),
+        lambda: g.policy.permissions.pop("ok"),
+        lambda: g.policy.permissions.popitem(),
+        lambda: g.policy.permissions.clear(),
+        lambda: g.policy.permissions.__delitem__("ok"),
+    ):
+        with pytest.raises(TypeError):
+            mutate()
+
+    assert dict(g.policy.permissions) == before
+    with use_principal(Principal(role="evil", identity="mallory")), pytest.raises(GateDenied) as exc:
+        safe(x=1)
+    assert exc.value.decision.rule == "rbac"

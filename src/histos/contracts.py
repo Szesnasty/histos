@@ -106,6 +106,21 @@ class ReadOnlyDict(dict):  # type: ignore[type-arg]
     def setdefault(self, *_a: Any, **_k: Any) -> Any:
         self._readonly()
 
+    def __ior__(self, _other: Any) -> Any:  # type: ignore[misc]
+        # `d |= {...}` calls `__ior__`, which for a dict mutates IN PLACE and then
+        # returns self for the assignment. On a frozen dataclass field the assignment
+        # fails with `FrozenInstanceError` — and the mutation has already landed. So
+        # `gate.policy.permissions |= {"evil": {...}}` raised, looked refused, and left
+        # the grant live on the Gate under the `policy_hash` computed before it:
+        # measured, a role with no grant executing a write tool with the trail naming
+        # the same ruleset for the denial and the allow.
+        #
+        # This override was here and was removed to silence mypy's "signatures of
+        # __ior__ and __or__ are incompatible" — a variance complaint about a method
+        # that exists to raise. The `type: ignore` is the right answer; deleting the
+        # guard was not.
+        self._readonly()
+
     def __reduce__(self) -> Any:
         return (self.__class__, (dict(self),))
 
