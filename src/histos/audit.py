@@ -29,6 +29,7 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 import threading
 import warnings
 from collections import deque
@@ -292,12 +293,59 @@ class InMemoryAuditSink:
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
-# The highest (seq, hash, inode) written to each log by this process. Per path rather
+# The highest (seq, hash) written to each log by this process. Per path rather
 # than per sink: the memory is the whole erasure defence, and a second `JSONLAuditSink`
 # on the same file — two Gates in one host, which the lock above exists for — started
 # with an empty one and happily wrote a fresh chain over a truncated file. Scoped like
 # the lock that protects it.
-_PATH_HIGH_WATER: dict[str, tuple[int, str, int]] = {}
+_PATH_HIGH_WATER: dict[str, tuple[int, str]] = {}
+
+
+def _duplicate_key(line: str) -> str | None:
+    """The first key repeated in one JSON object of ``line``, or None.
+
+    `json.loads` keeps the last value for a repeated key and a human reading the file
+    sees the first, which is the one way a line and the record it parses to can say
+    different things. `object_pairs_hook` is handed every pair before that collapse
+    happens, which is the only place the difference is still visible.
+    """
+    found: list[str] = []
+
+    def check(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        seen: set[str] = set()
+        for key, _ in pairs:
+            if key in seen:
+                found.append(key)
+            seen.add(key)
+        return dict(pairs)
+
+    try:
+        json.loads(line, object_pairs_hook=check)
+    except ValueError:  # already reported as unparseable by the caller
+        return None
+    return found[0] if found else None
+
+
+def _path_key(path: Path) -> str:
+    """The identity of a log file, for the two module-level maps keyed on it.
+
+    `str(path.resolve())` was the key and it does not canonicalise *case* — and macOS
+    APFS and every Windows volume are case-insensitive. So `Trail.jsonl` and
+    `trail.jsonl` are one file with two keys: the erasure memory that
+    `_PATH_HIGH_WATER` exists to be is defeated by one capital letter, and `_PATH_LOCKS`
+    hands two sinks on one file two different locks — on Windows, where `flock` is
+    absent, leaving nothing at all serialising them. Both on exactly the two platforms
+    this release added to CI.
+    """
+    resolved = os.path.realpath(path)
+    # `os.path.normcase` is a no-op on POSIX — it folds case only on Windows — so it
+    # does nothing on macOS, which is where this was demonstrated. Folded on the two
+    # platforms whose filesystems are case-insensitive by default, which are the two
+    # this release added to CI. A case-sensitive APFS volume would over-merge two logs
+    # in one directory differing only in case; that is a pathological place to keep an
+    # audit trail, and the failure direction is the safe one — a chain reported broken
+    # rather than an erasure missed.
+    return resolved.casefold() if sys.platform in ("darwin", "win32") else resolved
 
 
 def tip_path_for(log: str | Path) -> Path:
@@ -348,7 +396,13 @@ class JSONLAuditSink:
     """
 
     def __init__(
-        self, path: str | Path, *, hash_chain: bool = True, key: bytes | None = None, mode: int = 0o600
+        self,
+        path: str | Path,
+        *,
+        hash_chain: bool = True,
+        key: bytes | None = None,
+        mode: int = 0o600,
+        strict: bool = False,
     ) -> None:
         self.path = Path(path)
         self.tip_path = tip_path_for(self.path)
@@ -385,6 +439,12 @@ class JSONLAuditSink:
         # counts what it drops: the loss is a fact about the evidence and has to be
         # legible. See `record()` for why it is a counter and not an exception.
         self.failed = 0
+        # Off by default, because `record()` runs on the POST path after the tool has
+        # already produced its side effect, and an exception there costs a completed
+        # call its result without preventing anything. On, for a host whose evidence
+        # requirement outranks availability — a regulated trail where a lost record is
+        # worse than a failed call. Either way `failed` counts and the warning fires.
+        self._strict = strict
 
     def _path_lock(self) -> threading.Lock:
         """The in-process lock for this log file, shared by every sink writing to it.
@@ -396,9 +456,11 @@ class JSONLAuditSink:
         is absent they were not serialised at all: interleaved appends, and a chain
         that ``histos audit verify`` then calls broken forever.
 
-        Keyed by the resolved path, so two spellings of the same file share it.
+        Keyed through `_path_key`, so two spellings of one file share a lock — including
+        two that differ only in case, which on macOS and Windows are the same file and
+        used to get two locks and, where `flock` is absent, no serialisation at all.
         """
-        key = str(self.path.resolve())
+        key = _path_key(self.path)
         with _PATH_LOCKS_GUARD:
             return _PATH_LOCKS.setdefault(key, threading.Lock())
 
@@ -437,7 +499,7 @@ class JSONLAuditSink:
         try:
             # `os.replace` keeps the source's mode, so the scratch file has to be created
             # owner-only too or the sidecar arrives 0644 however the log was made.
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, self._mode)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), self._mode)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(payload + "\n")
             os.replace(tmp, self.tip_path)
@@ -455,7 +517,12 @@ class JSONLAuditSink:
         which is the behaviour we want: this sets a safe default, it does not enforce a
         policy on a file the operator already owns.
         """
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, self._mode)
+        # `O_BINARY` where it exists. On Windows the CRT fd defaults to text mode, so
+        # `os.fdopen(fd, "a+b")` still translates `\n` to `\r\n` — this release added a
+        # `.gitattributes` promising two machines agree on the same bytes while the
+        # runtime writer would not have, and `_read_last_line` seeks by physical byte
+        # offset against counts the write returns in logical ones.
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), self._mode)
         return os.fdopen(fd, "a+b")
 
     def record(self, entry: dict[str, Any]) -> None:
@@ -483,13 +550,19 @@ class JSONLAuditSink:
             self._record(entry)
         except Exception as exc:  # noqa: BLE001 — totality is the point; see the docstring
             self.failed += 1
+            # The count is deliberately out of the message: embedding it made every
+            # failure a distinct string, which defeats the `once` filter and turns a
+            # full disk into thousands of warnings. `failed` is the counter; this is the
+            # signal that there is one to read.
             warnings.warn(
-                f"histos: the audit record for this call could not be written to {self.path}: "
-                f"{type(exc).__name__}: {exc}. The call itself was unaffected; "
-                f"{self.failed} record(s) have now been lost from this sink.",
+                f"histos: an audit record could not be written to {self.path} "
+                f"({type(exc).__name__}: {exc}). The call itself was unaffected. "
+                "Read JSONLAuditSink.failed for the count, or pass strict=True to raise instead.",
                 RuntimeWarning,
                 stacklevel=2,
             )
+            if self._strict:
+                raise
 
     def _record(self, entry: dict[str, Any]) -> None:
         payload = dict(entry)
@@ -499,9 +572,8 @@ class JSONLAuditSink:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             if self.hash_chain:
                 seq, prev = self._tail(fh)
-                key = str(self.path.resolve())
-                high_seq, high_hash, high_inode = _PATH_HIGH_WATER.get(key, (0, "", 0))
-                inode = os.fstat(fh.fileno()).st_ino
+                key = _path_key(self.path)
+                high_seq, high_hash = _PATH_HIGH_WATER.get(key, (0, ""))
                 # A shrink under a live sink is flagged, and external log rotation looks
                 # exactly the same from in here — `rm` and `mv` both leave a fresh inode
                 # at the same path, so the inode cannot tell them apart either. Flagging
@@ -560,7 +632,7 @@ class JSONLAuditSink:
                     os.ftruncate(fh.fileno(), start)
                 raise
             if self.hash_chain:
-                _PATH_HIGH_WATER[key] = (int(payload["seq"]), str(payload["hash"]), inode)
+                _PATH_HIGH_WATER[key] = (int(payload["seq"]), str(payload["hash"]))
                 self._write_tip(payload["seq"], payload["hash"])
 
     def rotated(self) -> None:
@@ -584,7 +656,7 @@ class JSONLAuditSink:
 
         Pointing a new sink at the new path needs nothing — that path has no history.
         """
-        _PATH_HIGH_WATER.pop(str(self.path.resolve()), None)
+        _PATH_HIGH_WATER.pop(_path_key(self.path), None)
 
     def verify(self) -> bool:
         """Re-walk the file and confirm the hash chain is intact."""
@@ -695,16 +767,24 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
             # sharp case is still caught: `json.loads` keeps document order, so an
             # unsorted dump reproduces legacy bytes exactly, while no dump of a parsed
             # dict can ever reproduce a duplicated key.
-            rec["hash"] = stored
-            faithful = {
-                json.dumps(rec, sort_keys=srt, ensure_ascii=asc) for srt in (True, False) for asc in (True, False)
-            }
-            if stripped not in faithful:
+            # The real question is narrower than "is this the spelling we would have
+            # written". Requiring one of four `json.dumps` spellings invented an
+            # unwritten normative byte format and reported every other conformant
+            # serialisation — a different key order, `separators=(",",":")`, a second
+            # implementation's writer — as tampering. `spec/` describes no audit-log
+            # byte format at all, so there is nothing to hold a line to.
+            #
+            # What the check exists for is the case where the bytes and the parsed record
+            # *disagree*, and there is exactly one way for that to happen in JSON: a
+            # repeated key, where `json.loads` keeps the last and a human greps the
+            # first, so the record verifies as `allow` while the file says `deny`. Asked
+            # directly, and nothing else is second-guessed.
+            duplicate = _duplicate_key(stripped)
+            if duplicate is not None:
                 return False, (
-                    f"line {lineno}: the bytes on disk are not a faithful serialisation of the record they "
-                    "parse to — the file was rewritten in a way a reader and the chain disagree about"
+                    f"line {lineno}: the record on disk repeats the key {duplicate!r}, so what a reader sees "
+                    "and what the chain authenticates are different values"
                 )
-            rec.pop("hash")
             if not matched:
                 return False, f"line {lineno}: hash mismatch — record was altered after it was written"
             prev = str(stored)

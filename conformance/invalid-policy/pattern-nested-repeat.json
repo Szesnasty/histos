@@ -1,0 +1,20 @@
+{
+  "description": "A nested variable repeat is the exponential family; refusing it at load is the only fail-closed answer, because `re` holds the GIL and cannot be interrupted once it starts.",
+  "expect": {
+    "code": "unsafe_pattern"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {
+          "x": {
+            "type": "string",
+            "pattern": "^(a+)+$"
+          }
+        }
+      }
+    },
+    "roles": {}
+  }
+}

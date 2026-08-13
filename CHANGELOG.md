@@ -18,9 +18,10 @@ An adversarial pre-release review found these, and each is a change of behaviour
 rather than a bug fix. None of it is a compatibility break for anyone, because
 nothing is on PyPI yet — which is exactly why they land now rather than in 0.2.
 
-- **`contract_sha256` and `schema_sha256` move.** `nullable` is now part of the
-  hashed argument shape (a field that accepts `null` accepts something a field that
-  does not accept `null` refuses, so it belongs in the hash), and the recorded
+- **`contract_sha256` and `schema_sha256` move.** `nullable`, `item_enum`,
+  `min_items`, `max_items` and `unique_items` are all now part of the hashed argument
+  shape — each of them is a bound a caller can violate, so each belongs in the hash —
+  and the recorded
   source shape now covers the whole tool object: for MCP everything beside the two
   schemas — `title`, `annotations`, `_meta` — and for OpenAPI the `servers` the call
   actually goes to. A vendor could previously rewrite any of those after review and
@@ -75,7 +76,17 @@ nothing is on PyPI yet — which is exactly why they land now rather than in 0.2
   the one signal an attacker rewriting files cannot produce. SECURITY.md used to
   offer "rotate the `.tip` sidecar with the log", which did nothing.
 - `JSONLAuditSink.failed` — records this sink could not write, counted rather than
-  raised. See the `Fixed` entry below.
+  raised. See the `Fixed` entry below. `JSONLAuditSink(..., strict=True)` opts back
+  into raising, for a host whose evidence requirement outranks its availability.
+- `output_budget=` on `gate()` and `protect()`, not only on `Gate`. The remedy for a
+  tool that legitimately returns more than the scan budget is to raise the budget, and
+  it was reachable only from the class API the README does not teach.
+- `unique_items` on `Field`, projected from JSON Schema `uniqueItems` — what every
+  pydantic `set[T]` emits, and previously a whole-tool refusal.
+- `unsafe_pattern` joins the published policy-code vocabulary, and five pattern
+  refusals join the conformance corpus. The ReDoS screen is the release's largest new
+  refusal class and the normative artifacts did not know it existed — `spec/` still
+  described `pattern` as "NOT ReDoS-safe".
 - `audit_key=` on the `gate()` and `protect()` one-liners, so a stable
   `args_digest` no longer requires constructing a `Gate` by hand.
 - `nullable` on `Field`, inferred from `T | None` and from `anyOf: [T, null]`.

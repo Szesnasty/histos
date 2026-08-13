@@ -1,0 +1,20 @@
+{
+  "description": "A finite bound caps the exponent, not the cost. Forty iterations over a variable body is forty nested choices: 17.5 s on 32 characters.",
+  "expect": {
+    "code": "unsafe_pattern"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {
+          "x": {
+            "type": "string",
+            "pattern": "^Q(?:[a-z]+){1,40}$"
+          }
+        }
+      }
+    },
+    "roles": {}
+  }
+}

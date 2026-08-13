@@ -1,0 +1,20 @@
+{
+  "description": "The same exponential blow-up written as ambiguous branches. A character class expresses what this meant.",
+  "expect": {
+    "code": "unsafe_pattern"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {
+          "x": {
+            "type": "string",
+            "pattern": "^(a|ab)*$"
+          }
+        }
+      }
+    },
+    "roles": {}
+  }
+}

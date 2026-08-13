@@ -277,15 +277,26 @@ budget — 4 MiB of joined text by default, `Gate(output_budget=...)` — and a 
 exceeds it is not partially scanned: scanning a prefix and reporting on the rest is the
 fail-open the inbound budget refuses an input to avoid.
 
-What happens instead is the policy's choice, through `on_output_violation`: the default
-drops the value and says so, `deny` refuses the call outright, and `allow` returns the
-result unscanned with `output:unscanned_over_budget` in the record — an explicit
-decision to take an unread result, visible in the trail rather than silent. The tool has
-already run in all three cases; none of this undoes it.
+What happens instead is `deny` or drop-the-value, and `on_output_violation` chooses
+between them: `deny` refuses the call outright, and everything else — including `allow`
+— replaces the result with `[REDACTED: tool output exceeded the scan budget…]` and
+records `output:redacted_all`. The tool has already run in both cases; neither undoes it.
+
+There is deliberately **no** switch that returns an unscanned result. `allow` had that
+meaning for one pre-release iteration and it was the wrong knob to hang it on:
+`on_output_violation` is malformed-*shape* policy, hosts set `allow` because a vendor's
+return drifts, and those hosts had thereby also switched off canary and secret redaction
+for every oversized return — measured egressing a planted canary and an AWS key under an
+ALLOW record.
 
 A reporting tool that legitimately returns tens of megabytes needs the budget raised, and
-raising it is the supported answer. Leaving it at the default and hitting it is not a
+raising it is the supported answer: `output_budget=` on `Gate`, `gate()` and `protect()`.
+That enlarges what gets scanned. Leaving it at the default and hitting it is not a
 detection: it is the gate saying it could not look.
+
+The budget counts values as well as characters, because the passes it bounds walk and
+rebuild the whole structure: a return of six million integers carries no text at all and
+still costs seconds in the secret pass.
 
 ### Canary is a mechanical control + an oracle — NOT exfil prevention
 The pre-gate DENYs a canary token in an argument and the post-gate REDACTs it from

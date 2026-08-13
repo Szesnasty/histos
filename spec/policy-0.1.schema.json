@@ -234,7 +234,7 @@
           "type": "boolean"
         },
         "pattern": {
-          "description": "Compiled at load, so an invalid regex fails loudly. NOT ReDoS-safe: treat patterns imported from third-party schemas as untrusted.",
+          "description": "Compiled at load, so an invalid regex fails loudly — and screened at load for runaway backtracking, so a pattern imported from a third-party schema cannot hang the process that enforces it. An engine that accepts a pattern this one refuses is not compatible: the refusal is part of the format. The screen is deliberately conservative and refuses some safe shapes; the error names the rewrite.",
           "type": "string"
         },
         "required": {
