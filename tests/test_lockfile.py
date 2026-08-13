@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -218,7 +219,10 @@ def test_an_unreadable_source_kind_is_refused():
     ],
 )
 def test_the_lock_sits_beside_its_policy_and_keeps_its_name(policy, expected):
-    assert str(lock_path_for(policy)) == expected
+    # Compared as a path, not as a string. `str()` renders the platform's own separator,
+    # so this asserted a POSIX spelling and failed on Windows for a `Path` that was
+    # perfectly correct — the test's own bug, not the library's.
+    assert lock_path_for(policy) == pathlib.Path(expected)
 
 
 def test_tools_with_no_lock_entry_are_reported_as_unverifiable():

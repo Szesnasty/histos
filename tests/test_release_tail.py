@@ -1194,20 +1194,28 @@ def test_a_conformant_log_this_library_did_not_write_still_verifies(tmp_path):
 def test_a_host_can_ask_the_sink_to_raise_instead_of_losing_a_record(tmp_path):
     """`record()` is total by default because it runs after the tool has already had its
     side effect. A host whose evidence requirement outranks its availability can say so."""
-    log = tmp_path / "nested" / "a.jsonl"
+    log = tmp_path / "a.jsonl"
     sink = JSONLAuditSink(log, strict=True)
     sink.record({"effect": "allow", "rule": "allow"})
-    log.parent.chmod(0o500)
-    try:
-        log.unlink()
-    except PermissionError:
-        pytest.skip("cannot stage an unwritable directory here")
-    try:
-        with pytest.warns(RuntimeWarning), pytest.raises(OSError):
-            sink.record({"effect": "allow", "rule": "allow"})
-    finally:
-        log.parent.chmod(0o700)
+
+    # The failure is injected rather than staged out of the filesystem. Making a
+    # directory unwritable is a POSIX idea — Windows ignores the mode bits and the write
+    # simply succeeded, so the test asserted nothing there. What it is actually about is
+    # that `strict` re-raises whatever `_record` hit, and that is platform-free.
+    def boom(_entry: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    sink._record = boom  # type: ignore[method-assign]
+    with pytest.warns(RuntimeWarning, match="could not be written"), pytest.raises(OSError):
+        sink.record({"effect": "allow", "rule": "allow"})
     assert sink.failed == 1
+
+    # ...and the default is still total: the same failure costs a record, never a call.
+    lenient = JSONLAuditSink(tmp_path / "b.jsonl")
+    lenient._record = boom  # type: ignore[method-assign]
+    with pytest.warns(RuntimeWarning):
+        lenient.record({"effect": "allow", "rule": "allow"})
+    assert lenient.failed == 1
 
 
 def test_the_output_budget_is_reachable_from_the_one_liners():
