@@ -541,8 +541,13 @@ def test_the_probe_refuses_a_clock_too_coarse_to_see_its_own_budget():
     assert not schema_module._granularity_under(windows_thread_time, _PROBE_BUDGET_S / 50)
     assert schema_module._granularity_under(time.perf_counter, _PROBE_BUDGET_S / 50)
 
-    # ...and where CPU can be read finely, that is what gets used.
-    assert schema_module._probe_clock() is time.thread_time
+    # Whichever clock gets picked, the property is the same one: it can resolve the
+    # budget it is enforcing. Asserting `is time.thread_time` was asserting the platform
+    # — right on Linux and macOS, wrong on Windows, where falling back is the correct
+    # answer and the whole reason this selection exists.
+    chosen = schema_module._probe_clock()
+    assert schema_module._granularity_under(chosen, _PROBE_BUDGET_S / 50)
+    assert chosen in (time.thread_time, time.perf_counter)
 
 
 @pytest.mark.parametrize(("pattern", "degree"), PROBE_TUNED, ids=lambda v: v if isinstance(v, int) else "")
