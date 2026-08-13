@@ -1,0 +1,20 @@
+{
+  "description": "Adjacency is a degree, not a constant: two repeats that can match the same character make every split of the shared run a choice. Measured at 48 s on one 4 KiB argument for the three-run version of this shape.",
+  "expect": {
+    "code": "unsafe_pattern"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {
+          "x": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9]+[A-Za-z0-9_-]+[A-Za-z0-9]+$"
+          }
+        }
+      }
+    },
+    "roles": {}
+  }
+}

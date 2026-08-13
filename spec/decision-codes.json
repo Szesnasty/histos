@@ -235,16 +235,17 @@
     }
   ],
   "policy_codes": {
-    "unparseable": "The document is not valid JSON/YAML, or is empty.",
-    "not_an_object": "The top level is not an object/mapping.",
-    "not_found": "The policy file does not exist.",
     "duplicate_key": "A repeated mapping key. Never last-one-wins — the engine refuses to guess.",
-    "unknown_key": "A key this engine does not understand, at any level. Loading partially would enforce partially.",
-    "unsupported_version": "The document's schema_version is not implemented by this engine.",
-    "unsupported_feature": "requires.features names a capability this engine does not implement.",
-    "tools_not_a_mapping": "`tools` is a list (the pre-0.1 shape) rather than a mapping keyed by tool name.",
     "invalid_binding": "A `bind` value is not exactly `principal.<attr>` — bindings are substitutions, not expressions.",
     "invalid_grant": "A role's `allow` entry is not a plain tool name.",
+    "not_an_object": "The top level is not an object/mapping.",
+    "not_found": "The policy file does not exist.",
+    "tools_not_a_mapping": "`tools` is a list (the pre-0.1 shape) rather than a mapping keyed by tool name.",
+    "unknown_key": "A key this engine does not understand, at any level. Loading partially would enforce partially.",
+    "unparseable": "The document is not valid JSON/YAML, or is empty.",
+    "unsafe_pattern": "A `pattern` whose shape admits runaway backtracking. `re` is a backtracking engine with no step budget that holds the GIL, so a catastrophic pattern cannot be interrupted once it starts and the only fail-closed answer is to refuse it before it can run. Part of the format, not an implementation detail: an engine that accepts a pattern this corpus says to refuse is not compatible.",
+    "unsupported_feature": "requires.features names a capability this engine does not implement.",
+    "unsupported_version": "The document's schema_version is not implemented by this engine.",
     "policy_invalid": "Any other structural problem (unclassified; new cases should get their own code)."
   },
   "review_codes": {

@@ -1,5 +1,5 @@
 {
-  "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and \u2014 the part prose kept getting wrong \u2014 what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
+  "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and — the part prose kept getting wrong — what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
   "manifest_version": "1",
   "corpus_version": "0.5.0",
   "status": "draft",
@@ -20,7 +20,7 @@
       ],
       "requires_yaml_parser": false,
       "means": "The engine reaches the same verdicts and refuses the same policies. Every fixture is JSON, so this level is runnable in a language with no YAML parser at hand. Includes agreement on how a tool definition projects into a contract, which is what drift detection compares.",
-      "claim": "Not a compatibility claim. A milestone for a port in progress \u2014 two engines can pass core and still invalidate each other's approvals."
+      "claim": "Not a compatibility claim. A milestone for a port in progress — two engines can pass core and still invalidate each other's approvals."
     },
     "portable": {
       "corpora": [
@@ -47,7 +47,7 @@
   },
   "corpora": {
     "decisions": {
-      "question": "Given this policy, principal, resource and call \u2014 what is the verdict?",
+      "question": "Given this policy, principal, resource and call — what is the verdict?",
       "fixture": {
         "input": [
           "policy",
@@ -236,6 +236,31 @@
           "sha256": "dd0ad28bc262229e8a2d54412f89da02ded579c1e8319d0122863a324add80f1"
         },
         {
+          "case": "pattern-adjacent-overlapping-repeats",
+          "file": "invalid-policy/pattern-adjacent-overlapping-repeats.json",
+          "sha256": "32ae1d2be450bb86b9208fdfbd1d27402e3acc40b8a7c3356e35ac09ce4dadb2"
+        },
+        {
+          "case": "pattern-alternation-in-a-repeat",
+          "file": "invalid-policy/pattern-alternation-in-a-repeat.json",
+          "sha256": "6f62468fd928f3a7f63d27caaa2a16d63e1e81bd4027cf9781ca1e01a661263e"
+        },
+        {
+          "case": "pattern-delimited-line-every-delimiter-free",
+          "file": "invalid-policy/pattern-delimited-line-every-delimiter-free.json",
+          "sha256": "e8d60b6e72d08401556242b890f7c865600877b00c642408b0c1f78b305c368a"
+        },
+        {
+          "case": "pattern-finite-outer-bound-over-a-repeat",
+          "file": "invalid-policy/pattern-finite-outer-bound-over-a-repeat.json",
+          "sha256": "7e5fa5fc26e2d4c12e50bfe8fd3fda8472cc57032f440b1ccf4829c9d75ab707"
+        },
+        {
+          "case": "pattern-nested-repeat",
+          "file": "invalid-policy/pattern-nested-repeat.json",
+          "sha256": "f5d05d314befb79c39343028ab0c440ef682679c08789a35dca4b2be74147fc2"
+        },
+        {
           "case": "tools-as-a-list",
           "file": "invalid-policy/tools-as-a-list.json",
           "sha256": "2fe3a3dd9e8c77aeeb6d47f65e700a957b2a6794988d3b494a14cdeca3067212"
@@ -291,7 +316,7 @@
           "contract_sha256"
         ]
       },
-      "asserts": "That two implementations import the same tool definition identically. A bridge that drops a keyword still reaches the same verdicts \u2014 it reports drift the reference engine does not, and a drift signal that differs between runtimes is worse than none, because people learn to ignore it.",
+      "asserts": "That two implementations import the same tool definition identically. A bridge that drops a keyword still reaches the same verdicts — it reports drift the reference engine does not, and a drift signal that differs between runtimes is worse than none, because people learn to ignore it.",
       "needs_yaml_parser": false,
       "cases": [
         {
@@ -345,8 +370,8 @@
   "totals": {
     "decisions": 18,
     "canonicalization": 7,
-    "invalid-policy": 11,
+    "invalid-policy": 16,
     "projection": 9,
-    "all": 45
+    "all": 50
   }
 }

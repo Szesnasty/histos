@@ -1,0 +1,20 @@
+{
+  "description": "Three runs that can all absorb the delimiter leave every delimiter a free choice — cubic, and 9.4 s at 4 KiB. The two-run version of the same shape loads, and must.",
+  "expect": {
+    "code": "unsafe_pattern"
+  },
+  "document": {
+    "schema_version": "histos.policy/0.1",
+    "tools": {
+      "t": {
+        "args": {
+          "x": {
+            "type": "string",
+            "pattern": "^.+,\\d+,.+,\\d+,.+$"
+          }
+        }
+      }
+    },
+    "roles": {}
+  }
+}

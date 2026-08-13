@@ -1941,6 +1941,7 @@ def gate(
     enforcement: str | None = None,
     name: str | None = None,
     audit_key: bytes | None = None,
+    output_budget: int = _DEFAULT_OUTPUT_BUDGET,
     strict: bool = False,
     is_async: bool | None = None,
 ) -> Callable[..., Any]:
@@ -1960,6 +1961,7 @@ def gate(
         mode=mode,
         enforcement=enforcement,
         audit_key=audit_key,
+        output_budget=output_budget,
         strict=strict,
     )
     return g.wrap(tool, name=name, fixed_principal=fixed_principal, principal=principal, is_async=is_async)
@@ -1979,6 +1981,7 @@ def protect(
     mode: str | None = None,
     enforcement: str | None = None,
     audit_key: bytes | None = None,
+    output_budget: int = _DEFAULT_OUTPUT_BUDGET,
     strict: bool = False,
     infer_missing: bool = True,
 ) -> ProtectResult:
@@ -2000,6 +2003,7 @@ def protect(
         mode=mode,
         enforcement=enforcement,
         audit_key=audit_key,
+        output_budget=output_budget,
         strict=strict,
     )
     return g.protect(tools, fixed_principal=fixed_principal, infer_missing=infer_missing)

@@ -42,6 +42,7 @@ from histos import (
     use_principal,
     verify_chain,
 )
+from histos.audit import tip_path_for
 from histos.contracts import Effect, GateRequest
 from histos.detectors import scan_string
 from histos.lockfile import schema_hash
@@ -574,7 +575,7 @@ def test_a_rewrite_that_parses_the_same_but_reads_differently_is_caught(tmp_path
     raw = log.read_text(encoding="utf-8").strip()
     log.write_text('{"effect": "deny", ' + raw[1:] + "\n", encoding="utf-8")
     ok, detail = verify_chain(log)
-    assert not ok and "faithful serialisation" in detail
+    assert not ok and "repeats the key" in detail
 
 
 def _write_legacy_tip(log, key: bytes, count: int, tip: str) -> None:
@@ -624,7 +625,7 @@ def test_a_legacy_line_cannot_be_rewritten_either(tmp_path):
     _write_legacy_tip(log, key, 1, rec["hash"])
 
     ok, detail = verify_chain(log, key=key)
-    assert not ok and "faithful serialisation" in detail
+    assert not ok and "repeats the key" in detail
 
 
 def test_a_second_sink_on_the_same_path_shares_the_erasure_memory(tmp_path):
@@ -1140,3 +1141,99 @@ def test_a_source_authored_property_name_cannot_rewrite_the_drift_report():
 
     lines = shape_diff({"properties": {}}, {"properties": {"x\r\x1b[2KOK — no drift": {"type": "string"}}})
     assert lines and all("\r" not in line and "\x1b" not in line for line in lines), lines
+
+
+# ── round three: what the completeness critic found ──────────────────────
+
+
+def test_re_spelling_the_path_does_not_defeat_the_erasure_memory(tmp_path):
+    """`str(path.resolve())` does not canonicalise case, and macOS APFS and every
+    Windows volume are case-insensitive — so `Trail.jsonl` and `trail.jsonl` are one
+    file with two keys, and the memory that *is* the erasure defence costs one capital
+    letter to walk around."""
+    upper = tmp_path / "Trail.jsonl"
+    lower = tmp_path / "trail.jsonl"
+    key = b"k" * 32
+    sink = JSONLAuditSink(upper, key=key)
+    for n in range(3):
+        sink.record({"effect": "allow", "rule": "allow", "n": n})
+    assert verify_chain(upper, key=key)[0]
+
+    upper.write_text("", encoding="utf-8")
+    tip_path_for(upper).unlink()
+    if not os.path.exists(lower) or not os.path.samefile(upper, lower):
+        pytest.skip("this filesystem is case-sensitive, so the two names are two files")
+
+    JSONLAuditSink(lower, key=key).record({"effect": "allow", "rule": "allow", "n": "after"})
+    ok, _ = verify_chain(upper, key=key)
+    assert not ok, "an erased log restarted a clean chain under a different spelling"
+
+
+def test_a_conformant_log_this_library_did_not_write_still_verifies(tmp_path):
+    """The byte check demanded one of four `json.dumps` spellings, which invented an
+    unwritten normative byte format — `spec/` describes none — and reported every other
+    conformant serialisation as tampering. The real question is narrower: do the bytes
+    and the parsed record disagree, which in JSON means a repeated key."""
+    key = b"k" * 32
+    spellings = {
+        "hash first": lambda r: json.dumps({"hash": r.pop("hash"), **r}),
+        "compact": lambda r: json.dumps(r, separators=(",", ":")),
+        "sorted": lambda r: json.dumps(r, sort_keys=True),
+    }
+    for label, dump in spellings.items():
+        log = tmp_path / f"{label.replace(' ', '_')}.jsonl"
+        rec = {"ts": "2026-01-01", "effect": "allow", "rule": "allow", "seq": 1, "prev": ""}
+        body = json.dumps(rec, sort_keys=True, ensure_ascii=True)
+        rec["hash"] = digest = hmac.new(key, body.encode(), hashlib.sha256).hexdigest()
+        log.write_text(dump(dict(rec)) + "\n", encoding="utf-8")
+        _write_legacy_tip(log, key, 1, digest)
+        ok, detail = verify_chain(log, key=key)
+        assert ok, f"{label}: {detail}"
+
+
+def test_a_host_can_ask_the_sink_to_raise_instead_of_losing_a_record(tmp_path):
+    """`record()` is total by default because it runs after the tool has already had its
+    side effect. A host whose evidence requirement outranks its availability can say so."""
+    log = tmp_path / "nested" / "a.jsonl"
+    sink = JSONLAuditSink(log, strict=True)
+    sink.record({"effect": "allow", "rule": "allow"})
+    log.parent.chmod(0o500)
+    try:
+        log.unlink()
+    except PermissionError:
+        pytest.skip("cannot stage an unwritable directory here")
+    try:
+        with pytest.warns(RuntimeWarning), pytest.raises(OSError):
+            sink.record({"effect": "allow", "rule": "allow"})
+    finally:
+        log.parent.chmod(0o700)
+    assert sink.failed == 1
+
+
+def test_the_output_budget_is_reachable_from_the_one_liners():
+    """SECURITY.md's remedy for a legitimately large return is to raise the budget, and
+    it was reachable only from the class API the README does not teach."""
+
+    def big() -> str:
+        return "x" * 5000
+
+    policy = Policy(tools={"t": ToolContract(name="t", args=Schema({}))}, permissions={"ok": frozenset({"t"})})
+    with use_principal(Principal(role="ok", identity="i")):
+        assert "REDACTED" in gate(big, policy=policy, name="t", output_budget=100)()
+        assert gate(big, policy=policy, name="t", output_budget=1_000_000)() == "x" * 5000
+
+
+def test_the_normative_artifacts_know_about_the_pattern_screen():
+    """The release's largest new refusal class was invisible to the spec and the
+    conformance corpus, and `spec/` still described `pattern` as "NOT ReDoS-safe"."""
+    root = pathlib.Path(__file__).resolve().parent.parent
+    codes = json.loads((root / "spec" / "decision-codes.json").read_text(encoding="utf-8"))
+    assert "unsafe_pattern" in codes["policy_codes"]
+
+    schema = json.loads((root / "spec" / "policy-0.1.schema.json").read_text(encoding="utf-8"))
+    described = schema["$defs"]["field"]["properties"]["pattern"]["description"]
+    assert "NOT ReDoS-safe" not in described
+    assert "backtracking" in described
+
+    cases = list((root / "conformance" / "invalid-policy").glob("pattern-*.json"))
+    assert len(cases) >= 5, "the biggest new refusal class has no conformance cases"
