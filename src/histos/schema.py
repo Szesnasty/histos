@@ -647,14 +647,30 @@ def _probe_clock() -> Callable[[], float]:
     scheduling hiccup from becoming a refusal.
     """
     candidate = getattr(time, "thread_time", None)
-    if candidate is not None:
-        try:
-            resolution = time.get_clock_info("thread_time").resolution
-        except (ValueError, AttributeError):  # pragma: no cover - platform dependent
-            resolution = float("inf")
-        if resolution <= _PROBE_BUDGET_S / 50:
-            return candidate
+    if candidate is not None and _granularity_under(candidate, _PROBE_BUDGET_S / 50):
+        return candidate
     return time.perf_counter
+
+
+def _granularity_under(clock: Callable[[], float], limit: float) -> bool:
+    """Whether ``clock`` can actually resolve a duration of ``limit``, measured.
+
+    Asked by spinning rather than by reading `time.get_clock_info`, which reports the
+    clock's *nominal* resolution: Windows answers 100 ns for `thread_time` while
+    `GetThreadTimes` only advances on the ~15.6 ms scheduler tick. Trusting that number
+    is how the first version of this check passed on Windows and left the ladder
+    climbing to 4 KiB on a pattern it should have refused at 64 characters.
+
+    Bounded by `limit` itself: a clock that has not moved in that long cannot resolve
+    it, which is the whole question. Costs microseconds on a fine clock and one `limit`
+    once at import on a coarse one.
+    """
+    started = clock()
+    deadline = time.perf_counter() + limit
+    while time.perf_counter() < deadline:
+        if clock() > started:
+            return True
+    return False
 
 
 _PROBE_BUDGET_S = 0.05
