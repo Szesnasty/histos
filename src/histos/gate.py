@@ -192,7 +192,17 @@ def _refuse_a_leaking_frame(caller: Any) -> None:
                 "bind around whatever consumes it, or give the producer its own context with "
                 "contextvars.copy_context().run(...)."
             )
-        frame = driver.f_back
+        # Every consecutive driver frame, not one. `ExitStack.enter_context` sits
+        # between `_GeneratorContextManager.__enter__` and the code that wrote the
+        # `with`, and it lives in contextlib too — so a single `f_back` landed on it,
+        # found an ordinary frame, and ended the walk one hop short of the consumer.
+        # `with ExitStack() as s: s.enter_context(request_scope(p)); yield` was therefore
+        # accepted, and measured doing exactly what the plain spelling is refused for:
+        # alice's second row executing as bob, with nothing raised anywhere. The
+        # `AsyncExitStack` twin behaved identically.
+        while driver is not None and driver.f_code.co_filename in drivers:
+            driver = driver.f_back
+        frame = driver
 
 
 class use_principal:  # noqa: N801 — it is spelled and used as a function

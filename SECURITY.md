@@ -397,6 +397,28 @@ the same length/pattern caps as a scalar string, but there is no cross-field or
 deep-structure validation. A tool that takes deeply nested arguments must not assume
 the gate validated the inner structure; validate it in the tool, or keep arguments flat.
 
+### A scope that spans a `yield` is refused by reading frames, and frames can be hidden
+
+A generator has no context of its own — it runs in whichever context resumes it — so a
+`use_principal` block that spans a `yield` binds the identity into the *consumer's*
+context, and two interleaved producers run as each other. `use_principal.__enter__`
+refuses that shape by walking the resume chain: every generator between the `with` and
+the first ordinary frame has to be driven with strict enter/exit discipline, which today
+means `contextlib` or a `pytest` fixture.
+
+That walk reads the *call stack*, and a construct that defers a context manager's exit
+through a frame the walk does not recognise moves the block's real lifetime somewhere
+the stack does not show. `contextlib.ExitStack` and `AsyncExitStack` are handled — their
+frames are `contextlib`'s and the walk consumes them — but a **hand-written** object
+that takes a context manager in its own `__enter__` and releases it later does the same
+thing invisibly, and the cross-Context `ValueError` backstop cannot see it either,
+because entry and exit both happen in the consumer's context.
+
+If you write that kind of wrapper, bind around the *consumer* of the stream rather than
+inside the producer, or give the producer its own context with
+`contextvars.copy_context().run(...)` — which is what `asyncio.create_task` and
+`TaskGroup` already do per task.
+
 ### Complete mediation depends on wrapping every tool
 The gate can only mediate a tool that was **wrapped**. `Gate.declared_but_unwrapped()`
 surfaces tools the policy declares but that were never wrapped — but a tool that is
