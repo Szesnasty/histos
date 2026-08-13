@@ -257,6 +257,9 @@ def test_the_probe_ends_on_a_character_the_pattern_cannot_swallow():
 # Degree, written out. Each of these survives the shape screen — the classes really are
 # disjoint in the parse tree — and each is polynomial of that degree once `(?i)` folds
 # them together. They are here for what the *probe* costs, not for the verdict.
+# The clock the probe itself uses, so the test bounds the same quantity the code does.
+_cpu = getattr(time, "thread_time", time.perf_counter)
+
 PROBE_TUNED = [
     (r"(?i)[a-z]+[A-Z]+", 2),
     (r"(?i)[a-z]+[A-Z]+[a-z]+[A-Z]+", 4),
@@ -278,23 +281,31 @@ def test_the_probe_is_bounded_by_its_own_budget_and_not_by_the_pattern(pattern, 
     gated on what the previous two cost, so a degree that projects past the budget is
     refused instead of measured. The bound is about twice the budget; the assertion is
     loose because the point is the order of magnitude, not the number.
+
+    Measured in CPU burned by this thread, not in elapsed time. The quantity being
+    bounded is GIL-held CPU — that is why the probe itself was changed to `thread_time`
+    — and a wall clock on a shared CI runner measures the other tenants instead. These
+    two assertions failed on three different jobs across three runs, never the same
+    ones twice, which is what a test measuring the machine looks like.
     """
-    started = time.perf_counter()
+    started = _cpu()
     # See above: several of these are now caught by the shape screen instead of the
     # probe, which is the better outcome — the assertion is that they are refused.
     with pytest.raises(PolicyError, match="refusing it"):
         Field(type="string", pattern=pattern)
-    elapsed = time.perf_counter() - started
+    elapsed = _cpu() - started
     assert elapsed < 8 * _PROBE_BUDGET_S, f"degree {degree} cost {elapsed:.3f}s of load time"
 
 
 def test_a_manifest_full_of_probe_tuned_patterns_does_not_add_up_to_a_hang():
-    """N tools in one manifest multiply whatever a single load-time probe costs."""
-    started = time.perf_counter()
+    """N tools in one manifest multiply whatever a single load-time probe costs.
+
+    CPU, not wall clock, for the reason given on the test above."""
+    started = _cpu()
     for pattern, _ in PROBE_TUNED * 4:
         with pytest.raises(PolicyError):
             Field(type="string", pattern=pattern)
-    assert time.perf_counter() - started < 20 * _PROBE_BUDGET_S
+    assert _cpu() - started < 20 * _PROBE_BUDGET_S
 
 
 # ── the false-positive side: everything real must still load ─────────────
