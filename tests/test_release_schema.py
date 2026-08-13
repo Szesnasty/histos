@@ -506,3 +506,51 @@ def test_the_timing_probe_does_not_refuse_a_linear_pattern_on_a_busy_machine():
         stop.set()
         for t in threads:
             t.join(timeout=2)
+
+
+def test_the_probe_refuses_a_clock_too_coarse_to_see_its_own_budget():
+    """`thread_time` is the right quantity and on Windows it is `GetThreadTimes`, whose
+    granularity is the ~15.6 ms system tick. Every small rung then reads exactly 0.0,
+    the growth extrapolation that gates the next rung never fires, and the ladder climbs
+    to 4 KiB on a pattern it should have refused at 64 characters — a degree-12 pattern
+    costing 4 ms here cost 8.7 seconds there, inside `Field.__post_init__`, once per tool
+    in the manifest. A self-bounding probe that cannot see its own budget is not bounded.
+    """
+    import types
+
+    from histos import schema as schema_module
+
+    real = time.get_clock_info
+
+    def coarse(name: str):  # what Windows reports
+        if name == "thread_time":
+            return types.SimpleNamespace(
+                resolution=0.015625, monotonic=True, adjustable=False, implementation="GetThreadTimes()"
+            )
+        return real(name)
+
+    time.get_clock_info = coarse
+    try:
+        assert schema_module._probe_clock() is time.perf_counter
+    finally:
+        time.get_clock_info = real
+
+    # ...and where CPU can be read finely, that is what it uses.
+    assert schema_module._probe_clock() is time.thread_time
+
+
+@pytest.mark.parametrize(("pattern", "degree"), PROBE_TUNED, ids=lambda v: v if isinstance(v, int) else "")
+def test_the_ladder_stays_bounded_under_the_fallback_clock(pattern, degree):
+    """The bound has to hold on the clock Windows will actually use."""
+    from histos import schema as schema_module
+
+    kept = schema_module._cpu_clock
+    schema_module._cpu_clock = time.perf_counter
+    try:
+        started = time.perf_counter()
+        with pytest.raises(PolicyError):
+            Field(type="string", pattern=pattern)
+        elapsed = time.perf_counter() - started
+    finally:
+        schema_module._cpu_clock = kept
+    assert elapsed < _PER_PATTERN_BOUND, f"degree {degree} cost {elapsed:.3f}s under perf_counter"
