@@ -843,3 +843,93 @@ def test_an_enum_member_with_its_own_iter_is_not_waived():
     assert _lazy_leaf_kind(Ordinary.A) is None
     assert _lazy_leaf_kind(Flags.ONE | Flags.TWO) is None
     assert _lazy_leaf_kind(Sneaky.A) is not None
+
+
+@pytest.mark.parametrize("shape", ["sync", "async"])
+def test_an_exit_stack_cannot_smuggle_the_scope_past_the_frame_walk(shape):
+    """The walk did `frame = driver.f_back`, skipping exactly ONE driver frame.
+    `ExitStack.enter_context` sits between `_GeneratorContextManager.__enter__` and the
+    code that wrote the `with`, and lives in contextlib too — so the single hop landed
+    on it, found an ordinary frame, and ended one short of the consumer. Measured doing
+    exactly what the plain spelling is refused for: alice's second row executing as bob,
+    with nothing raised anywhere."""
+    import asyncio
+    import contextlib
+
+    P = Principal(role="ok", identity="i")
+
+    if shape == "sync":
+
+        @contextlib.contextmanager
+        def scope(p):
+            with use_principal(p):
+                yield
+
+        def stream():
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(scope(P))
+                yield 1
+
+        with pytest.raises(PolicyError, match="consuming it"):
+            list(stream())
+        return
+
+    @contextlib.asynccontextmanager
+    async def ascope(p):
+        with use_principal(p):
+            yield
+
+    async def agen():
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(ascope(P))
+            yield 1
+
+    async def drain():
+        return [row async for row in agen()]
+
+    with pytest.raises(PolicyError, match="consuming it"):
+        asyncio.run(drain())
+
+
+def test_walking_past_the_drivers_does_not_refuse_the_shapes_that_are_safe():
+    """The walk now consumes every consecutive driver frame, which is one step from
+    walking out of the stack entirely and refusing anything with a generator anywhere
+    above it. These four are the ones that must keep working."""
+    import asyncio
+    import contextlib
+
+    from histos.gate import _current_principal
+
+    P = Principal(role="ok", identity="i")
+
+    @contextlib.contextmanager
+    def scope(p):
+        with use_principal(p):
+            yield
+
+    with contextlib.ExitStack() as stack:  # in an ordinary function
+        stack.enter_context(scope(P))
+        assert _current_principal.get().identity == "i"
+
+    def helper():  # closes before the yield, so it spans nothing
+        with scope(P):
+            pass
+
+    def stream():
+        helper()
+        yield 1
+
+    assert list(stream()) == [1]
+
+    @contextlib.asynccontextmanager
+    async def ascope(p):
+        with use_principal(p):
+            yield
+
+    async def coro():  # a coroutine is not a generator frame
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(ascope(P))
+            return _current_principal.get().identity
+
+    assert asyncio.run(coro()) == "i"
+    assert _current_principal.get() is None

@@ -820,17 +820,37 @@ def _reject_slow_pattern(pattern: str, compiled: re.Pattern[str], parsed: Any) -
     # verdict is confirmed before it is acted on. A genuinely catastrophic pattern
     # exceeds the budget by orders of magnitude on every attempt; a scheduling hiccup
     # does not survive being asked again.
-    verdict = _probe_once(pattern, compiled, parsed)
-    if verdict is None:
+    verdict, decisive = _probe_once(pattern, compiled, parsed)
+    if verdict is None or decisive:
+        # A decisive verdict is one the clock cannot have invented: a *measured* overrun
+        # several times the budget. Confirming those would double the load-time cost of
+        # exactly the manifests this bound exists for — N tools of probe-tuned patterns
+        # multiply whatever one probe costs — and buy nothing, because no scheduling
+        # hiccup turns microseconds into four times the budget.
+        if verdict is not None:
+            raise verdict
         return
-    confirmation = _probe_once(pattern, compiled, parsed)
-    if confirmation is None:
-        return
-    raise confirmation
+    # Marginal, or projected rather than measured. That is the shape a busy machine
+    # produces, so it is asked again before it costs anyone a policy.
+    confirmation, _ = _probe_once(pattern, compiled, parsed)
+    if confirmation is not None:
+        raise confirmation
 
 
-def _probe_once(pattern: str, compiled: re.Pattern[str], parsed: Any) -> PolicyError | None:
-    """One full ladder. Returns the error it would raise, or None if the pattern is fast."""
+# How far past the budget a measured run has to land before the clock stops being a
+# plausible explanation for it.
+_PROBE_DECISIVE = 4.0
+
+
+def _probe_once(pattern: str, compiled: re.Pattern[str], parsed: Any) -> tuple[PolicyError | None, bool]:
+    """One full ladder.
+
+    Returns the error this run would raise (or None) and whether that verdict is
+    decisive — measured, and far enough past the budget that no scheduling noise
+    explains it. A verdict from the *projection* guard is never decisive: it is a
+    prediction made from one sample, and one inflated sample is precisely what a loaded
+    machine produces.
+    """
     fillers = _probe_inputs(parsed)
     terminator = _probe_terminator(parsed)
     previous = before = 0.0  # slowest single probe at the last size, and the one before it
@@ -838,7 +858,7 @@ def _probe_once(pattern: str, compiled: re.Pattern[str], parsed: Any) -> PolicyE
     for size in _PROBE_SIZES:
         growth = max(2.0, previous / before) if before > 0 else 2.0
         if previous * growth * len(fillers) > _PROBE_BUDGET_S:
-            return _slow_pattern_error(pattern, elapsed, size)
+            return _slow_pattern_error(pattern, elapsed, size), False
         worst = 0.0
         for filler in fillers:
             probe = (filler * (size // len(filler) + 1))[: size - len(terminator)] + terminator
@@ -848,9 +868,10 @@ def _probe_once(pattern: str, compiled: re.Pattern[str], parsed: Any) -> PolicyE
             elapsed += took
             worst = max(worst, took)
             if elapsed > _PROBE_BUDGET_S:
-                return _slow_pattern_error(pattern, elapsed, size)
+                decisive = elapsed > _PROBE_DECISIVE * _PROBE_BUDGET_S
+                return _slow_pattern_error(pattern, elapsed, size), decisive
         before, previous = previous, worst
-    return None
+    return None, True
 
 
 def _reject_catastrophic_backtracking(pattern: str, compiled: re.Pattern[str]) -> None:
