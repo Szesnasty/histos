@@ -18,6 +18,7 @@ import re
 import re._constants as _re_const
 import re._parser as _re_parser
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -628,14 +629,36 @@ def _backtracking_risk(
 # spelled with `\w` was caught, which is the whole tell. The filler now comes out of the
 # pattern's own alphabet, and the terminator is chosen to be a character the pattern cannot
 # match at all, so the probe reaches the backtracking rather than failing in front of it.
-# CPU burned by this thread, not time elapsed on the wall. The bound exists because
-# `re` holds the GIL while it backtracks, so CPU is the quantity that matters and wall
-# clock is a proxy that a loaded machine makes worthless. `thread_time` is available on
-# Linux, macOS and Windows; the fallback is only reached on an exotic platform, where
-# the confirmation pass above is what stops a hiccup becoming a refusal.
-_cpu_clock = getattr(time, "thread_time", time.perf_counter)
+def _probe_clock() -> Callable[[], float]:
+    """The clock the ladder measures rungs with: CPU where CPU can be read finely enough.
+
+    CPU is the right quantity — `re` holds the GIL while it backtracks, so a wall clock
+    on a loaded machine measures the other tenants and refused `ORD-[0-9]+` on a CI
+    runner for it. But `thread_time` on Windows is `GetThreadTimes`, whose granularity is
+    the ~15.6 ms system tick. Every small rung then reads exactly 0.0, the growth
+    extrapolation that gates the next rung never fires, and the ladder climbs all the way
+    to 4 KiB on a pattern it should have refused at 64 characters: a degree-12 pattern
+    that costs 4 ms here cost **8.7 seconds** there, inside `Field.__post_init__`, once
+    per tool in the manifest. A self-bounding probe that cannot see its own budget is not
+    bounded at all.
+
+    So the clock has to be able to resolve the budget. Where CPU cannot, elapsed time is
+    the better of the two available answers, and the confirmation pass is what keeps a
+    scheduling hiccup from becoming a refusal.
+    """
+    candidate = getattr(time, "thread_time", None)
+    if candidate is not None:
+        try:
+            resolution = time.get_clock_info("thread_time").resolution
+        except (ValueError, AttributeError):  # pragma: no cover - platform dependent
+            resolution = float("inf")
+        if resolution <= _PROBE_BUDGET_S / 50:
+            return candidate
+    return time.perf_counter
+
 
 _PROBE_BUDGET_S = 0.05
+_cpu_clock: Callable[[], float] = _probe_clock()
 # The ladder starts at 8, not at 64. Eight characters cannot be expensive for any pattern
 # — that is the point of starting there — whereas 64 already is: a degree-8 pattern spends
 # 45 s on its *first* probe at 64, so a ladder that starts there has nothing to measure
