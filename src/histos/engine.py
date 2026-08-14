@@ -274,8 +274,17 @@ def _over_output_budget(obj: Any, budget: int) -> bool:
     return of twenty million integers cost zero budget and was reported under it, while
     the secret pass then traversed and reconstructed every one of them.
     """
-    _, truncated = _text_blob(obj, budget)
-    return truncated or _node_count_over(obj, budget)
+    # The guard covers both walks. It used to sit inside `_node_count_over` only, and
+    # `_text_blob` recurses over the same containers with none — so for a structure too
+    # deep to walk, the stack blew in the *first* call, the RecursionError went past the
+    # handler into `post()`'s catch-all, and the answer was `DENY / internal_error`
+    # instead of the budget REDACT this exists to produce. `x = [1,2,3]; x.append(x)` is
+    # the whole reproduction.
+    try:
+        _, truncated = _text_blob(obj, budget)
+        return truncated or _node_count_over(obj, budget)
+    except RecursionError:  # too deep to walk is too deep to scan
+        return True
 
 
 def _node_count_over(obj: Any, budget: int) -> bool:
@@ -1038,7 +1047,7 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 — fail-closed
             return GateDecision(Effect.DENY, "internal_error", f"fail-closed on exception: {exc!r}"), None
 
-    def post_exception(self, req: GateRequest, exc: BaseException) -> tuple[GateDecision, str]:
+    def post_exception(self, req: GateRequest, exc: BaseException, *, mutate: bool = True) -> tuple[GateDecision, str]:
         """The POST chain for a *raising* tool.
 
         A raised exception is the other way a tool hands content back to the model,
@@ -1054,7 +1063,7 @@ class Engine:
         ordinary, un-redacted exception, with nothing in the audit trail.
         """
         try:
-            return self._post_exception(req, exc)
+            return self._post_exception(req, exc, mutate=mutate)
         except Exception as inner:  # noqa: BLE001 — fail-closed
             # The redaction machinery itself failed, so nothing about the original
             # text can be trusted to be safe. Drop it entirely rather than pass it on.
@@ -1067,7 +1076,7 @@ class Engine:
                 "[REDACTED: the tool raised, and the error text could not be safely redacted]",
             )
 
-    def _post_exception(self, req: GateRequest, exc: BaseException) -> tuple[GateDecision, str]:
+    def _post_exception(self, req: GateRequest, exc: BaseException, *, mutate: bool = True) -> tuple[GateDecision, str]:
         contract = self.policy.contract_for(req.tool_name)
         text, incomplete = _exception_text(exc, self._output_budget)
         redactions: list[str] = []
@@ -1106,17 +1115,43 @@ class Engine:
         # exception to an error reporter reads exactly the secret the scan agreed not to
         # look at. So the hidden branch is scanned separately, and a hit detaches it
         # rather than redacting text nobody sees.
-        if will_read and exc.__suppress_context__ and exc.__context__ is not None:
-            hidden, _ = _exception_text(exc.__context__, self._output_budget)
+        #
+        # `__context__ is not __cause__` because CPython sets `__suppress_context__`
+        # whenever a cause is set, so the textbook `except Driver as e: raise Repo() from e`
+        # satisfied this condition with the two attributes holding the same object.
+        # Nothing is hidden there — Python displays the cause and the walk above has
+        # already read and redacted it — yet the branch nulled `__context__` while
+        # `__cause__` kept the identical object, so no exposure was removed, and it
+        # recorded `suppressed_context_detached` about a suppressed branch that did not
+        # exist, plus every canary and secret kind a second time.
+        if (
+            will_read
+            and exc.__suppress_context__
+            and exc.__context__ is not None
+            and exc.__context__ is not exc.__cause__
+        ):
+            hidden, hidden_incomplete = _exception_text(exc.__context__, self._output_budget)
             found = list(canary.find(hidden, self.policy.canaries)) if self.policy.canaries else []
             kinds = (
                 [d.kind for d in detectors.scan_string(hidden)] if contract and contract.redact_secret_output else []
             )
-            if found or kinds:
-                exc.__context__ = None
+            # `hidden_incomplete` used to be discarded. `take()` refuses the crossing
+            # piece rather than truncating it, so a suppressed context over the budget
+            # came back as the *empty string*: nothing found, nothing detached, nothing
+            # recorded, ALLOW — reporting clean about text it never read. The main path
+            # does the opposite for exactly this case.
+            if found or kinds or hidden_incomplete:
+                # `mutate` is false in observe mode, which is documented as recording
+                # what it would have done and changing nothing. Detaching here ran
+                # inside the engine, before `Gate._finish_exception` consults
+                # `_enforce`, so observe was the one control in the library that
+                # reached into the caller's object.
+                if mutate:
+                    exc.__context__ = None
                 detached = [
                     *(f"canary:{tok}" for tok in dict.fromkeys(found)),
                     *(f"secret:{k}" for k in dict.fromkeys(kinds)),
+                    *(["exception:suppressed_context_unread"] if hidden_incomplete else []),
                     "exception:suppressed_context_detached",
                 ]
                 if not redactions:
@@ -1141,18 +1176,36 @@ class Engine:
             )
         return GateDecision(Effect.ALLOW, "allow"), text
 
-    def _will_read_output(self, contract: ToolContract) -> bool:
+    def _will_read_output(self, contract: ToolContract, req: GateRequest) -> bool:
         """Whether any post-gate pass is going to walk the returned value.
 
         The passes that do, and the only ones the budget is bounding: the canary scan
         (which needs canaries planted to do anything), the secret detectors, and
-        anything keyed on a declared return shape — strict returns, projection and the
-        sensitive-field walk all need `returns`.
+        anything keyed on a declared return shape.
+
+        "Keyed on a declared return shape" is not the same as "has one", which is what
+        this asked first. All three of those passes are themselves conditional — strict
+        returns on `strict_returns`, projection on `project_output`, the sensitive walk
+        on there being a sensitive field the caller may not see — so a contract that
+        merely *declares* its return shape, which is exactly what the lockfile and drift
+        detection want it to do, read nothing and still had a 6 MB return replaced by a
+        68-character redaction string. That is the same sentence as the fix above, one
+        step to the side: where no work is about to happen it is not a bound, it is a
+        size limit nobody asked for.
         """
         return bool(
             contract.redact_secret_output
             or (contract.scan_output_for_canary and self.policy.canaries)
-            or contract.returns is not None
+            or (
+                contract.returns is not None
+                and (
+                    contract.strict_returns
+                    or contract.project_output
+                    or (
+                        req.principal is not None and sensitive_fields(contract.returns, allowed=req.principal.can_view)
+                    )
+                )
+            )
         )
 
     def _post(self, req: GateRequest, result: Any) -> tuple[GateDecision, Any]:
@@ -1175,7 +1228,11 @@ class Engine:
         # redaction string. A budget exists to bound work that is about to happen; where
         # no work is about to happen it is not a bound, it is a size limit nobody asked
         # for.
-        if contract is not None and self._will_read_output(contract) and _over_output_budget(out, self._output_budget):
+        if (
+            contract is not None
+            and self._will_read_output(contract, req)
+            and _over_output_budget(out, self._output_budget)
+        ):
             if contract.on_output_violation == "deny":
                 return GateDecision(
                     Effect.DENY,
