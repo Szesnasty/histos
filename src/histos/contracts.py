@@ -494,7 +494,15 @@ class ToolContract:
 
 
 def _schema_structure(schema: Schema | None) -> Any:
-    """Every declared keyword of a schema, typed exactly as it was written."""
+    """Every declared keyword of a schema, typed exactly as it was written.
+
+    *Every* one. A keyword that enforces something and is not listed here is a pair of
+    policies that decide differently and hash the same — so an approval issued against
+    one binds the other, `histos drift` reports CLEAN across the flip, and the lock's
+    `contract_sha256` collides. `unique_items` was left out when it was added and did
+    all four. `tests/test_release_round4.py` now walks `Field`'s dataclass fields and
+    fails on the next omission rather than waiting for a review to find it.
+    """
     if schema is None:
         return None
     return {
@@ -513,6 +521,7 @@ def _schema_structure(schema: Schema | None) -> Any:
                 "item_type": f.item_type,
                 "max_items": f.max_items,
                 "min_items": f.min_items,
+                "unique_items": f.unique_items,
                 "minimum": f.minimum,
                 "maximum": f.maximum,
                 "exclusive_minimum": f.exclusive_minimum,

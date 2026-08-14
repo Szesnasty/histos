@@ -35,6 +35,7 @@
             "item_type": null,
             "max_items": null,
             "min_items": null,
+            "unique_items": false,
             "minimum": null,
             "maximum": null,
             "exclusive_minimum": null,
@@ -47,6 +48,6 @@
     },
     "schema_sha256": "sha256:60f06dd21a433c8ea65be0301431bb27bd45a25bb60e6a5402d055b6eea03b07",
     "description_sha256": "sha256:66ff9a979edbff53acc5eb76585aeac60594e3177ea6bff6f1704921f68db810",
-    "contract_sha256": "sha256:110f3658f717b4fc6bd12ac6b7caf6468d98257eec876f3ad25131273b6a1f5a"
+    "contract_sha256": "sha256:bb68dee5fbc6b592d0709e6469e72b4eff0fffce857ccde772f7769601022ad2"
   }
 }

@@ -18,7 +18,7 @@ import re
 import re._constants as _re_const
 import re._parser as _re_parser
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1177,6 +1177,51 @@ def _check_string_value(name: str, spec: Field, value: str) -> list[str]:
     return []
 
 
+def _check_unique(name: str, value: Sequence[Any]) -> list[str]:
+    """`unique_items`, in linear time for anything a hash can separate.
+
+    The first version was an equality scan against a growing list, on the reasoning that
+    once a `set[Model]` has been through JSON it is a list of dicts and `set()` on that
+    raises rather than deduplicating. True, and it made the check O(n^2) on the one
+    input an attacker chooses freely. It runs at pre-gate step 3, *before* the output
+    size budget at step 5, and `re` is not the only thing in this process that does not
+    release the GIL: 8 000 distinct integers cost 461 ms of held CPU, per call, for a
+    payload that builds in under a millisecond. The duplicate case short-circuits, so
+    only the *valid* payload is expensive — which is the one an attacker sends.
+
+    Hashable elements go in a set, which is exact and linear. Unhashable ones — dicts and
+    lists, the `set[Model]`-through-JSON case — fall back to the equality scan, but only
+    against each other, and under a bound: past `_MAX_EQUALITY_SCAN` of them the field is
+    refused rather than scanned, because "this costs too much to check" and "this is
+    fine" are not the same answer. A caller who needs more than that on unhashable
+    elements has a `max_items` to declare.
+    """
+    hashed: set[Any] = set()
+    unhashable: list[Any] = []
+    for item in value:
+        try:
+            if item in hashed:
+                return [f"{name}: has a repeated element, and unique_items is set"]
+            hashed.add(item)
+        except TypeError:
+            if len(unhashable) >= _MAX_EQUALITY_SCAN:
+                return [
+                    f"{name}: has more than {_MAX_EQUALITY_SCAN} elements that cannot be hashed, "
+                    "and unique_items cannot be checked on them without a quadratic scan — "
+                    "declare max_items, or drop unique_items for this field"
+                ]
+            if item in unhashable:
+                return [f"{name}: has a repeated element, and unique_items is set"]
+            unhashable.append(item)
+    return []
+
+
+# Unhashable elements cost an equality scan each. 512 of them is about 130 000
+# comparisons — under a millisecond on the shapes this sees — and the wall past which
+# the field is refused instead of checked.
+_MAX_EQUALITY_SCAN = 512
+
+
 def _check_number(name: str, spec: Field, value: int | float) -> list[str]:
     """Value bounds for a number — a scalar arg or one numeric array element.
 
@@ -1232,14 +1277,7 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
         if spec.max_items is not None and len(value) > spec.max_items:
             errors.append(f"{name}: has {len(value)} items, more than max_items {spec.max_items}")
         if spec.unique_items:
-            # By equality, not by hash: once a `set[Model]` has been through JSON it is a
-            # list of dicts, and `set()` on that raises rather than deduplicating.
-            seen: list[Any] = []
-            for item in value:
-                if item in seen:
-                    errors.append(f"{name}: has a repeated element, and unique_items is set")
-                    break
-                seen.append(item)
+            errors.extend(_check_unique(name, value))
 
     if spec.type == "array" and spec.item_enum is not None and isinstance(value, (list, tuple)):
         allowed = spec.item_enum

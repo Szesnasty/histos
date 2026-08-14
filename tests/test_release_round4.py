@@ -380,3 +380,86 @@ def test_two_spellings_of_one_file_still_share_a_key(tmp_path):
 
         _pytest.skip("this volume is case-sensitive; the two spellings are two files")
     assert _path_key(tmp_path / "Trail.jsonl") == _path_key(tmp_path / "trail.jsonl")
+
+
+# ── a keyword that enforces something must reach the hash ────────────────
+
+
+def test_every_field_keyword_reaches_the_contract_structure():
+    """The durable half of the `unique_items` fix.
+
+    A `Field` keyword that enforces something and is missing from
+    `_schema_structure` produces two policies that decide differently and hash the
+    same. `unique_items` did all four of the things that follow from that: the gate
+    gave opposite verdicts on one call under one `policy_hash`, two committed bundle
+    files collided on `content_hash`, the lock's `contract_sha256` collided, and
+    `histos drift` printed "0 reaching enforcement" and exited 0 across the flip.
+
+    Walking the dataclass is the check, so the next keyword cannot be added without
+    either reaching the hash or being named here as deliberately outside it.
+    """
+    import dataclasses
+
+    from histos.contracts import _schema_structure
+    from histos.schema import Field, Schema
+
+    structure = _schema_structure(Schema({"f": Field(type="string")}))
+    covered = set(structure["fields"]["f"])
+    declared = {f.name for f in dataclasses.fields(Field)}
+    assert declared <= covered, f"these Field keywords never reach the contract hash: {sorted(declared - covered)}"
+
+
+def test_unique_items_moves_every_hash_it_has_to():
+    from histos.contracts import Policy, ToolContract
+    from histos.lockfile import contract_hash
+    from histos.schema import Field, Schema
+
+    def build(unique: bool) -> ToolContract:
+        return ToolContract(
+            name="t",
+            args=Schema({"ids": Field(type="array", item_type="string", unique_items=unique)}),
+            access="write",
+        )
+
+    loose, strict = build(False), build(True)
+    assert contract_hash(loose) != contract_hash(strict)
+    policies = [Policy(tools={"t": c}, permissions={"r": frozenset({"t"})}) for c in (loose, strict)]
+    assert policies[0].content_hash() != policies[1].content_hash()
+
+
+def test_unique_items_is_linear_in_the_element_count():
+    """It ran at pre-gate step 3, before the output size budget at step 5, as an
+    equality scan against a growing list: 8 000 distinct integers cost 461 ms of held
+    CPU per call for a payload that builds in under a millisecond. The duplicate case
+    short-circuits, so only the *valid* payload was expensive — the one an attacker
+    sends."""
+    import time
+
+    from histos.schema import Field, Schema, validate
+
+    schema = Schema({"ids": Field(type="array", unique_items=True)})
+    payload = {"ids": list(range(8000))}
+    start = time.perf_counter()
+    assert validate(schema, payload) == []
+    elapsed = time.perf_counter() - start
+    # Two orders of magnitude of headroom under the measured 461 ms, so this fails on a
+    # return to quadratic and not on a slow machine.
+    assert elapsed < 0.05, f"8 000 unique elements took {elapsed * 1000:.0f} ms"
+
+
+def test_unique_items_still_catches_a_duplicate_of_either_kind():
+    from histos.schema import Field, Schema, validate
+
+    schema = Schema({"ids": Field(type="array", unique_items=True)})
+    assert validate(schema, {"ids": [1, 2, 2]}), "a hashable duplicate went unnoticed"
+    assert validate(schema, {"ids": [{"a": 1}, {"a": 1}]}), "an unhashable duplicate went unnoticed"
+    assert validate(schema, {"ids": [{"a": 1}, {"a": 2}]}) == []
+
+
+def test_too_many_unhashable_elements_is_refused_rather_than_scanned():
+    """ "This costs too much to check" and "this is fine" are not the same answer."""
+    from histos.schema import Field, Schema, validate
+
+    schema = Schema({"ids": Field(type="array", unique_items=True)})
+    errors = validate(schema, {"ids": [{"i": i} for i in range(600)]})
+    assert errors and "cannot be hashed" in errors[0]
