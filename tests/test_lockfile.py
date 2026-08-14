@@ -232,3 +232,50 @@ def test_tools_with_no_lock_entry_are_reported_as_unverifiable():
         "hand_written",
         "zod_defined",
     )
+
+
+def test_the_committed_demo_lock_matches_what_the_importer_produces_now():
+    """A lock file in this repository is a claim about the current importer.
+
+    `unique_items` reaching `_schema_structure` moved `contract_sha256`, and the
+    changelog duly said every lock must be regenerated — while the one lock committed
+    here was not, for two of its three tools. That is worse than an ordinary stale
+    fixture: the demo it belongs to is the one whose whole subject is "the lock is what
+    catches the rug-pull", so running it would have reported drift against the *honest*
+    server and taught the reader to distrust the gate.
+
+    Nothing in CI compared the committed hashes against the live projection, and no
+    test did either. This is that comparison. It is also the gate this library sells:
+    a lock that drifts from its source is what `histos drift` exists to catch, so a
+    repository shipping one it cannot verify is asking for trust it has not spent.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    from histos.importers.mcp import sources_from_mcp
+    from histos.lockfile import contract_hash, description_hash, schema_hash
+
+    demo = Path(__file__).resolve().parent.parent / "demo" / "04-mcp-rug-pull"
+    lock_path = demo / "docuvault.policy.lock.json"
+    assert lock_path.exists(), "the lock this test exists to check is gone"
+
+    sys.path.insert(0, str(demo))
+    try:
+        from server import build_v1  # type: ignore[import-not-found]
+        from vault import tools_list  # type: ignore[import-not-found]
+    finally:
+        sys.path.remove(str(demo))
+
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    stale: list[str] = []
+    for source in sources_from_mcp(tools_list(build_v1())):
+        recorded = lock["tools"].get(source.contract.name)
+        assert recorded is not None, f"{source.contract.name} is not in the lock at all"
+        if (
+            contract_hash(source.contract) != recorded["contract_sha256"]
+            or schema_hash(source.shape) != recorded["schema_sha256"]
+            or description_hash(source.description) != recorded["description_sha256"]
+        ):
+            stale.append(source.contract.name)
+    assert not stale, f"the committed lock is stale for {stale} — regenerate it with `python run.py import`"
