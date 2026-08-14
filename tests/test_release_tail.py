@@ -1308,3 +1308,73 @@ def test_or_equals_cannot_edit_a_live_ruleset():
     with use_principal(Principal(role="evil", identity="mallory")), pytest.raises(GateDenied) as exc:
         safe(x=1)
     assert exc.value.decision.rule == "rbac"
+
+
+def test_a_printable_character_respelt_as_an_escape_is_caught(tmp_path):
+    """The duplicate-key check rested on "there is exactly one way for the bytes and the
+    parsed record to disagree in JSON". There is a second: a `\\uXXXX` escape of a
+    printable ASCII character. `{"effect": "\\u0064eny"}` parses to exactly `deny`, so
+    the chain authenticates it and every hash matches, while a human reading the file —
+    or grepping it for `deny` — finds neither. `json.dumps` never emits that escape."""
+    key = b"k" * 32
+    log = tmp_path / "a.jsonl"
+    JSONLAuditSink(log, key=key).record({"effect": "deny", "rule": "rbac", "identity": "mallory"})
+    raw = log.read_text(encoding="utf-8")
+    log.write_text(raw.replace('"deny"', '"\\u0064eny"'), encoding="utf-8")
+
+    ok, detail = verify_chain(log, key=key)
+    assert not ok and "no JSON writer produces that escape" in detail
+
+
+def test_an_honest_log_with_non_ascii_still_verifies(tmp_path):
+    """The escape check must not fire on the escapes the writer itself emits: with
+    `ensure_ascii` every codepoint above 0x7E is written as `\\uXXXX`, and that is the
+    normal contents of a log recording a name."""
+    key = b"k" * 32
+    log = tmp_path / "a.jsonl"
+    sink = JSONLAuditSink(log, key=key)
+    sink.record({"effect": "allow", "rule": "allow", "identity": "Łukasz"})
+    sink.record({"effect": "deny", "rule": "rbac", "note": "zażółć gęślą jaźń"})
+    assert "\\u017c" in log.read_text(encoding="utf-8")
+    ok, detail = verify_chain(log, key=key)
+    assert ok, detail
+
+
+def test_the_tip_sidecar_is_read_as_carefully_as_the_log(tmp_path):
+    """The sidecar is the one file whose whole job is to say how long the log is, and it
+    was exempt from the check every line of the log gets. Keeping the genuine triple
+    last and prepending a fabricated `records` makes `json.loads` take the real one — so
+    the MAC still authenticates — while a reader sees the forgery."""
+    key = b"k" * 32
+    log = tmp_path / "a.jsonl"
+    sink = JSONLAuditSink(log, key=key)
+    for n in range(3):
+        sink.record({"effect": "allow", "rule": "allow", "n": n})
+    tip = tip_path_for(log)
+    tip.write_text('{"records": 99, ' + tip.read_text(encoding="utf-8")[1:], encoding="utf-8")
+
+    ok, detail = verify_chain(log, key=key)
+    assert not ok and "says two different things" in detail
+
+
+def test_rotated_takes_the_lock_the_map_is_otherwise_only_touched_under(tmp_path):
+    """Every read and write of `_PATH_HIGH_WATER` inside `_record` happens under the
+    path lock; `rotated()` popped it with none. A `record()` past its read of the mark
+    and not yet at its write-back re-inserts the pre-rotation `(seq, hash)` after the
+    pop, and the next record on the rotated log is numbered from the old chain."""
+    import inspect
+
+    assert "_path_lock" in inspect.getsource(JSONLAuditSink.rotated)
+
+    # ...and it still does what it is for.
+    key = b"k" * 32
+    log = tmp_path / "a.jsonl"
+    sink = JSONLAuditSink(log, key=key)
+    for n in range(3):
+        sink.record({"effect": "allow", "rule": "allow", "n": n})
+    os.rename(log, tmp_path / "a.jsonl.1")
+    os.rename(sink.tip_path, tmp_path / "a.jsonl.1.tip")
+    sink.rotated()
+    sink.record({"effect": "allow", "rule": "allow", "n": "fresh"})
+    ok, detail = verify_chain(log, key=key)
+    assert ok, detail

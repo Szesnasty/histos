@@ -565,3 +565,53 @@ def test_the_ladder_stays_bounded_under_the_fallback_clock(pattern, degree):
     finally:
         schema_module._cpu_clock = kept
     assert elapsed < _PER_PATTERN_BOUND, f"degree {degree} cost {elapsed:.3f}s under perf_counter"
+
+
+def test_a_separator_may_be_a_class_and_not_only_a_literal():
+    """`_anchored_body`/`_terminated_body` insisted on a bare `LITERAL`, so the
+    single-delimiter spelling of a shape loaded and the two-delimiter spelling of the
+    same shape was refused. The test that matters is disjointness from the rest of the
+    body, and `[-_]` answers it exactly as `-` does. All four measure 0.0 ms."""
+    for pattern in (
+        r"^(?:[a-z]+-){2,4}$",
+        r"^(?:[a-z]+[-_]){2,4}$",
+        r"^(?:[a-z]+[.:]){2,6}$",
+        r"^(?:\w+[/\\]){1,8}$",
+    ):
+        Field(type="string", pattern=pattern)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"^(?:[a-z]+){2,}$",  # no separator at all
+        r"^(?:[a-z]*-)*[a-z]*$",  # a body that can shrink to just the separator
+        r"^(a+)+$",
+        r"^(?:[a-z]+|[a-z]+x){2,4}$",  # an alternation, not a fixed-width separator
+    ],
+)
+def test_widening_the_separator_admits_none_of_the_bombs(pattern):
+    """The excuse is only ever safe because the separator is one character the rest of
+    the body cannot produce. Widening what counts as that character must not widen what
+    counts as a separator."""
+    with pytest.raises(PolicyError):
+        Field(type="string", pattern=pattern)
+
+
+def test_two_adjacent_bounded_repeats_stay_refused_deliberately():
+    """`^[a-z]{1,3}[a-z]{1,3}$` costs 0.0 ms and is refused, and that is the call rather
+    than an oversight. A finite bound does not stop a run accumulating a degree — it
+    caps how much input each rung can eat, and measured on this machine:
+
+        max=  64   2 runs 0.0 ms   3 runs   1.4 ms   4 runs      88 ms
+        max= 512   2 runs 1.3 ms   3 runs   656 ms   4 runs  13 226 ms
+        max=4096   2 runs 39  ms   3 runs 6 645 ms   (identical to unbounded)
+
+    A bound of 4096 behaves exactly like no bound, because the argument cap is 4096. So
+    any threshold that admits the cheap end is a judgement about where the expensive end
+    starts, and being wrong about it is a hung process holding the GIL. The refusal is
+    loud and names the rewrite, which is this module's stated bargain."""
+    with pytest.raises(PolicyError, match="backtrack"):
+        Field(type="string", pattern=r"^[a-z]{1,3}[a-z]{1,3}$")
+    # ...and the single-repeat spelling an author actually means is fine.
+    Field(type="string", pattern=r"^[a-z]{2,6}$")
