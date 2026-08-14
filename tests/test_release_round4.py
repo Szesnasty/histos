@@ -38,7 +38,12 @@ def _one_write_tool() -> Policy:
 
 
 def _dead_sink(tmp_path) -> JSONLAuditSink:
-    """A sink whose path is a directory: every write raises IsADirectoryError."""
+    """A sink whose path is a directory, so every write fails.
+
+    The exception type is the platform's: POSIX raises `IsADirectoryError` and Windows
+    raises `PermissionError`. Both are `OSError`, and which errno the OS picked is not
+    what any of these tests are about — that the sink's exception reaches the caller is.
+    """
     (tmp_path / "log.jsonl").mkdir()
     return JSONLAuditSink(tmp_path / "log.jsonl")
 
@@ -54,7 +59,7 @@ def test_strict_sink_reaches_the_caller_through_the_gate(tmp_path):
     sink = _dead_sink(tmp_path)
     sink.strict = True
     safe = Gate(_one_write_tool(), audit=sink).wrap(lambda: "receipt", name="charge")  # noqa: E731
-    with use_principal(Principal(role="teller", identity="t")), pytest.raises(IsADirectoryError):
+    with use_principal(Principal(role="teller", identity="t")), pytest.raises(OSError):
         safe()
 
 
