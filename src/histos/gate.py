@@ -144,15 +144,49 @@ def _strict_drivers() -> frozenset[str]:
     Looked up in ``sys.modules`` rather than imported: this costs nothing when pytest is
     not running, and a security library has no business importing a test framework.
 
+    The async twin is here for the same reason and was missed the first time. An
+    ``async def`` yield fixture is not driven by ``_pytest.fixtures``: pytest-asyncio
+    drives it from its plugin, and anyio from its event-loop backend. So the identical
+    fixture, written ``async``, errored out every test at setup — and the workaround the
+    refusal recommends was refused with it, leaving an async suite nothing to write. The
+    shape was measured: same Context, both halves in it, nothing left bound afterwards.
+
+    The async runners are matched by ``(file, function)`` rather than by file alone.
+    ``anyio/_backends/_asyncio.py`` holds the fixture runner *and* the task-group
+    implementation, and a user's own task group driving a generator by hand is exactly
+    the interleaving this check exists to refuse — so the file is not a blanket excuse,
+    only the frame that brackets a fixture is.
+
     Anything else driving a setup/teardown generator by hand — a DI container of one's
     own, say — is still refused, and the refusal names the escape hatch.
     """
     files = {contextlib.__file__}
-    for name in ("_pytest.fixtures", "_pytest.python"):
+    for name in ("_pytest.fixtures", "_pytest.python", "pytest_asyncio.plugin", "anyio.pytest_plugin"):
         path = getattr(sys.modules.get(name), "__file__", None)
         if path:
             files.add(path)
     return frozenset(files)
+
+
+# Frames that bracket an async fixture, named exactly, for modules whose file also holds
+# machinery that must stay refused. See `_strict_drivers`.
+_STRICT_DRIVER_FRAMES: tuple[tuple[str, str], ...] = (
+    ("anyio._backends._asyncio", "_run_tests_and_fixtures"),
+    ("anyio._backends._trio", "_run_tests_and_fixtures"),
+)
+
+
+def _is_strict_driver(frame: Any, drivers: frozenset[str]) -> bool:
+    """Whether this frame is one of the drivers that bracket a generator strictly."""
+    if frame.f_code.co_filename in drivers:
+        return True
+    for module, function in _STRICT_DRIVER_FRAMES:
+        if frame.f_code.co_name != function:
+            continue
+        path = getattr(sys.modules.get(module), "__file__", None)
+        if path and frame.f_code.co_filename == path:
+            return True
+    return False
 
 
 def _refuse_a_leaking_frame(caller: Any) -> None:
@@ -179,7 +213,7 @@ def _refuse_a_leaking_frame(caller: Any) -> None:
         if drivers is None:
             drivers = _strict_drivers()
         driver = frame.f_back
-        if driver is None or driver.f_code.co_filename not in drivers:
+        if driver is None or not _is_strict_driver(driver, drivers):
             where = (
                 f"was opened inside the generator {frame.f_code.co_name!r}"
                 if frame is caller
@@ -200,7 +234,7 @@ def _refuse_a_leaking_frame(caller: Any) -> None:
         # accepted, and measured doing exactly what the plain spelling is refused for:
         # alice's second row executing as bob, with nothing raised anywhere. The
         # `AsyncExitStack` twin behaved identically.
-        while driver is not None and driver.f_code.co_filename in drivers:
+        while driver is not None and _is_strict_driver(driver, drivers):
             driver = driver.f_back
         frame = driver
 

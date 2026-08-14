@@ -94,6 +94,13 @@ def _callback_args(args: dict[str, Any]) -> dict[str, Any]:
 # `__context__` can be made to cycle.
 _MAX_EXCEPTION_CHAIN = 16
 
+# How many exceptions the walk will visit in total, links and group members together.
+# Separate from the depth bound above because a fan-out reports one sibling per failed
+# task and forty of them is an ordinary Tuesday, while forty *links* is a program that
+# has lost track of what it is re-raising. The real limiter on work is the character
+# budget the walk already carries; this only stops a pathological structure.
+_MAX_EXCEPTION_NODES = 1024
+
 
 def _next_link(exc: BaseException) -> BaseException | None:
     """The next exception CPython would display — its rules, not an approximation.
@@ -149,7 +156,15 @@ def _exception_text(exc: BaseException, budget: int | None = None) -> tuple[str,
     parts: list[str] = []
     total = 0
     seen: set[int] = set()
-    pending: deque[BaseException] = deque([exc])
+    # Depth travels with each node, because breadth and depth are different questions
+    # and one counter answered both. Members were pushed onto the same queue as links
+    # and charged to the same sixteen, so `ExceptionGroup("3 of 40 shards failed", [...])`
+    # — one link deep, which is the whole point of a group — ran the counter out on its
+    # members and came back `incomplete`. The caller turns that into a redact-all, so an
+    # ordinary `asyncio.TaskGroup` fan-out had its real error replaced by "the exception
+    # chain is longer than 16 links". A group member is a sibling, not another link.
+    pending: deque[tuple[BaseException, int]] = deque([(exc, 0)])
+    nodes = 0
 
     def take(text: str) -> bool:
         """Append one piece, or refuse it and stop. Refused rather than appended, so an
@@ -162,13 +177,14 @@ def _exception_text(exc: BaseException, budget: int | None = None) -> tuple[str,
         total += len(text)
         return True
 
-    for _ in range(_MAX_EXCEPTION_CHAIN):
-        if not pending:
-            return "\n".join(parts), False
-        current = pending.popleft()
+    while pending:
+        if nodes >= _MAX_EXCEPTION_NODES:
+            break
+        current, depth = pending.popleft()
         if id(current) in seen:
             continue
         seen.add(id(current))
+        nodes += 1
         if not take(f"{type(current).__name__}: {current}"):
             return "\n".join(parts), True
         notes = getattr(current, "__notes__", None)
@@ -184,11 +200,14 @@ def _exception_text(exc: BaseException, budget: int | None = None) -> tuple[str,
         elif notes is not None and not take(repr(notes)):
             return "\n".join(parts), True
         if isinstance(current, BaseExceptionGroup):
-            pending.extend(current.exceptions)
+            # Siblings, at the group's own depth.
+            pending.extend((member, depth) for member in current.exceptions)
         link = _next_link(current)
-        if link is not None:
-            pending.append(link)
-    # The bound was hit with exceptions still to read. Saying "nothing to redact" about
+        if link is not None and depth + 1 < _MAX_EXCEPTION_CHAIN:
+            pending.append((link, depth + 1))
+        elif link is not None:
+            return "\n".join(parts), True
+    # A bound was hit with exceptions still to read. Saying "nothing to redact" about
     # a chain that was not read to the end is the fail-open this walk exists to close,
     # so the caller is told the text is incomplete and drops it whole.
     return "\n".join(parts), bool(pending)
