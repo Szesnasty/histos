@@ -1006,6 +1006,29 @@ def _reject_catastrophic_backtracking(pattern: str, compiled: re.Pattern[str]) -
     _reject_slow_pattern(pattern, compiled, parsed)
 
 
+# Which declared types actually consult each keyword. `any` is exempt from all of it:
+# a field with no declared type is the one place a bound cannot be shown to be dead.
+_KEYWORD_APPLIES_TO: dict[str, frozenset[str]] = {
+    # `_check_string_value`, reached for a string scalar and for each element of an
+    # array whose `item_type` is string.
+    "max_length": frozenset({"string", "array"}),
+    "min_length": frozenset({"string", "array"}),
+    "pattern": frozenset({"string", "array"}),
+    # `_check_number`, reached the same two ways.
+    "minimum": frozenset({"integer", "number", "array"}),
+    "maximum": frozenset({"integer", "number", "array"}),
+    "exclusive_minimum": frozenset({"integer", "number", "array"}),
+    "exclusive_maximum": frozenset({"integer", "number", "array"}),
+    "multiple_of": frozenset({"integer", "number", "array"}),
+    # Consulted only inside `if spec.type == "array"`.
+    "max_items": frozenset({"array"}),
+    "min_items": frozenset({"array"}),
+    "item_enum": frozenset({"array"}),
+    "item_type": frozenset({"array"}),
+    "unique_items": frozenset({"array"}),
+}
+
+
 def _check_bound(name: str, value: Any) -> None:
     """A numeric bound must be a real, finite, comparable number.
 
@@ -1109,22 +1132,29 @@ class Field:
             _check_bound(bound, getattr(self, bound))
         for bound in ("max_length", "min_length", "max_items", "min_items"):
             _check_length_bound(bound, getattr(self, bound))
-        # An element bound on something with no elements reads as enforced and enforces
-        # nothing: every one of these is consulted only inside `if spec.type == "array"`,
-        # so `Field(type="string", max_items=3)` loaded clean and checked nothing.
-        if self.type != "array":
-            for attr in ("max_items", "min_items", "item_enum", "item_type"):
-                if getattr(self, attr) not in (None, False):
-                    raise PolicyError(
-                        f"{attr} is only meaningful on an array field, and this one is {self.type!r} — "
-                        "it would read as a bound and enforce nothing",
-                        code="invalid_field",
-                    )
-            if self.unique_items:
-                raise PolicyError(
-                    f"unique_items is only meaningful on an array field, and this one is {self.type!r}",
-                    code="invalid_field",
-                )
+        # A bound consulted only under one `type` reads as enforced and enforces nothing
+        # anywhere else, so every keyword is checked against the types that actually
+        # consult it. This was a hand-written list covering the array keywords only, and
+        # its own stated rule caught its siblings: `_check_scalar` applies the numeric
+        # bounds only under `if spec.type in ("integer", "number")` and the string bounds
+        # only under `isinstance(value, str)`, so `Field(type="string", maximum=10)` and
+        # `Field(type="integer", pattern="^a+$")` loaded clean and checked nothing —
+        # exactly the case the list was written for, one keyword to the side.
+        #
+        # `string` and `array` share the string and numeric bounds because an array's
+        # elements are checked with the same two helpers, which is how
+        # `item_type="string", max_length=8` bounds each element.
+        for attr, applies_to in _KEYWORD_APPLIES_TO.items():
+            if self.type in applies_to or self.type == "any":
+                continue
+            declared = getattr(self, attr)
+            if declared is None or declared is False:
+                continue
+            raise PolicyError(
+                f"{attr} is only meaningful on {' or '.join(sorted(applies_to))}, and this field is "
+                f"{self.type!r} — it would read as a bound and enforce nothing",
+                code="invalid_field",
+            )
         if self.min_items is not None and self.max_items is not None and self.min_items > self.max_items:
             raise PolicyError(
                 f"min_items {self.min_items} is greater than max_items {self.max_items}, so no value can "

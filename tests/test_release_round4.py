@@ -740,3 +740,176 @@ def test_a_gate_does_not_retain_every_tool_it_ever_wrapped():
     del tool
     gc.collect()
     assert ref() is None, "the Gate is keeping a per-request closure alive"
+
+
+# ── a bound that enforces nothing, wherever it is declared ───────────────
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"type": "string", "maximum": 10},
+        {"type": "boolean", "multiple_of": 2},
+        {"type": "integer", "pattern": "^a+$"},
+        {"type": "object", "max_length": 5},
+        {"type": "string", "max_items": 3},
+    ],
+)
+def test_a_bound_outside_the_type_that_consults_it_is_refused(kwargs):
+    """The guard's own rule caught its siblings. `_check_scalar` applies the numeric
+    bounds only under `type in ("integer", "number")` and the string bounds only under
+    `isinstance(value, str)`, and the hand-written list covered the array keywords
+    only — so `Field(type="string", maximum=10)` loaded clean and checked nothing."""
+    with pytest.raises(PolicyError):
+        Field(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"type": "string", "max_length": 8, "pattern": "^a+$"},
+        {"type": "integer", "minimum": 1, "maximum": 5},
+        {"type": "array", "item_type": "string", "max_length": 8, "max_items": 3},
+        {"type": "array", "item_type": "integer", "minimum": 0, "unique_items": True},
+        {"type": "any", "maximum": 10, "pattern": "^a+$"},
+        {"type": "number", "exclusive_minimum": 0.0},
+    ],
+)
+def test_every_legitimate_spelling_still_loads(kwargs):
+    """An array shares the string and numeric bounds because its *elements* are checked
+    with the same two helpers, and `any` is exempt: with no declared type there is no
+    way to show a bound is dead."""
+    Field(**kwargs)
+
+
+# ── the snapshot keeps what deepcopy knows ───────────────────────────────
+
+
+def test_a_cycle_in_an_attribute_does_not_raise():
+    """The structural walk has no memo, so `d["self"] = d` recursed to the interpreter
+    limit — and the RecursionError escaped `__post_init__`, because the only `try`
+    wrapped the leaf copy and not the recursion. `deepcopy` handled it before."""
+    cyclic: dict = {"id": "acme"}
+    cyclic["self"] = cyclic
+    who = Principal(role="r", identity="i", attributes={"tenant": cyclic})
+    assert who.attributes["tenant"]["id"] == "acme"
+
+
+def test_the_snapshot_keeps_container_subclasses():
+    """The walk rebuilt every mapping as a plain `dict` and every tuple-like as
+    `type(value)(items)`, so a `defaultdict` lost its factory, `Counter` and
+    `OrderedDict` became `dict`, and a namedtuple became a plain list."""
+    import collections
+    import typing
+
+    class Point(typing.NamedTuple):
+        x: int
+        y: int
+
+    who = Principal(
+        role="r",
+        identity="i",
+        attributes={
+            "dd": collections.defaultdict(list, {"a": [1]}),
+            "counter": collections.Counter(a=1),
+            "od": collections.OrderedDict(a=1),
+            "point": Point(1, 2),
+        },
+    )
+    assert isinstance(who.attributes["dd"], collections.defaultdict)
+    assert isinstance(who.attributes["counter"], collections.Counter)
+    assert isinstance(who.attributes["od"], collections.OrderedDict)
+    assert who.attributes["point"] == Point(1, 2)
+
+
+def test_an_uncopyable_leaf_still_costs_only_itself():
+    """The property the structural walk was added for, kept: `deepcopy` of a container
+    raises if any descendant refuses, and the whole subtree used to be aliased."""
+    import threading
+
+    live = {"id": "acme", "lock": threading.Lock()}
+    who = Principal(role="r", identity="i", attributes={"tenant": live})
+    live["id"] = "attacker"
+    assert who.attributes["tenant"]["id"] == "acme", "the scalar beside an uncopyable leaf was aliased"
+
+
+# ── the JSON Schema bridge composes a $ref by conjunction ────────────────
+
+
+def test_a_sibling_cannot_downgrade_the_sensitivity_marker():
+    """`x-sensitive` was in neither the tightening table nor the refusal list, so the
+    sibling simply won — and this is the one keyword the module itself calls invisible
+    downstream. A `$ref` composes by conjunction; the stricter marker is the only answer
+    that does."""
+    from histos import schema_from_json_schema
+
+    document = {
+        "type": "object",
+        "properties": {"token": {"$ref": "#/$defs/Secret", "x-sensitive": "pii"}},
+        "$defs": {"Secret": {"type": "string", "x-sensitive": "secret"}},
+    }
+    assert schema_from_json_schema(document).fields["token"].sensitive == "secret"
+
+
+def test_a_draft4_boolean_sibling_does_not_delete_a_numeric_bound():
+    """`True`/`False` are ints, so `min(100, False)` is `False`; `_numeric` then saw a
+    bool on the draft-04 modifier spelling and returned None. A sibling that is a *no-op*
+    deleted the referenced definition's bound outright."""
+    from histos import schema_from_json_schema
+
+    document = {
+        "type": "object",
+        "properties": {"n": {"$ref": "#/$defs/Bounded", "exclusiveMaximum": False}},
+        "$defs": {"Bounded": {"type": "integer", "maximum": 100}},
+    }
+    assert schema_from_json_schema(document).fields["n"].maximum == 100
+
+
+def test_an_element_level_unique_items_is_still_a_named_refusal():
+    """It was taken off `_UNPROJECTED_ASSERTIONS` when it got a home on `Field`, and
+    `_field` reads it property-only — so it went from a named refusal to a silent drop,
+    which is the exact failure the comment beside `minItems`/`maxItems` describes."""
+    from histos import schema_from_json_schema
+
+    with pytest.raises(PolicyError):
+        schema_from_json_schema(
+            {"type": "object", "properties": {"xs": {"type": "array", "items": {"uniqueItems": True}}}}
+        )
+
+
+def test_a_non_boolean_unique_items_is_refused_rather_than_coerced():
+    from histos import schema_from_json_schema
+
+    with pytest.raises(PolicyError):
+        schema_from_json_schema({"type": "object", "properties": {"xs": {"type": "array", "uniqueItems": "false"}}})
+
+
+# ── a request body that declares fields is not dropped in silence ────────
+
+
+def _body_spec(media: str, schema: dict) -> dict:
+    return {
+        "openapi": "3.0.0",
+        "paths": {"/x": {"post": {"operationId": "t", "requestBody": {"content": {media: {"schema": schema}}}}}},
+    }
+
+
+@pytest.mark.parametrize("media", ["application/x-www-form-urlencoded", "multipart/form-data"])
+def test_a_form_body_is_refused_rather_than_dropped(media):
+    """The parameter path refuses an unsupported media type loudly; this one took the
+    same None and dropped the body without a word, after which the gate denied every
+    argument the document declares with a message naming nothing about the source."""
+    from histos import sources_from_openapi
+
+    with pytest.raises(PolicyError):
+        sources_from_openapi(_body_spec(media, {"type": "object", "properties": {"amount": {"type": "integer"}}}))
+
+
+@pytest.mark.parametrize("media", ["application/octet-stream", "image/png"])
+def test_a_stream_body_declares_no_fields_and_still_imports(media):
+    """Refusing every non-JSON media type would take out `uploadFile` in the standard
+    Petstore document — a raw upload whose query parameters import perfectly well and
+    whose body declares no names to lose."""
+    from histos import sources_from_openapi
+
+    assert len(sources_from_openapi(_body_spec(media, {"type": "string", "format": "binary"}))) == 1

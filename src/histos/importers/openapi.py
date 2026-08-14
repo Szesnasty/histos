@@ -115,6 +115,30 @@ def _json_schema_of(spec: dict[str, Any], content: Any, *, where: str) -> dict[s
     return schema if isinstance(schema, dict) else None
 
 
+def _declares_fields(spec: dict[str, Any], content: Any, name: str) -> bool:
+    """Whether a non-JSON request body declares named fields the projection would lose.
+
+    A form body (`application/x-www-form-urlencoded`, `multipart/form-data`) is an
+    object with properties: every one of those is an argument, and dropping the body
+    silently means the gate denies each of them at call time. A byte stream
+    (`application/octet-stream`, an image, a PDF) declares no names at all — there is
+    nothing for the projection to lose, and refusing it would cost the operation its
+    perfectly importable query parameters.
+    """
+    if not isinstance(content, dict):
+        return False
+    for media_type, media in content.items():
+        if not isinstance(media, dict):
+            continue
+        try:
+            schema = _deref(spec, media.get("schema"), where=f"requestBody {media_type} of {name!r}")
+        except PolicyError:
+            return True  # a body whose schema cannot even be resolved is not a stream
+        if isinstance(schema, dict) and (schema.get("properties") or schema.get("type") == "object"):
+            return True
+    return False
+
+
 def _source_from_operation(
     spec: dict[str, Any],
     path: str,
@@ -182,9 +206,34 @@ def _source_from_operation(
         fields[pname] = field_from_json_schema(schema, required=bool(param.get("required")), root=spec, name=pname)
 
     body_schema = None
-    request_body = op.get("requestBody", {})
+    request_body = _deref(spec, op.get("requestBody", {}), where=f"requestBody of {name!r}")
     if isinstance(request_body, dict):
-        body_schema = _json_schema_of(spec, request_body.get("content", {}), where=f"requestBody of {name!r}")
+        content = request_body.get("content") or {}
+        body_schema = _json_schema_of(spec, content, where=f"requestBody of {name!r}")
+        # The parameter path refuses an unsupported media type loudly, naming the
+        # parameter and what it found; this one took the same `None` and dropped the
+        # entire body without a word. `args` then kept only the path and query
+        # parameters, `allow_extra` stayed False, and the gate denied every argument the
+        # document declares with `arg_schema: unexpected argument (not in schema)` —
+        # which says nothing about the source. Worse for review: `shape["requestBody"]`
+        # recorded null, so `histos drift` had nothing to compare and the tool read as
+        # having no body at all.
+        #
+        # Only when the body would lose *named fields*. Refusing every non-JSON media
+        # type takes out `application/octet-stream` — a raw upload stream, which
+        # declares no arguments to lose and whose operation's query parameters import
+        # perfectly well. `uploadFile` in the standard Petstore document is exactly
+        # that. So the question is whether the body declares an object with properties:
+        # a form body does, and dropping it is the silent drop; a byte stream does not,
+        # and refusing it would be the false positive.
+        if body_schema is None and _declares_fields(spec, content, name):
+            raise _malformed(
+                f"the requestBody of {name!r}",
+                sorted(content),
+                "a `content` carrying an application/json schema — this importer projects that media "
+                "type only, and this body declares named fields, so dropping it would produce a policy "
+                "that denies every one of them at call time with nothing naming the source",
+            )
         if body_schema:
             for fname, field in schema_from_json_schema(body_schema, root=spec).fields.items():
                 fields[fname] = field
