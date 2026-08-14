@@ -99,7 +99,17 @@ def _deref_once(spec: dict[str, Any], node: Any, *, where: str) -> Any:
     return target
 
 
-def _json_schema_of(spec: dict[str, Any], content: dict[str, Any], *, where: str) -> dict[str, Any] | None:
+def _json_schema_of(spec: dict[str, Any], content: Any, *, where: str) -> dict[str, Any] | None:
+    # `content` is type-checked rather than assumed. A `content:` key left empty in YAML
+    # parses to `None` and a sequence parses to a list, and both reached `.get` here as
+    # an `AttributeError` — which is not a `PolicyError`, so `project_tools` did not skip
+    # the one bad tool and the CLI's handler chain did not turn it into an exit code. The
+    # user got a traceback out of `histos import` and no policy file. Seven of the eight
+    # malformed nodes in this module behaved that way.
+    if content is None:
+        return None
+    if not isinstance(content, dict):
+        raise _malformed(f"the `content` of {where}", content, "a mapping of media type to schema")
     body = content.get("application/json", {})
     schema = _deref(spec, body.get("schema"), where=where) if isinstance(body, dict) else None
     return schema if isinstance(schema, dict) else None
@@ -183,7 +193,10 @@ def _source_from_operation(
 
     returns = None
     response_schema = None
-    responses = op.get("responses", {})
+    responses = op.get("responses")
+    responses = {} if responses is None else responses
+    if not isinstance(responses, dict):
+        raise _malformed(f"the `responses` of {name!r}", responses, "a mapping of status code to response")
     for code in ("200", "201", "default"):
         raw_response = responses.get(code)
         if not isinstance(raw_response, dict):
@@ -211,13 +224,19 @@ def _source_from_operation(
         shape={
             "method": method,
             "path": path,
-            # Where the call actually goes. The operation-level override wins over the
-            # document's, exactly as OpenAPI resolves it. Outside the shape, a vendor
-            # could repoint every request at their own host after review and `histos
-            # drift` reported clean: same method, same path, same schemas, different
-            # server. Nothing about the tool's *shape* had changed, and that was the
-            # bug — the shape was not describing the whole tool.
-            "servers": op.get("servers") or spec.get("servers") or None,
+            # Where the call actually goes. Outside the shape, a vendor could repoint
+            # every request at their own host after review and `histos drift` reported
+            # clean: same method, same path, same schemas, different server. Nothing
+            # about the tool's *shape* had changed, and that was the bug — the shape was
+            # not describing the whole tool.
+            #
+            # OpenAPI resolves `servers` at **three** levels, and this read two of them.
+            # The path item sits between the operation and the document, and adding
+            # `servers` there repoints every method on that path at once — a smaller
+            # diff than editing each operation, and it was the invisible one: the same
+            # host repoint was caught at the operation level and passed drift at the
+            # path-item level, exit 0.
+            "servers": op.get("servers") or (item or {}).get("servers") or spec.get("servers") or None,
             "parameters": resolved_params,
             "requestBody": body_schema,
             "responses": response_schema,
@@ -235,7 +254,13 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
     ``#/components/schemas`` target changing underneath an unchanged ``$ref``.
     """
     operations: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = []
-    paths = spec.get("paths", {})
+    paths = spec.get("paths")
+    paths = {} if paths is None else paths
+    # A document-level shape, so a document-level refusal: this one is not about a tool
+    # and there is no tool to skip. It used to reach `.items()` as an `AttributeError`
+    # and fly out of the CLI as a traceback.
+    if not isinstance(paths, dict):
+        raise _malformed("the document's `paths`", paths, "a mapping of path to path item")
     for path, item in paths.items():
         if not isinstance(item, dict):
             continue

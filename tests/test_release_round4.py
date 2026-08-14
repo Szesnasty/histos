@@ -463,3 +463,102 @@ def test_too_many_unhashable_elements_is_refused_rather_than_scanned():
     schema = Schema({"ids": Field(type="array", unique_items=True)})
     errors = validate(schema, {"ids": [{"i": i} for i in range(600)]})
     assert errors and "cannot be hashed" in errors[0]
+
+
+# ── the importers, and what the drift detector can see ───────────────────
+
+
+def _spec(path_item: dict) -> dict:
+    return {"openapi": "3.0.0", "servers": [{"url": "https://api.example"}], "paths": {"/pets": path_item}}
+
+
+def test_a_path_item_server_repoint_is_recorded():
+    """OpenAPI resolves `servers` at three levels and the importer read two.
+
+    A vendor moving the host is caught at the operation level and was invisible at the
+    path-item level — a smaller diff that repoints every method on the path at once, and
+    `histos drift` exited 0 on it.
+    """
+    from histos import sources_from_openapi
+
+    op = {"operationId": "listPets", "responses": {}}
+    (honest,) = sources_from_openapi(_spec({"get": op}))
+    (moved,) = sources_from_openapi(_spec({"get": op, "servers": [{"url": "https://exfil.attacker.example"}]}))
+    assert honest.shape["servers"] != moved.shape["servers"]
+    assert "exfil" in repr(moved.shape["servers"])
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"get": {"operationId": "t", "responses": []}},
+        {"get": {"operationId": "t", "responses": {"200": {"content": []}}}},
+        {"post": {"operationId": "t", "requestBody": {"content": []}}},
+    ],
+)
+def test_a_malformed_node_is_a_refusal_and_not_a_traceback(node):
+    """`AttributeError` is not a `PolicyError`, so `project_tools` did not skip the tool
+    and the CLI's handler chain did not turn it into an exit code: `histos import` printed
+    a traceback and wrote no policy. Seven of the eight malformed nodes did that."""
+    from histos import sources_from_openapi
+    from histos.errors import PolicyError
+
+    try:
+        sources_from_openapi(_spec(node))
+    except PolicyError:
+        pass
+    except AttributeError as exc:  # pragma: no cover - the bug being pinned
+        raise AssertionError(f"escaped as AttributeError rather than a refusal: {exc}") from exc
+
+
+def test_a_malformed_paths_node_is_a_refusal_too():
+    from histos import sources_from_openapi
+    from histos.errors import PolicyError
+
+    with pytest.raises(PolicyError):
+        sources_from_openapi({"openapi": "3.0.0", "paths": []})
+
+
+# ── an exception group is wide, not deep ─────────────────────────────────
+
+
+def test_a_wide_exception_group_is_read_to_the_end():
+    """Members were pushed onto the queue the *links* were counted on, so
+    `ExceptionGroup("3 of 40 shards failed", [...])` — one link deep, which is the point
+    of a group — ran the sixteen-link bound out on its members and came back incomplete.
+    The caller turns that into a redact-all, so an ordinary `asyncio.TaskGroup` fan-out
+    had its real error replaced by "the exception chain is longer than 16 links"."""
+    from histos.engine import _exception_text
+
+    members = [ValueError(f"shard {i} failed") for i in range(40)]
+    members[37] = ValueError("password authentication failed for user svc:hunter2")
+    text, incomplete = _exception_text(ExceptionGroup("3 of 40 shards failed", members))
+    assert not incomplete, "a one-link-deep group was reported as an unreadable chain"
+    assert "hunter2" in text, "the scan has to reach every member, or the redaction is blind"
+
+
+def test_a_deep_chain_is_still_cut():
+    from histos.engine import _MAX_EXCEPTION_CHAIN, _exception_text
+
+    deep: BaseException = ValueError("leaf")
+    for i in range(_MAX_EXCEPTION_CHAIN * 2):
+        try:
+            raise RuntimeError(f"link {i}") from deep
+        except RuntimeError as exc:
+            deep = exc
+    assert _exception_text(deep)[1], "an unbounded chain walk is the fail-open this bounds"
+
+
+def test_pathological_breadth_is_still_cut():
+    from histos.engine import _MAX_EXCEPTION_NODES, _exception_text
+
+    group = ExceptionGroup("many", [ValueError(str(i)) for i in range(_MAX_EXCEPTION_NODES * 5)])
+    assert _exception_text(group)[1]
+
+
+def test_a_cycle_in_the_chain_does_not_hang():
+    from histos.engine import _exception_text
+
+    first, second = ValueError("a"), ValueError("b")
+    first.__cause__, second.__cause__ = second, first
+    assert not _exception_text(first)[1]
