@@ -215,7 +215,58 @@ class ReadOnlyList(list):  # type: ignore[type-arg]
         return list(self)
 
 
-def _snapshot_value(value: Any, *, readonly: bool = True) -> Any:
+def _freeze(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
+    """Make an already-copied structure read-only, keeping every subclass it carries.
+
+    Applied after `deepcopy` rather than instead of it, so a `defaultdict` stays a
+    `defaultdict` and a `namedtuple` stays a `namedtuple` — only the two plain mutable
+    containers, which are the ones a holder can edit into a different authorization
+    answer, are swapped for their refusing twins.
+    """
+    if id(value) in _seen:
+        return value
+    seen = _seen | {id(value)}
+    if type(value) is dict:
+        return ReadOnlyDict({k: _freeze(v, seen) for k, v in value.items()})
+    if type(value) is list:
+        return ReadOnlyList([_freeze(v, seen) for v in value])
+    if isinstance(value, dict):
+        # A subclass: keep the type, freeze what is inside it. It stays editable itself,
+        # which is the price of not destroying a `Counter`.
+        for key, item in list(value.items()):
+            value[key] = _freeze(item, seen)
+        return value
+    if type(value) is tuple:
+        return tuple(_freeze(v, seen) for v in value)
+    return value
+
+
+def _thaw(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
+    """The inverse of :func:`_freeze`, for the copy a tool is handed.
+
+    Needed because the stored attribute is already frozen and `deepcopy` preserves the
+    class — so a handout copied out of the anchor came back refusing the ordinary
+    `tenants.append(...)` a tool body does to its own arguments.
+    """
+    if id(value) in _seen:
+        return value
+    seen = _seen | {id(value)}
+    if isinstance(value, ReadOnlyDict):
+        return {k: _thaw(v, seen) for k, v in value.items()}
+    if isinstance(value, ReadOnlyList):
+        return [_thaw(v, seen) for v in value]
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            value[key] = _thaw(item, seen)
+        return value
+    if type(value) is list:
+        return [_thaw(v, seen) for v in value]
+    if type(value) is tuple:
+        return tuple(_thaw(v, seen) for v in value)
+    return value
+
+
+def _snapshot_value(value: Any, *, readonly: bool = True, _seen: frozenset[int] = frozenset()) -> Any:
     """Deep-copy ``value``, sharing by reference only the leaves that cannot be copied.
 
     The fallback used to be per *attribute*: `deepcopy(value)`, and on any exception the
@@ -230,6 +281,16 @@ def _snapshot_value(value: Any, *, readonly: bool = True) -> Any:
     So the walk is structural: containers are rebuilt element by element, and only the
     individual leaf that raises is shared. That leaf is, by the same argument as before,
     one a tool could not mutate into a different authorization answer anyway.
+
+    `deepcopy` is asked *first* all the same, because the structural walk on its own lost
+    everything `deepcopy` knows. It has no memo, so a cycle — `d["self"] = d`, which an
+    ORM row or a parsed config produces without anyone meaning to — recursed to the
+    interpreter limit and the RecursionError escaped `__post_init__`, since the only
+    `try` wrapped the leaf copy and not the recursion. And it rebuilt every mapping as a
+    plain `dict` and every sequence as `type(value)(items)`, so a `defaultdict` lost its
+    factory, `Counter` and `OrderedDict` became `dict`, and a `namedtuple` became a
+    plain list. `deepcopy` preserves all of that; the walk is the fallback for the one
+    thing it cannot do, which is survive an uncopyable descendant.
     """
     # Read-only on the way down as well as at the top. The snapshot already stopped the
     # *caller's* object being aliased; it left every nested container of the snapshot
@@ -237,13 +298,26 @@ def _snapshot_value(value: Any, *, readonly: bool = True) -> Any:
     # anchor — `who.attributes["tenants"].append("evil-corp")` — and the next
     # authorization decision read the edit. `_apply_bindings` re-snapshots on the way
     # out, so a tool still receives an ordinary mutable copy.
-    if isinstance(value, dict):
-        rebuilt = {
-            _snapshot_value(k, readonly=readonly): _snapshot_value(v, readonly=readonly) for k, v in value.items()
-        }
-        return ReadOnlyDict(rebuilt) if readonly else rebuilt
-    if isinstance(value, (list, tuple, set, frozenset)):
-        items = [_snapshot_value(v, readonly=readonly) for v in value]
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        if id(value) in _seen:
+            # A cycle. `deepcopy` below would resolve it correctly, and if it is here it
+            # has already refused this subtree — so the alias is the honest answer, and
+            # it is the same one an uncopyable leaf gets.
+            return value
+        try:
+            copied = deepcopy(value)
+        except Exception:  # noqa: BLE001 — fall back to the element-by-element walk
+            pass
+        else:
+            return _freeze(copied) if readonly else _thaw(copied)
+        seen = _seen | {id(value)}
+        if isinstance(value, dict):
+            rebuilt = {
+                _snapshot_value(k, readonly=readonly, _seen=seen): _snapshot_value(v, readonly=readonly, _seen=seen)
+                for k, v in value.items()
+            }
+            return ReadOnlyDict(rebuilt) if readonly else rebuilt
+        items = [_snapshot_value(v, readonly=readonly, _seen=seen) for v in value]
         if isinstance(value, list):
             return ReadOnlyList(items) if readonly else items
         try:

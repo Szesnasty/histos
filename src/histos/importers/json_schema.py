@@ -144,7 +144,11 @@ _UNPROJECTED_AT_OBJECT_LEVEL = _UNPROJECTED_ASSERTIONS - {"properties", "require
 # and taking them off that list silently deleted the refusal covering the element
 # schema too. `_bound` reads them property-only, precisely so an element bound is never
 # mistaken for an array bound, which left `items: {maxItems: 3}` dropped in silence.
-_UNPROJECTED_IN_ITEMS = _UNPROJECTED_ASSERTIONS | {"items", "minItems", "maxItems"}
+# `uniqueItems` is on this list for the same reason and was left off it: it was taken
+# off `_UNPROJECTED_ASSERTIONS` in the same commit that gave it a home on `Field`, and
+# `_field` reads it property-only — so an element-level `uniqueItems` went from a named
+# refusal to a silent drop, which is the exact failure the paragraph above describes.
+_UNPROJECTED_IN_ITEMS = _UNPROJECTED_ASSERTIONS | {"items", "minItems", "maxItems", "uniqueItems"}
 
 # Every keyword that reaches the projection, carried or refused. Used to decide whether
 # a union branch holds *only* a set of allowed values — a branch that also writes a
@@ -324,10 +328,32 @@ def _intersect(target: dict[str, Any], sibling: dict[str, Any], *, where: str) -
         if key not in merged or merged[key] == value:
             merged[key] = value
             continue
+        if key == "x-sensitive":
+            # The one keyword this module says is invisible downstream — "nothing later
+            # can tell 'not sensitive' from 'meant to be sensitive'" — and it was in
+            # neither the tightening table nor the refusal list, so it fell through to
+            # sibling-wins. A `$ref` to a definition marked `secret` with
+            # `"x-sensitive": "pii"` written beside it imported as `pii`: a downgrade of
+            # the marker, written by whoever authored the document. A `$ref` composes by
+            # conjunction, so the stricter of the two is the only answer that composes.
+            merged[key] = "secret" if "secret" in (merged[key], value) else value
+            continue
         tighter = _TIGHTER.get(key)
         if tighter is not None:
+            a, b = merged[key], value
+            if isinstance(a, bool) or isinstance(b, bool):
+                # `True`/`False` are ints, so `min(100, False)` is `False` and
+                # `max(0, True)` is `True`. `_numeric` then sees a bool on
+                # `exclusiveMinimum`/`exclusiveMaximum`, recognises the draft-04
+                # modifier spelling and returns None — so a sibling that is a *no-op*
+                # (`exclusiveMaximum: false` means "the maximum is not exclusive")
+                # deleted the referenced definition's numeric bound outright. The
+                # docstring says the boolean form is ignored rather than guessed at;
+                # ignoring it has to leave the numeric one standing.
+                merged[key] = b if isinstance(a, bool) else a
+                continue
             try:
-                merged[key] = tighter(merged[key], value)
+                merged[key] = tighter(a, b)
                 continue
             except TypeError:
                 pass
@@ -560,6 +586,20 @@ def _numeric(keyword: str, value: Any) -> float | None:
     return value
 
 
+def _flag(keyword: str, value: Any) -> bool:
+    """A boolean assertion, read as one rather than coerced with ``bool()``.
+
+    `bool(prop.get("uniqueItems"))` read `"false"` as True and `[]` as False — the same
+    "malformed value silently becomes a bound nobody wrote" that `_length` exists to
+    stop one keyword over.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise _malformed(keyword, value, "a boolean")
+    return value
+
+
 def _length(keyword: str, value: Any) -> int | None:
     """A ``minLength`` / ``maxLength`` must be a non-negative whole number.
 
@@ -700,7 +740,7 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         pattern=pattern,
         sensitive=sensitive,
         item_enum=item_enum,
-        unique_items=bool(prop.get("uniqueItems", False)) if ftype == "array" else False,
+        unique_items=_flag("uniqueItems", prop.get("uniqueItems")) if ftype == "array" else False,
         item_type=item_type,
         max_items=_length(*_bound(prop, None, "maxItems")),
         min_items=_length(*_bound(prop, None, "minItems")),
