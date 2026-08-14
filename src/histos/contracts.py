@@ -143,7 +143,79 @@ def _snapshot(attributes: dict[str, Any]) -> dict[str, Any]:
     return {key: _snapshot_value(value) for key, value in attributes.items()}
 
 
-def _snapshot_value(value: Any) -> Any:
+class ReadOnlyList(list):  # type: ignore[type-arg]
+    """The sequence twin of :class:`ReadOnlyDict`, for the same reason.
+
+    `Principal.attributes` is a `ReadOnlyDict` and its nested containers were plain
+    mutable ones, so `who.attributes["tenants"].append("evil-corp")` edited a bound
+    trust anchor one level below where the guarantee stopped — the same shape as
+    `gate.policy.permissions |= {...}`, which is the finding this class exists to
+    close the other half of.
+
+    A `list` subclass rather than a `tuple`, deliberately. A tuple would be the shorter
+    answer and it changes the *type* a constraint compares: `Constraint("tenants", "eq",
+    value=["acme"])` stops matching the moment the stored value is a tuple, so the fix
+    would silently flip authorization verdicts. A list subclass compares equal to a
+    list, passes `isinstance`, and serialises the same.
+    """
+
+    __slots__ = ()
+
+    def _readonly(self, *_a: Any, **_k: Any) -> Any:
+        raise TypeError(
+            "this sequence is read-only: it belongs to a Principal that has already been bound, and "
+            "editing it would change what a later call is authorized against. Build a new Principal."
+        )
+
+    def __setitem__(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def __delitem__(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def __iadd__(self, _other: Any) -> Any:  # type: ignore[misc]
+        # `xs += [...]` mutates in place and only then rebinds, exactly like the
+        # `permissions |= {...}` case: on a frozen owner the rebinding fails and the
+        # mutation has already landed.
+        self._readonly()
+
+    def __imul__(self, _other: Any) -> Any:  # type: ignore[misc]
+        self._readonly()
+
+    def append(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def extend(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def insert(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def pop(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def remove(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def clear(self) -> None:
+        self._readonly()
+
+    def sort(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def reverse(self) -> None:
+        self._readonly()
+
+    def __reduce__(self) -> Any:
+        # Built from a plain list rather than replayed through `append`, which
+        # `deepcopy` and `pickle` do for a list subclass — and `append` raises here.
+        return (self.__class__, (list(self),))
+
+    def copy(self) -> list[Any]:
+        return list(self)
+
+
+def _snapshot_value(value: Any, *, readonly: bool = True) -> Any:
     """Deep-copy ``value``, sharing by reference only the leaves that cannot be copied.
 
     The fallback used to be per *attribute*: `deepcopy(value)`, and on any exception the
@@ -159,14 +231,25 @@ def _snapshot_value(value: Any) -> Any:
     individual leaf that raises is shared. That leaf is, by the same argument as before,
     one a tool could not mutate into a different authorization answer anyway.
     """
+    # Read-only on the way down as well as at the top. The snapshot already stopped the
+    # *caller's* object being aliased; it left every nested container of the snapshot
+    # itself writable, so anyone holding the Principal could still edit a bound trust
+    # anchor — `who.attributes["tenants"].append("evil-corp")` — and the next
+    # authorization decision read the edit. `_apply_bindings` re-snapshots on the way
+    # out, so a tool still receives an ordinary mutable copy.
     if isinstance(value, dict):
-        return {_snapshot_value(k): _snapshot_value(v) for k, v in value.items()}
+        rebuilt = {
+            _snapshot_value(k, readonly=readonly): _snapshot_value(v, readonly=readonly) for k, v in value.items()
+        }
+        return ReadOnlyDict(rebuilt) if readonly else rebuilt
     if isinstance(value, (list, tuple, set, frozenset)):
-        items = [_snapshot_value(v) for v in value]
+        items = [_snapshot_value(v, readonly=readonly) for v in value]
+        if isinstance(value, list):
+            return ReadOnlyList(items) if readonly else items
         try:
             return type(value)(items)
         except (TypeError, ValueError):
-            return type(value)(items) if type(value) in (list, tuple, set, frozenset) else items
+            return type(value)(items) if type(value) in (tuple, set, frozenset) else tuple(items)
     try:
         return deepcopy(value)
     except Exception:  # noqa: BLE001 — an uncopyable leaf must not fail the request
@@ -606,6 +689,34 @@ class Policy:
         if canaries is not self.canaries:
             object.__setattr__(self, "canaries", canaries)
 
+        # `permissions` is declared four lines above `canaries` and got none of this,
+        # although the argument for coercing `canaries` applies to it word for word: the
+        # natural typo silently half-works. `Policy(permissions={"analyst": "read_doc"})`
+        # and the equally natural `{"analyst": ["read_doc"]}` reach `allowed_tools`,
+        # where `allowed |= ...` raised an uncaught `TypeError` — out of `validate()`,
+        # which is documented as *returning* a list of structural problems, so a host
+        # doing `except PolicyError: fail_closed()` took an unhandled exception instead.
+        # A string is one tool name, not a set of characters, for the same reason a
+        # canary is one token.
+        coerced: dict[str, frozenset[str]] = {}
+        changed = False
+        for role, grant in self.permissions.items():
+            if isinstance(grant, frozenset):
+                coerced[role] = grant
+                continue
+            changed = True
+            if isinstance(grant, str):
+                coerced[role] = frozenset({grant})
+                continue
+            try:
+                coerced[role] = frozenset(grant)
+            except TypeError as exc:
+                raise PolicyError(
+                    f"permissions[{role!r}] is a {type(grant).__name__}; a grant is a tool name or a collection of them"
+                ) from exc
+        if changed:
+            object.__setattr__(self, "permissions", coerced)
+
     def contract_for(self, tool_name: str) -> ToolContract | None:
         return self.tools.get(tool_name)
 
@@ -616,7 +727,11 @@ class Policy:
         current: str | None = role
         while current is not None and current not in seen:
             seen.add(current)
-            allowed |= self.permissions.get(current, frozenset())
+            # `update`, not `|=`: `__post_init__` coerces every grant, but a `Policy`
+            # rebuilt through `dataclasses.replace` on a path that skips it, or a future
+            # gap of the same kind, should degrade rather than raise out of a method
+            # `validate()` calls to *report* problems.
+            allowed.update(self.permissions.get(current, frozenset()))
             current = self.role_inherits.get(current)
         return frozenset(allowed)
 

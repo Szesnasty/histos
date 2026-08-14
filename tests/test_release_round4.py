@@ -20,6 +20,7 @@ from histos import (
     Gate,
     JSONLAuditSink,
     Policy,
+    PolicyError,
     Principal,
     Schema,
     ToolContract,
@@ -562,3 +563,180 @@ def test_a_cycle_in_the_chain_does_not_hang():
     first, second = ValueError("a"), ValueError("b")
     first.__cause__, second.__cause__ = second, first
     assert not _exception_text(first)[1]
+
+
+# ── the trust anchor and the ruleset are read-only all the way down ───────
+
+
+def _wire_policy() -> Policy:
+    from histos.contracts import Constraint
+
+    return Policy(
+        tools={
+            "wire": ToolContract(
+                name="wire",
+                args=Schema({"amount": Field(type="integer", maximum=500)}),
+                access="write",
+                constraints=(Constraint("amount", "le", value=500),),
+            )
+        },
+        permissions={"clerk": frozenset({"wire"})},
+    )
+
+
+def test_a_schema_field_map_cannot_be_edited_under_the_policy_hash():
+    """`Schema` is frozen and its `.fields` was a plain mutable dict, so
+    `gate.policy.tools["wire"].args.fields["amount"] = Field(type="integer")` removed a
+    `maximum` from the live ruleset while `_policy_hash` still named the pre-edit hash.
+    The same end state as the `|=` finding, through the container the wrapper missed."""
+    gate_ = Gate(_wire_policy())
+    with pytest.raises(TypeError):
+        gate_.policy.tools["wire"].args.fields["amount"] = Field(type="integer")
+
+
+def test_a_bound_principals_nested_attribute_cannot_be_edited():
+    """One level below where the guarantee stopped."""
+    who = Principal(role="clerk", identity="c", attributes={"tenants": ["acme"], "meta": {"tier": "gold"}})
+    with pytest.raises(TypeError):
+        who.attributes["tenants"].append("evil-corp")
+    with pytest.raises(TypeError):
+        who.attributes["meta"]["tier"] = "platinum"
+
+
+def test_a_read_only_attribute_still_behaves_like_the_type_it_replaced():
+    """A tuple would have been shorter and would silently flip constraint verdicts:
+    `Constraint(..., "eq", value=["acme"])` stops matching a tuple."""
+    import copy
+    import pickle
+
+    who = Principal(role="clerk", identity="c", attributes={"tenants": ["acme"]})
+    tenants = who.attributes["tenants"]
+    assert isinstance(tenants, list) and tenants == ["acme"]
+    assert copy.deepcopy(tenants) == ["acme"]
+    assert pickle.loads(pickle.dumps(tenants)) == ["acme"]
+
+
+def test_a_bound_tool_still_receives_something_it_may_mutate():
+    """The anchor is immutable; a handout is a plain copy. Refusing a tool body its own
+    argument would be a behaviour change with nothing to show for it."""
+    from histos.contracts import Binding
+
+    seen: list[list[str]] = []
+
+    def read(tenants: list[str]) -> str:
+        seen.append(list(tenants))
+        tenants.append("scratch")  # ordinary, and must not raise
+        return "ok"
+
+    policy = Policy(
+        tools={
+            "read": ToolContract(
+                name="read",
+                args=Schema({"tenants": Field(type="array", item_type="string")}),
+                bindings=(Binding(field="tenants", principal_attr="tenants"),),
+            )
+        },
+        permissions={"ok": frozenset({"read"})},
+    )
+    who = Principal(role="ok", identity="i", attributes={"tenants": ["acme"]})
+    safe = Gate(policy).wrap(read, name="read")
+    with use_principal(who):
+        safe(tenants=[])
+    assert seen == [["acme"]]
+    assert who.attributes["tenants"] == ["acme"], "the tool reached the anchor"
+
+
+def test_a_grant_written_as_a_string_is_one_tool_and_not_a_set_of_letters():
+    """`canaries` got this coercion and `permissions`, four lines above it, did not —
+    and `allowed |= "read_doc"` raised an uncaught TypeError out of `validate()`, which
+    is documented as *returning* structural problems."""
+    policy = Policy(
+        tools={"read_doc": ToolContract(name="read_doc", args=Schema({}))},
+        permissions={"analyst": "read_doc"},  # type: ignore[dict-item]
+    )
+    assert policy.allowed_tools("analyst") == frozenset({"read_doc"})
+    assert isinstance(policy.validate(), list)
+
+
+def test_a_grant_written_as_a_list_is_coerced_too():
+    policy = Policy(
+        tools={"a": ToolContract(name="a", args=Schema({})), "b": ToolContract(name="b", args=Schema({}))},
+        permissions={"analyst": ["a", "b"]},  # type: ignore[dict-item]
+    )
+    assert policy.allowed_tools("analyst") == frozenset({"a", "b"})
+
+
+# ── wrap identity is about the tool, not the object ──────────────────────
+
+
+def _one_tool(name: str = "t") -> Policy:
+    return Policy(
+        tools={name: ToolContract(name=name, args=Schema({}))},
+        permissions={"r": frozenset({name})},
+    )
+
+
+def test_re_protecting_a_bound_method_is_not_a_collision():
+    """A bound method is built fresh on every attribute access, so `repo.query is
+    repo.query` is False — and re-wrapping after `gate.policy = tightened`, which the
+    library documents as the way to swap a ruleset, was refused at load time with a
+    message telling the caller to pass a name they had already passed."""
+
+    class Repo:
+        def query(self) -> str:
+            return "rows"
+
+    repo = Repo()
+    gate_ = Gate(_one_tool("query"))
+    gate_.wrap(repo.query, name="query")
+    gate_.wrap(repo.query, name="query")  # must not raise
+
+
+def test_two_partials_of_one_function_are_two_tools():
+    """`_unwrap_target` follows `partial.func`, so these reduced to the same object and
+    two genuinely different tools passed the check."""
+    import functools
+
+    def send(channel: str, msg: str | None = None) -> str:
+        return f"{channel}:{msg}"
+
+    gate_ = Gate(_one_tool("send"))
+    gate_.wrap(functools.partial(send, "sms"), name="send")
+    with pytest.raises(PolicyError):
+        gate_.wrap(functools.partial(send, "email"), name="send")
+
+
+def test_two_different_functions_are_still_refused():
+    def a() -> int:
+        return 1
+
+    def b() -> int:
+        return 2
+
+    gate_ = Gate(_one_tool())
+    gate_.wrap(a, name="t")
+    with pytest.raises(PolicyError):
+        gate_.wrap(b, name="t")
+
+
+def test_a_gate_does_not_retain_every_tool_it_ever_wrapped():
+    """`_wrappers` is weak and says why; `_wrapped_targets` was added beside it holding
+    the same objects strongly, so a Gate wrapping per-request closures retained every
+    one of them and everything it captured."""
+    import gc
+    import weakref
+
+    def make():
+        payload = bytearray(4096)
+
+        def tool(_p=payload) -> int:
+            return len(_p)
+
+        return tool
+
+    tool = make()
+    ref = weakref.ref(tool)
+    Gate(_one_tool()).wrap(tool, name="t")
+    del tool
+    gc.collect()
+    assert ref() is None, "the Gate is keeping a per-request closure alive"

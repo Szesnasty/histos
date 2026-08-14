@@ -8,7 +8,65 @@ between minor versions — every such change is listed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed — the fourth adversarial pass
+
+The third pass rewrote about 1300 lines. This pass attacked those lines
+specifically, and most of what it found was the same shape: a fix aimed at the
+attack that was reported, blind to the sibling nobody reported. Nothing here is
+a compatibility break for anyone, because nothing is on PyPI yet.
+
+- **`project_output` no longer redacts an entire output because a field held a
+  `datetime`.** Every value outside `str/bytes/int/float/bool/None` was routed
+  through `on_output_violation`, whose default is redact_all. The projector now
+  reads the field names an object publishes — dataclass, NamedTuple, instance
+  `__dict__`, so Pydantic too — and drops the undeclared ones, which closes the
+  leak the refusal was reaching for without taking correct returns down with it.
+  A record keeps its type unless something had to be dropped from it. Slots-only
+  objects stay leaves and are named in the trail; SECURITY.md says why.
+- **`JSONLAuditSink(strict=True)` now reaches the caller.** `Gate._emit` was the
+  library's only caller of `record()`, and its blanket `except Exception` caught
+  the strict re-raise and turned it back into a warning — so the flag did nothing
+  through `protect()`, `gate()` or `Gate`, while the sink's own warning text
+  recommended it as the remedy. `strict` is a public attribute now, so a host sink
+  opts in the same way.
+- **`Gate.audit_failures`** counts decisions that could not be recorded, whether
+  the sink raised or absorbed it. The gap in the trail used to be legible only as
+  a RuntimeWarning, which is not something a monitor reads.
+- **A lost record no longer becomes a lost call under `-W error`.** The warning
+  itself raised, so the totality both sinks document ended at that line.
+- **`verify_chain` no longer reports a log this library wrote as forged.** The
+  respelling check searched the raw line for a `\uXXXX` escape of a printable
+  character; a value holding the *literal text* of one — a regex, a code snippet,
+  a Windows path — is serialised as a doubled backslash and five ordinary
+  characters, which the search found too. Backslash parity is counted now.
+- **Two logs whose paths differ only in case are no longer merged on a
+  case-sensitive volume.** The fold was applied on darwin and win32
+  unconditionally; APFS can be formatted case-sensitive. It merged two tenants'
+  chains, and one tenant calling `rotated()` cleared the other's erasure memory,
+  after which erasing that log and appending verified clean. The volume is
+  measured per directory now.
+- **Ordinary bounded validators load again.** Adjacent repeats over overlapping
+  alphabets were refused by *count*, so `^[a-zA-Z]{1,10}[a-zA-Z0-9]{0,20}$` — a
+  username validator, 0.00 ms — was refused exactly as `\d+\d+` was. They are
+  judged by the product of their caps now, which is what the cost tracks.
+  `sources_from_mcp` skips a tool whose pattern will not load, so this was the
+  screen deleting the tools it exists to protect.
+- **`unique_items` reaches the contract hash**, and is linear rather than
+  quadratic. It was missing from `_schema_structure`, so two policies that enforce
+  differently shared a `content_hash` and `histos drift` reported CLEAN across the
+  flip; and it ran as an equality scan against a growing list at pre-gate step 3,
+  costing 461 ms of held CPU for 8 000 distinct elements. **`contract_sha256` and
+  `content_hash` move again for any contract using it; regenerate locks.**
+- **`histos drift` sees a `servers` repoint on a path item.** OpenAPI resolves
+  `servers` at three levels and the importer read two.
+- **An `ExceptionGroup` is no longer charged to the chain-depth bound.** A
+  40-member `asyncio.TaskGroup` failure came back "chain longer than 16 links" and
+  had its real error redacted away.
+- **An `async def` yield fixture is no longer refused at setup**, nor is the
+  `@asynccontextmanager` workaround the refusal recommends.
+- **A malformed OpenAPI node is a refusal, not a traceback.** Seven of eight
+  escaped as `AttributeError`, so the per-tool skip did not apply and `histos
+  import` wrote nothing.
 
 ## [0.1.0] - 2026-08-12
 

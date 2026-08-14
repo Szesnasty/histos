@@ -318,13 +318,35 @@ def _coerce_policy(policy: PolicySource) -> Policy:
         # record that attests a ruleset which did not decide is the one failure the
         # trail cannot survive, so the ruleset a Gate owns cannot be edited in place at
         # all. Swap it with `gate.policy = ...`, which re-hashes.
+        #
+        # One level was not deep enough. `ToolContract.args` hands out a `Schema`, which
+        # is frozen, whose `.fields` is a plain mutable dict — so
+        # `gate.policy.tools["wire"].args.fields["amount"] = Field(type="integer")`
+        # removed a `maximum` from the live ruleset the engine consults on the next call
+        # while `_policy_hash` still named the pre-edit hash. Identical end state to the
+        # `|=` edit above, reached through the container the wrapper did not cover.
         return replace(
             policy,
-            tools=ReadOnlyDict(dict(policy.tools)),
+            tools=ReadOnlyDict({name: _read_only_contract(c) for name, c in policy.tools.items()}),
             permissions=ReadOnlyDict(dict(policy.permissions)),
             role_inherits=ReadOnlyDict(dict(policy.role_inherits)),
         )
     return load_policy(policy)
+
+
+def _read_only_contract(contract: ToolContract) -> ToolContract:
+    """The same contract with its argument and return field maps made read-only."""
+    args = _read_only_schema(contract.args)
+    returns = _read_only_schema(contract.returns)
+    if args is contract.args and returns is contract.returns:
+        return contract
+    return replace(contract, args=args, returns=returns)
+
+
+def _read_only_schema(schema: Schema | None) -> Schema | None:
+    if schema is None or isinstance(schema.fields, ReadOnlyDict):
+        return schema
+    return replace(schema, fields=ReadOnlyDict(dict(schema.fields)))
 
 
 def _resolve_mode(mode: str | None, enforcement: str | None) -> str:
@@ -379,6 +401,87 @@ def _unwrap_target(fn: Callable[..., Any]) -> Callable[..., Any]:
             return target
         target = unwrapped
     return target
+
+
+def _wrap_identity(fn: Any) -> Any:
+    """The value that answers "is this the same *tool*", which is not "the same object".
+
+    `_unwrap_target` is the wrong identity for that question in both directions.
+
+    A bound method is constructed fresh on every attribute access, so
+    `repo.query is repo.query` is False — and re-protecting a tool set built by the same
+    wiring function, which is the documented way to swap a ruleset (`gate.policy =
+    tightened`, then re-wrap), was refused at load time with a message telling the caller
+    to "pass name= to say which is which" when they had passed the only name there is.
+    A false refusal at load time is an outage. Bound methods compare equal on
+    `__self__`/`__func__`, so `==` answers it.
+
+    In the other direction `_unwrap_target` follows `functools.partial.func`, so
+    `partial(send, "sms")` and `partial(send, "email")` reduced to the same target and
+    two genuinely different tools passed the check. The bound arguments are part of the
+    tool, so they are part of the key.
+    """
+    if isinstance(fn, functools.partial):
+        return (_unwrap_target(fn), fn.args, tuple(sorted(fn.keywords.items())))
+    return _unwrap_target(fn)
+
+
+class _IdentityRef:
+    """A weak hold on a wrap identity, so a Gate does not keep every tool it ever saw.
+
+    `_wrappers` is weak and says why in its own comment; `_wrapped_targets` was added
+    beside it holding the same objects *strongly* and never pruned, which quietly undid
+    that. A long-lived Gate wrapping per-request or per-tenant closures — a factory-built
+    tool set, an MCP session's tools — then retained every closure and everything it
+    captured for the life of the process.
+
+    A dead reference reads as "no previous target", and that is the right answer rather
+    than a hole. The wrapper this Gate handed back closes over the tool, so as long as
+    the caller holds the wrapper — which they must, since it is the only way to call the
+    tool — the target is alive and the collision is still refused. A target that has
+    been collected is one whose wrapper was thrown away: unreachable, uncallable, and
+    nothing another tool can collide with. Both module-level functions and discarded
+    lambdas-with-a-kept-wrapper are still refused; only the fully discarded one relaxes.
+    """
+
+    __slots__ = ("_key", "_ref")
+
+    def __init__(self, identity: Any) -> None:
+        self._key: Any = None
+        self._ref: Any = None
+        if isinstance(identity, tuple):
+            # A partial's key: hold the callable weakly, the bound arguments by value.
+            target, *rest = identity
+            self._ref = self._weaken(target)
+            self._key = tuple(rest)
+        else:
+            self._ref = self._weaken(identity)
+
+    @staticmethod
+    def _weaken(target: Any) -> Any:
+        # `WeakMethod` for a bound method, because a plain `weakref.ref` to one is dead
+        # on arrival: `repo.query` builds a new bound-method object per access and it is
+        # collected the moment this returns. `WeakMethod` holds `__self__` weakly and
+        # `__func__` strongly and rebuilds the binding, which is the thing whose lifetime
+        # actually matters.
+        if inspect.ismethod(target):
+            try:
+                return weakref.WeakMethod(target)
+            except TypeError:  # pragma: no cover - a method on a non-weakrefable object
+                pass
+        try:
+            return weakref.ref(target)
+        except TypeError:
+            # Not weak-referenceable — a builtin, a C callable. Those are module-level
+            # and immortal in practice, so a strong reference retains nothing that was
+            # going to be collected anyway.
+            return lambda _target=target: _target
+
+    def __call__(self) -> Any:
+        target = self._ref()
+        if target is None:
+            return None
+        return (target, *self._key) if self._key is not None else target
 
 
 # ── wrapper metadata (complete mediation) ────────────────────────────────
@@ -1185,7 +1288,11 @@ class Gate:
             # *constructor* to tolerate one only moved the outage from construction to
             # call time, where it arrived as an uncaught TypeError out of the wrapper
             # with no audit record for a call the policy had already allowed.
-            trusted = _snapshot_value(active.attributes[b.principal_attr])
+            # `readonly=False`: the *anchor* is immutable, a *handout* is a plain copy.
+            # The stored attribute is a ReadOnlyDict/ReadOnlyList so nobody holding the
+            # Principal can edit a bound identity, but a tool mutating the argument it
+            # was given harms nothing and refusing it would break ordinary tool bodies.
+            trusted = _snapshot_value(active.attributes[b.principal_attr], readonly=False)
             if rebound is not None and (b.field not in call_args or call_args[b.field] != trusted):
                 rebound.append(b.field)
             overrides[b.field] = trusted
@@ -1323,8 +1430,8 @@ class Gate:
         # pair does not.
         key = (tool_name, run_async)
         previous = self._wrapped_targets.get(key)
-        target = _unwrap_target(tool)
-        if previous is not None and previous is not target:
+        target = _wrap_identity(tool)
+        if previous is not None and previous() is not None and previous() != target:
             raise PolicyError(
                 f"two different callables are being gated as {tool_name!r} on this Gate. One contract "
                 "cannot describe two tools: pass name= to say which is which."
@@ -1336,7 +1443,7 @@ class Gate:
         # and `coverage()` called it covered. A coverage report that is wrong in the
         # reassuring direction is the one failure it cannot have.
         self._wrapped_tools.add(tool_name)
-        self._wrapped_targets[key] = target
+        self._wrapped_targets[key] = _IdentityRef(target)
         self._register(wrapper)
         return wrapper
 
@@ -1774,7 +1881,7 @@ class Gate:
         with its original traceback intact, so the common case is unchanged.
         """
         post_req = GateRequest(tool_name, call_args, active, phase="post")
-        post, text = self.engine.post_exception(post_req, exc)
+        post, text = self.engine.post_exception(post_req, exc, mutate=self._enforce)
         # `post_exception` reads the exception's *text*, so an exception carrying its
         # payload as a lazy object — `raise ToolError(rows_iterator)` — is the raising
         # half of the same hole `_refuse_uninspectable` closes: `str(exc)` shows
