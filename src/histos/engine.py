@@ -31,6 +31,8 @@ developer-provided** resolver, never from model output.
 from __future__ import annotations
 
 import copy
+import dataclasses
+import enum
 import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
@@ -479,14 +481,48 @@ _PROJECTABLE = (dict, list, tuple, set, frozenset)
 _INSPECTABLE_LEAF = (str, bytes, bytearray, int, float, bool, type(None))
 
 
+def _record_fields(value: Any) -> dict[str, Any] | None:
+    """The author-defined ``name -> value`` bindings this object publishes, or None.
+
+    `project_output` drops undeclared *fields*, and a field is a name a tool author
+    chose. Three shapes publish those names well enough to read them — a dataclass
+    instance, a NamedTuple, and anything keeping its state in an instance `__dict__`
+    (which covers Pydantic v1 and v2 models and every ordinary class). Reading them is
+    strictly better than the two things this code did before: naming the type in the
+    trail and letting the undeclared field egress anyway, or refusing the whole return.
+
+    An `Enum` member is excluded even though it carries a `__dict__` (`_name_`,
+    `_value_`, `_sort_order_`): those are the enum machinery's, not the author's, and a
+    member's value *is* its identity. It belongs with `int`, not with a record.
+
+    The residual is an object whose state lives only in `__slots__` — a user class that
+    declares them, and the stdlib value types that do (`UUID`, `IPv4Address`). Slots
+    cannot separate the two: reading them would project a `UUID` into
+    `{"int": ..., "is_safe": ...}` and destroy the value. So slots-only objects stay
+    leaves, are named in the trail, and are covered by `strict_returns` instead —
+    written down in SECURITY.md rather than half-handled here.
+    """
+    if isinstance(value, (type, enum.Enum)):
+        return None
+    if dataclasses.is_dataclass(value):
+        return {f.name: getattr(value, f.name) for f in dataclasses.fields(value) if hasattr(value, f.name)}
+    names = getattr(value, "_fields", None)
+    if isinstance(value, tuple) and isinstance(names, tuple) and all(isinstance(n, str) for n in names):
+        return {n: getattr(value, n) for n in names if hasattr(value, n)}
+    state = getattr(value, "__dict__", None)
+    if isinstance(state, dict) and state:
+        return {k: v for k, v in state.items() if isinstance(k, str)}
+    return None
+
+
 def _projectable(value: Any) -> bool:
     """Whether the projector can act on this shape at all.
 
     `isinstance(out, tuple)` was the test and a `NamedTuple` passes it — so the
     projector rebuilt the container, returned each non-dict element untouched, dropped
     nothing, and reported the clean result the guard was written to prevent. A tuple
-    subclass carries its fields by *name*, which is exactly what the projector cannot
-    read, so a tuple is asked by exact type.
+    subclass carries its fields by *name*, so a tuple is asked by exact type and the
+    named shapes go through `_record_fields`, which can read those names.
 
     Only a tuple. Answering *every* container by exact type was the overcorrection, and
     it refused the shapes a real tool returns most often: `Counter`, `OrderedDict`,
@@ -494,7 +530,7 @@ def _projectable(value: Any) -> bool:
     rebuilds correctly, because a dict subclass still carries its data under keys and a
     list subclass still carries it positionally. Neither hides a field behind a name.
     """
-    return isinstance(value, (dict, list, set, frozenset)) or type(value) is tuple
+    return isinstance(value, (dict, list, set, frozenset)) or type(value) is tuple or _record_fields(value) is not None
 
 
 def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], list[str]]:
@@ -525,10 +561,30 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], 
         # undeclared to drop". The top-level guard refused that exact value.
         if isinstance(o, (list, set, frozenset)) or type(o) is tuple:
             return _rebuild_container(o, [go(x) for x in o])
-        # A value the projector cannot enter. It is returned as it came — there is
-        # nothing else it can honestly do — but it is *named*, so the audit record can
-        # tell "there was nothing undeclared to drop" from "there was something here
-        # nobody could look inside", which the trail could not distinguish before.
+        # An object that publishes its field names: read them and drop the undeclared
+        # ones, which is what the knob promises and what neither previous behaviour did.
+        # The result is a plain mapping, because a record minus a required field cannot
+        # be rebuilt as itself — but only when something actually had to go, so a
+        # correctly declared return keeps its type and a caller's `.field` access with
+        # it. That is the same bargain a dict gets: unchanged unless there was something
+        # to remove.
+        fields = _record_fields(o)
+        if fields is not None:
+            kept_fields: dict[str, Any] = {}
+            changed = False
+            for name, value in fields.items():
+                if name not in allowed:
+                    dropped.append(name)
+                    changed = True
+                    continue
+                projected = go(value)
+                changed = changed or projected is not value
+                kept_fields[name] = projected
+            return kept_fields if changed else o
+        # A value the projector cannot enter — a slots-only object, or a C type keeping
+        # its state where no Python attribute shows it. It is returned as it came, and
+        # it is *named*, so the audit record can tell "there was nothing undeclared to
+        # drop" from "there was something here nobody could look inside".
         if not isinstance(o, _INSPECTABLE_LEAF):
             opaque.append(type(o).__name__)
         return o
@@ -1191,31 +1247,18 @@ class Engine:
             out, dropped, opaque = _project_output(out, frozenset(contract.returns.fields))
             redactions.extend(f"drop:{k}" for k in dict.fromkeys(dropped))
             redactions.extend(f"output:uninspectable:{name}" for name in dict.fromkeys(opaque))
-            # Named is not enough. `project_output` is deny-by-default on the output
-            # surface, and its whole reason for existing is the undeclared field a
-            # secret hides in, out of reach of name-based redaction. An object the
-            # projector cannot enter is precisely that field, one level down — so it
-            # gets the same answer the top-level guard above gives, through the same
-            # knob, instead of egressing with a note in the trail saying it did.
-            if opaque:
-                kinds = ", ".join(dict.fromkeys(opaque))
-                if contract.on_output_violation == "deny":
-                    return GateDecision(
-                        Effect.DENY,
-                        "output_schema",
-                        f"project_output is set but the return contains a {kinds} the projector cannot "
-                        "enter, so an undeclared field inside it could not be dropped",
-                    ), None
-                if contract.on_output_violation != "allow":
-                    return (
-                        GateDecision(
-                            Effect.REDACT,
-                            "output_schema",
-                            f"project_output is set but the return contains a {kinds} the projector cannot enter",
-                            redactions=(*redactions, "output:redacted_all"),
-                        ),
-                        "[REDACTED: tool output could not be projected]",
-                    )
+            # Nothing more than naming it. This used to route every `opaque` entry
+            # through `on_output_violation`, whose default is redact_all, on the
+            # reasoning that an object the projector cannot enter is exactly the
+            # undeclared field one level down. The reasoning was right about records and
+            # wrong about the set it was applied to: `opaque` holds everything outside
+            # `_INSPECTABLE_LEAF`, so a declared field holding a `datetime`, `Decimal`,
+            # `UUID` or `Path` — ordinary values, no undeclared field anywhere near them
+            # — replaced the entire tool output with a redaction string. `_record_fields`
+            # now enters the shapes that really can hide a field, which is what that
+            # block was reaching for; what is left here is a *value* the projector
+            # cannot read, and a value sitting under a declared key is not an
+            # undeclared field. `strict_returns` is the knob for refusing those.
 
         # 1. Canary leak in the output → redact verbatim *and* normalized tokens
         #    anywhere in the structure, then ask the pre-gate's question of the whole

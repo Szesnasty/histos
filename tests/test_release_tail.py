@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import datetime
+import decimal
 import enum
 import hashlib
 import hmac
@@ -15,6 +17,7 @@ import json
 import os
 import pathlib
 import typing
+import uuid
 
 import pytest
 
@@ -340,7 +343,16 @@ def test_a_tool_with_no_budget_leaves_no_permanent_counter():
 # ── T-31: a knob that cannot apply says so ───────────────────────────────
 
 
-def test_project_output_on_an_unprojectable_return_is_not_silently_skipped():
+def test_project_output_on_a_dataclass_return_drops_the_undeclared_field():
+    """A dataclass publishes its field names, so the projector reads them.
+
+    This used to be answered twice, both wrong. First the dataclass was walked past
+    untouched and `secret` egressed with `redactions: []` — indistinguishable from
+    nothing-to-drop. Then it was refused whole, which stopped the leak and took every
+    correctly declared return down with it. Reading the names is what the knob promises
+    and the only answer that neither leaks nor refuses.
+    """
+
     @dataclasses.dataclass
     class Row:
         public: str
@@ -361,9 +373,12 @@ def test_project_output_on_an_unprojectable_return_is_not_silently_skipped():
     def rows() -> Row:
         return Row(public="fine", secret="leak")
 
+    sink = InMemoryAuditSink()
     with use_principal(Principal(role="ok", identity="i")):
-        out = gate(rows, policy=policy, name="t")()
-    assert isinstance(out, str) and "could not be projected" in out
+        out = gate(rows, policy=policy, audit=sink, name="t")()
+    assert out == {"public": "fine"}, "the declared field did not survive projection"
+    assert "leak" not in repr(out)
+    assert "drop:secret" in sink.entries[-1]["redactions"]
 
 
 # ── T-37: a document too deep is a policy error, not a crash ─────────────
@@ -519,9 +534,10 @@ def test_a_chain_longer_than_the_bound_is_dropped_rather_than_reported_clean():
     assert CANARY not in str(exc.value)
 
 
-def test_a_namedtuple_return_is_not_silently_unprojected():
+def test_a_namedtuple_return_is_projected_field_by_field():
     """It is a tuple, so it passed the guard, and the projector then rebuilt it and
-    dropped nothing — the exact outcome the guard was written to prevent."""
+    dropped nothing — the exact outcome the guard was written to prevent. A NamedTuple
+    publishes `_fields`, so the names are readable and the undeclared one goes."""
     from typing import NamedTuple
 
     class Row(NamedTuple):
@@ -538,16 +554,23 @@ def test_a_namedtuple_return_is_not_silently_unprojected():
     )
     with use_principal(Principal(role="ok", identity="i")):
         out = gate(lambda: Row("fine", "leak"), policy=policy, name="t")()  # noqa: E731
-    assert isinstance(out, str) and "could not be projected" in out
+    assert out == {"public": "fine"} and "leak" not in repr(out)
 
 
 def test_a_value_the_projector_could_not_enter_is_named_in_the_record():
     """ "Nothing undeclared to drop" and "something nobody could look inside" used to
-    produce the same audit line."""
+    produce the same audit line.
 
-    @dataclasses.dataclass
+    The example has to be a value whose state is genuinely unreachable — slots only, no
+    instance `__dict__`, not a dataclass, not a NamedTuple. A dataclass used to stand
+    here and no longer belongs: the projector reads those now.
+    """
+
     class Opaque:
-        secret: str
+        __slots__ = ("secret",)
+
+        def __init__(self, secret: str) -> None:
+            self.secret = secret
 
     sink = InMemoryAuditSink()
     policy = Policy(
@@ -561,6 +584,36 @@ def test_a_value_the_projector_could_not_enter_is_named_in_the_record():
     with use_principal(Principal(role="ok", identity="i")):
         gate(lambda: {"public": Opaque("leak")}, policy=policy, audit=sink, name="t")()  # noqa: E731
     assert "output:uninspectable:Opaque" in sink.entries[-1]["redactions"]
+
+
+def test_an_ordinary_scalar_value_does_not_take_the_whole_output_down():
+    """The P0 the previous answer to the line above opened.
+
+    Routing every uninspectable value through `on_output_violation` (default:
+    redact_all) was written for the record that hides a field. It was applied to
+    everything outside `str/bytes/int/float/bool/None`, so a declared field holding a
+    `datetime` — no undeclared field within a mile of it — replaced the entire tool
+    output with a redaction string. Naming it in the trail is the whole of the honest
+    answer for a *value*; refusing records is `strict_returns`' job.
+    """
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t", args=Schema({}), returns=Schema({"when": Field(type="string")}), project_output=True
+            )
+        },
+        permissions={"ok": frozenset({"t"})},
+    )
+    for value in (
+        datetime.datetime(2026, 1, 1, 12, 0),
+        datetime.date(2026, 1, 1),
+        decimal.Decimal("12.30"),
+        uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        pathlib.PurePosixPath("/tmp/x"),
+    ):
+        with use_principal(Principal(role="ok", identity="i")):
+            out = gate(lambda _v=value: {"when": _v}, policy=policy, name="t")()
+        assert out == {"when": value}, f"a declared field holding a {type(value).__name__} was redacted away"
 
 
 # ── the review of the hardening diff: audit.py ───────────────────────────
@@ -836,7 +889,7 @@ def test_a_namedtuple_one_level_down_is_not_projected_as_clean():
         with use_principal(Principal(role="ok", identity="i")):
             out = safe()
         assert "leak" not in repr(out), f"the undeclared field egressed from {type(shape).__name__}"
-        assert any("uninspectable" in r for r in sink.entries[-1]["redactions"])
+        assert "drop:secret" in sink.entries[-1]["redactions"], f"the drop went unrecorded for {type(shape).__name__}"
 
 
 def test_projection_still_enters_the_container_subclasses_a_real_tool_returns():

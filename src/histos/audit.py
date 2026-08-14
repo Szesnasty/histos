@@ -465,7 +465,15 @@ class JSONLAuditSink:
         # call its result without preventing anything. On, for a host whose evidence
         # requirement outranks availability — a regulated trail where a lost record is
         # worse than a failed call. Either way `failed` counts and the warning fires.
-        self._strict = strict
+        #
+        # Public, and read by `Gate._emit`. It used to be private, and the gate wrapped
+        # `record()` in a blanket `except Exception` that caught the strict re-raise and
+        # turned it back into a warning — so `strict=True` behaved identically to
+        # `strict=False` through `protect()`, `gate()` and `Gate`, which is every entry
+        # point the README teaches, while this class's own warning text recommended it
+        # as the remedy. `AuditSink` is a Protocol, so a host's own sink opts into the
+        # same contract just by carrying a truthy `strict`.
+        self.strict = strict
 
     def _path_lock(self) -> threading.Lock:
         """The in-process lock for this log file, shared by every sink writing to it.
@@ -575,14 +583,23 @@ class JSONLAuditSink:
             # failure a distinct string, which defeats the `once` filter and turns a
             # full disk into thousands of warnings. `failed` is the counter; this is the
             # signal that there is one to read.
-            warnings.warn(
+            message = (
                 f"histos: an audit record could not be written to {self.path} "
                 f"({type(exc).__name__}: {exc}). The call itself was unaffected. "
-                "Read JSONLAuditSink.failed for the count, or pass strict=True to raise instead.",
-                RuntimeWarning,
-                stacklevel=2,
+                "Read JSONLAuditSink.failed for the count, or pass strict=True to raise instead."
             )
-            if self._strict:
+            # `-W error` promotes this to an exception, which made the totality above a
+            # claim that held only under the default filters: the warning, not the write
+            # failure, became the thing that took down a call whose side effect had
+            # already happened. A filter is a reporting choice; `strict` is the one that
+            # decides. So when the warning cannot be delivered it goes to stderr, which
+            # cannot be turned into a raise.
+            try:
+                warnings.warn(message, RuntimeWarning, stacklevel=2)
+            except Exception:  # noqa: BLE001 — see above; delivery must not decide the call
+                with contextlib.suppress(Exception):
+                    print(message, file=sys.stderr)
+            if self.strict:
                 raise
 
     def _record(self, entry: dict[str, Any]) -> None:
