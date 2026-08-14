@@ -688,15 +688,22 @@ def _granularity_under(clock: Callable[[], float], limit: float) -> bool:
     is how the first version of this check passed on Windows and left the ladder
     climbing to 4 KiB on a pattern it should have refused at 64 characters.
 
-    Bounded by `limit` itself: a clock that has not moved in that long cannot resolve
-    it, which is the whole question. Costs microseconds on a fine clock and one `limit`
-    once at import on a coarse one.
+    The *size* of the first step, not whether one happened. Asking only whether the
+    clock moved inside the window was a race and behaved like one: Windows' 15.6 ms tick
+    lands inside a 1 ms window about six times in a hundred, so the selection came out
+    fine-grained on some runs and coarse on others, and CI went green and red on the
+    same commit. A step of 15.6 ms answers the question whichever run observes it.
+
+    Bounded by `limit`: a clock that has not moved in that long cannot resolve it
+    either. Costs microseconds on a fine clock and one `limit` once at import on a
+    coarse one.
     """
     started = clock()
     deadline = time.perf_counter() + limit
     while time.perf_counter() < deadline:
-        if clock() > started:
-            return True
+        step = clock() - started
+        if step > 0:
+            return step <= limit
     return False
 
 

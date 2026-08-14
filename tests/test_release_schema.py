@@ -538,7 +538,12 @@ def test_the_probe_refuses_a_clock_too_coarse_to_see_its_own_budget():
     def windows_thread_time() -> float:  # advances only on the 15.6 ms tick
         return ((time.perf_counter() - origin) // tick) * tick
 
-    assert not schema_module._granularity_under(windows_thread_time, _PROBE_BUDGET_S / 50)
+    # Two hundred trials, because asking only whether the clock *moved* inside the
+    # window was a race: the 15.6 ms tick lands inside a 1 ms window about six times in
+    # a hundred, so the selection came out fine-grained on some runs and coarse on
+    # others and CI went green and red on the same commit. The step *size* answers it
+    # whichever run observes it.
+    assert not any(schema_module._granularity_under(windows_thread_time, _PROBE_BUDGET_S / 50) for _ in range(200))
     assert schema_module._granularity_under(time.perf_counter, _PROBE_BUDGET_S / 50)
 
     # Whichever clock gets picked, the property is the same one: it can resolve the
