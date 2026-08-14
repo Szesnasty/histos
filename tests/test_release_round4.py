@@ -286,3 +286,97 @@ def test_the_residual_is_written_down_where_the_projector_is_described():
 
     text = (Path(__file__).resolve().parent.parent / "SECURITY.md").read_text()
     assert "__slots__" in text, "SECURITY.md does not name the shape the projector cannot enter"
+
+
+# ── the audit trail must not cry wolf, and must not merge two tenants ─────
+
+
+def test_a_log_this_library_wrote_verifies():
+    """`verify_chain` reported an honest file as forged.
+
+    The respelling check searched the raw line for a `\\uXXXX` escape of a printable
+    character. A tool argument holding the *literal text* of one — a regex, a code
+    snippet, a Windows path — is serialised by `json.dumps` as a doubled backslash and
+    five ordinary characters, which the search found too. A verifier that fails on a log
+    written one line earlier is worse than no verifier: it is what teaches an operator
+    to stop reading it.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from histos import JSONLAuditSink, verify_chain
+
+    backslash = chr(92)
+    for value in (
+        backslash + "u0041",
+        "regex " + backslash + "d+ then " + backslash + "u0041",
+        "C:" + backslash + "Users" + backslash + "bob",
+    ):
+        log = Path(tempfile.mkdtemp()) / "a.jsonl"
+        JSONLAuditSink(log).record({"effect": "allow", "rule": "allow", "note": value})
+        ok, why = verify_chain(log)
+        assert ok, f"{value!r} was reported as forged: {why}"
+
+
+def test_the_respelling_attack_is_still_caught():
+    import tempfile
+    from pathlib import Path
+
+    from histos import JSONLAuditSink, verify_chain
+
+    log = Path(tempfile.mkdtemp()) / "a.jsonl"
+    JSONLAuditSink(log).record({"effect": "deny", "rule": "rbac"})
+    backslash = chr(92)
+    forged = log.read_text(encoding="utf-8").strip().replace('"deny"', f'"{backslash}u0064eny"')
+    log.write_text(forged + "\n", encoding="utf-8")
+    ok, why = verify_chain(log)
+    assert not ok and "spells a printable character" in why
+
+
+def test_only_an_odd_backslash_run_makes_an_escape():
+    from histos.audit import _respelt_ascii
+
+    backslash = chr(92)
+    for count, is_escape in ((1, True), (2, False), (3, True), (4, False)):
+        line = '{"effect": "' + backslash * count + 'u0064eny"}'
+        assert (_respelt_ascii(line) is not None) is is_escape, f"{count} backslashes"
+
+
+def test_the_erasure_memory_is_keyed_on_a_location_that_survives_the_file(tmp_path):
+    """Keying on `st_ino` was the first answer and forgets at the one moment it is for."""
+    from histos.audit import _path_key
+
+    log = tmp_path / "x.jsonl"
+    log.write_text("{}", encoding="utf-8")
+    before = _path_key(log)
+    log.unlink()
+    assert _path_key(log) == before
+
+
+def test_two_tenants_in_differently_cased_directories_do_not_share_a_key(tmp_path):
+    """Case folding was applied on darwin and win32 unconditionally, which guesses.
+
+    On a case-*sensitive* volume — APFS can be formatted that way, and any mounted image
+    may be — that merged two tenants: the second tenant's first-ever record was written
+    with the first tenant's `prev`, and one tenant calling the published `rotated()`
+    remedy cleared the other's erasure memory, after which erasing that other log and
+    appending verified clean. The fold is measured per directory now, so this holds on
+    either kind of volume: distinct directories are never one key.
+    """
+    from histos.audit import _path_key
+
+    (tmp_path / "Acme").mkdir()
+    (tmp_path / "Zeta").mkdir()
+    assert _path_key(tmp_path / "Acme" / "l.jsonl") != _path_key(tmp_path / "Zeta" / "l.jsonl")
+
+
+def test_two_spellings_of_one_file_still_share_a_key(tmp_path):
+    """The property the fold existed for, kept: on a case-insensitive volume one capital
+    letter must not hand two sinks two locks and two erasure memories."""
+    from histos.audit import _folds_case, _path_key
+
+    if not _folds_case(str(tmp_path)):
+        import pytest as _pytest
+
+        _pytest.skip("this volume is case-sensitive; the two spellings are two files")
+    assert _path_key(tmp_path / "Trail.jsonl") == _path_key(tmp_path / "trail.jsonl")
