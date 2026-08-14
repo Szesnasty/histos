@@ -810,9 +810,26 @@ def test_a_malformed_enum_is_refused_rather_than_dropped(bad):
 def test_a_union_inside_items_is_collapsed_like_one_outside_it():
     """`list[str | None]` — a union the projection handles perfectly one level up —
     refused the whole tool, because `_collapse_union` was applied to the property and
-    not to the element schema beside it."""
+    not to the element schema beside it.
+
+    The element stays *untyped*, and that is the point rather than a shortcoming. The
+    collapse returns a nullability flag, one level up it becomes `Field.nullable` and a
+    null is accepted, and one level down there is no `item_nullable` to put it in — so
+    discarding it turned the refusal into a silent narrowing: `item_type: "string"`, and
+    the gate then denied every call carrying the null the source said was allowed. An
+    untyped element accepts both, which is what the document says.
+    """
     field = _one({"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}]}})
-    assert (field.type, field.item_type) == ("array", "string")
+    assert (field.type, field.item_type) == ("array", None)
+
+    from histos.schema import Schema, validate
+
+    schema = Schema({"xs": field})
+    assert not validate(schema, {"xs": ["a", None]}), "the source allows a null element"
+
+    # The non-nullable union still narrows to the type it collapses to.
+    plain = _one({"type": "array", "items": {"type": "string"}})
+    assert plain.item_type == "string"
 
 
 def test_unique_items_is_carried_and_enforced():

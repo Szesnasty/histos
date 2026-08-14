@@ -357,6 +357,18 @@ def _intersect(target: dict[str, Any], sibling: dict[str, Any], *, where: str) -
                 continue
             except TypeError:
                 pass
+        if key == "properties" and isinstance(merged[key], dict) and isinstance(value, dict):
+            # A `$ref` composes by conjunction, so the intersection of two property maps
+            # is their union — both objects' properties must hold. The fall-through
+            # replaced the map wholesale, which deleted every property the shared
+            # definition declared: the exact "a sibling that widens silently threw away
+            # the shared definition's bound" that `_intersect` was written to stop, left
+            # covering the two composite keywords the object level actually projects.
+            merged[key] = {**merged[key], **value}
+            continue
+        if key == "required" and isinstance(merged[key], list) and isinstance(value, list):
+            merged[key] = list(dict.fromkeys([*merged[key], *value]))
+            continue
         if key in ("type", "pattern", "enum", "const", "format"):
             # Two of these cannot both hold unless they agree, and guessing which the
             # author meant is how a bound disappears. `type` is the sharp one: a `$ref`
@@ -707,10 +719,24 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         # and the element enum were applied here and `_collapse_union` was not, so
         # `list[str | None]` — a union the projection handles perfectly one level up —
         # refused the whole tool.
-        resolved, _ = _collapse_union(resolved, documents, where=f"{where} items")
+        # The nullability flag is *read*, not discarded. One level up the same union
+        # sets `Field.nullable` and a null element is accepted; one level down there is
+        # no `item_nullable`, so throwing the flag away turned a loud refusal into a
+        # silent narrowing — `list[str | None]`, which is exactly what pydantic emits
+        # for `list[Optional[str]]` and the shape this collapse was added for, imported
+        # as `item_type: "string"` and the gate then denied every call carrying a null.
+        # Widening to an untyped element is the honest answer: the source says a null
+        # may be there, and refusing to say more is better than saying the wrong thing.
+        resolved, item_nullable = _collapse_union(resolved, documents, where=f"{where} items")
         items = _fold_const(resolved, where=where, prefix="items.")
         _refuse_unprojected(items, _UNPROJECTED_IN_ITEMS, where=where, prefix="items.")
-        item_type = _resolve_type(items.get("type"), where=f"{where} items")[0]
+        raw_item_type = _resolve_type(items.get("type"), where=f"{where} items")[0]
+        # The sentinel is converted back the same way the property branch three lines
+        # above converts it. It was not, and `Field.__post_init__` validates `type`
+        # against `_TYPE_CHECKS` but never `item_type` — so the sentinel survived into
+        # the contract, `_check_scalar` did `_TYPE_CHECKS.get(spec.item_type, object)`,
+        # and a source saying "an array of nulls" accepted an element of every type.
+        item_type = None if raw_item_type == _NULL_ONLY or item_nullable else raw_item_type
 
     _, pattern = _bound(prop, items, "pattern")
     # An element enum and an element pattern now live in separate fields and are both

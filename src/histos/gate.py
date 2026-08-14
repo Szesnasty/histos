@@ -105,7 +105,14 @@ _current_principal: ContextVar[Principal | None] = ContextVar("histos_principal"
 # two tasks pop each other's tokens and leave both bindings live. A tuple, not a list,
 # so `set()` on it is a rebinding the Context owns and not a mutation every Context that
 # inherited it can see.
-_scope_tokens: ContextVar[tuple[tuple[int, Token[Principal | None]], ...]] = ContextVar(
+# Keyed by the *instance*, not by `id(self)`. An entry holding only an address holds no
+# reference to the object, so a scope entered and never exited leaves an entry whose
+# object is freed — and CPython hands the very next `use_principal(...)` that same
+# address, because `__slots__` makes them all one size. `__exit__` then matched on the
+# recycled address and reset a token belonging to a scope that had nothing to do with
+# it. Holding the instance costs one reference per open scope and makes the key
+# un-reusable by construction.
+_scope_tokens: ContextVar[tuple[tuple[Any, Token[Principal | None]], ...]] = ContextVar(
     "histos_scope_tokens", default=()
 )
 
@@ -261,7 +268,7 @@ class use_principal:  # noqa: N801 — it is spelled and used as a function
     def __enter__(self) -> None:
         _refuse_a_leaking_frame(sys._getframe(1))
         token = _current_principal.set(self._principal)
-        _scope_tokens.set((*_scope_tokens.get(), (id(self), token)))
+        _scope_tokens.set((*_scope_tokens.get(), (self, token)))
         return None
 
     def __exit__(self, *_exc: object) -> None:
@@ -277,7 +284,7 @@ class use_principal:  # noqa: N801 — it is spelled and used as a function
         # unauthenticated tasks deleting four records as an admin.
         stack = _scope_tokens.get()
         for index in range(len(stack) - 1, -1, -1):
-            if stack[index][0] == id(self):
+            if stack[index][0] is self:
                 token = stack[index][1]
                 _scope_tokens.set(stack[:index] + stack[index + 1 :])
                 break

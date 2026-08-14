@@ -118,6 +118,38 @@ def _next_link(exc: BaseException) -> BaseException | None:
     return None if exc.__suppress_context__ else exc.__context__
 
 
+def _hidden_branches(exc: BaseException) -> list[BaseException]:
+    """Every exception in the displayed chain that hides a `__context__` behind it.
+
+    The compensating scan used to be applied to ``exc`` alone, and `_exception_text`
+    stops dead at each `__suppress_context__` it meets — so the ordinary two-level shape
+    was never inspected at all: a repository hides the driver error with
+    ``raise Repo(...) from None``, a service wraps the repository with
+    ``raise Service(...) from repo``, and the driver's secret is in neither the scanned
+    text nor the depth-0 hidden scan, which sees only the service error.
+
+    Walks the same links `_exception_text` walks, by the same rules, and reports the
+    branches it had to step over rather than the text.
+    """
+    found: list[BaseException] = []
+    seen: set[int] = set()
+    pending: deque[BaseException] = deque([exc])
+    while pending and len(seen) < _MAX_EXCEPTION_NODES:
+        current = pending.popleft()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        hidden = current.__context__
+        if current.__suppress_context__ and hidden is not None and hidden is not current.__cause__:
+            found.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        link = _next_link(current)
+        if link is not None:
+            pending.append(link)
+    return found
+
+
 def _exception_text(exc: BaseException, budget: int | None = None) -> tuple[str, bool]:
     """Everything a caller can read off a raised exception, as one string to scan.
 
@@ -1124,14 +1156,31 @@ class Engine:
         # `__cause__` kept the identical object, so no exposure was removed, and it
         # recorded `suppressed_context_detached` about a suppressed branch that did not
         # exist, plus every canary and secret kind a second time.
-        if (
-            will_read
-            and exc.__suppress_context__
-            and exc.__context__ is not None
-            and exc.__context__ is not exc.__cause__
-        ):
-            hidden, hidden_incomplete = _exception_text(exc.__context__, self._output_budget)
-            found = list(canary.find(hidden, self.policy.canaries)) if self.policy.canaries else []
+        #
+        # Every hidden branch in the chain, not only the one on `exc`. The scan was
+        # applied at depth zero while `_exception_text` stops at each suppression it
+        # meets, so the ordinary two-level shape — a repository hiding the driver with
+        # `from None`, a service wrapping the repository — was inspected by neither.
+        detached: list[str] = []
+        scan_canaries = bool(contract is not None and contract.scan_output_for_canary and self.policy.canaries)
+        for holder in _hidden_branches(exc) if will_read else []:
+            branch = holder.__context__
+            if branch is None:  # pragma: no cover - `_hidden_branches` only yields holders
+                continue
+            hidden, hidden_incomplete = _exception_text(branch, self._output_budget)
+            # Both tiers, like every other canary site in this library. Verbatim-only
+            # matching is what this module's own docstring calls the cheapest exit in
+            # the library, and the hidden branch had exactly that. Gated on the
+            # contract's switch too: the visible pass asks `scan_output_for_canary` and
+            # this one asked only whether tokens were planted, so a tool with the
+            # per-tool opt-out had its cause detached on the strength of a scan the
+            # contract had turned off.
+            hidden_tokens: list[str] = []
+            if scan_canaries:
+                hidden_tokens = list(canary.find(hidden, self.policy.canaries))
+                hidden_tokens += [
+                    t for t in canary.find_normalized(hidden, self.policy.canaries) if t not in hidden_tokens
+                ]
             kinds = (
                 [d.kind for d in detectors.scan_string(hidden)] if contract and contract.redact_secret_output else []
             )
@@ -1140,29 +1189,30 @@ class Engine:
             # came back as the *empty string*: nothing found, nothing detached, nothing
             # recorded, ALLOW — reporting clean about text it never read. The main path
             # does the opposite for exactly this case.
-            if found or kinds or hidden_incomplete:
-                # `mutate` is false in observe mode, which is documented as recording
-                # what it would have done and changing nothing. Detaching here ran
-                # inside the engine, before `Gate._finish_exception` consults
-                # `_enforce`, so observe was the one control in the library that
-                # reached into the caller's object.
-                if mutate:
-                    exc.__context__ = None
-                detached = [
-                    *(f"canary:{tok}" for tok in dict.fromkeys(found)),
-                    *(f"secret:{k}" for k in dict.fromkeys(kinds)),
-                    *(["exception:suppressed_context_unread"] if hidden_incomplete else []),
-                    "exception:suppressed_context_detached",
-                ]
-                if not redactions:
-                    # Nothing the caller can *read* changed: the message is untouched and
-                    # so is the exception type, which `raise X from None` deliberately
-                    # chose. What changed is that the hidden branch no longer hangs off
-                    # the object for an error reporter to pick up. An ALLOW with a note,
-                    # not a redaction — swapping the type would punish a leak that never
-                    # reached the text.
-                    return GateDecision(Effect.ALLOW, "allow", redactions=tuple(detached)), text
-                redactions.extend(detached)
+            if not (hidden_tokens or kinds or hidden_incomplete):
+                continue
+            # `mutate` is false in observe mode, which is documented as recording what
+            # it would have done and changing nothing. Detaching here ran inside the
+            # engine, before `Gate._finish_exception` consults `_enforce`, so observe
+            # was the one control in the library that reached into the caller's object.
+            if mutate:
+                holder.__context__ = None
+            detached += [
+                *(f"canary:{tok}" for tok in dict.fromkeys(hidden_tokens)),
+                *(f"secret:{k}" for k in dict.fromkeys(kinds)),
+                *(["exception:suppressed_context_unread"] if hidden_incomplete else []),
+            ]
+        if detached:
+            detached.append("exception:suppressed_context_detached")
+            if not redactions:
+                # Nothing the caller can *read* changed: the message is untouched and so
+                # is the exception type, which `raise X from None` deliberately chose.
+                # What changed is that the hidden branch no longer hangs off the object
+                # for an error reporter to pick up. An ALLOW with a note, not a
+                # redaction — swapping the type would punish a leak that never reached
+                # the text.
+                return GateDecision(Effect.ALLOW, "allow", redactions=tuple(dict.fromkeys(detached))), text
+            redactions.extend(dict.fromkeys(detached))
 
         if redactions:
             return (
