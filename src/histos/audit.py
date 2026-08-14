@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import warnings
@@ -325,6 +326,25 @@ def _duplicate_key(line: str) -> str | None:
     except ValueError:  # already reported as unparseable by the caller
         return None
     return found[0] if found else None
+
+
+# A `\u00XX` escape of a printable ASCII character. `json.dumps` never emits one under
+# any setting, so a line carrying one was not written by a JSON serialiser.
+_ASCII_ESCAPE = re.compile(r"\\u00(?:2[0-9a-fA-F]|[3-6][0-9a-fA-F]|7[0-9a-eA-E])")
+
+
+def _respelt_ascii(line: str) -> str | None:
+    r"""The first `\uXXXX` escape of a printable ASCII character in ``line``, or None.
+
+    The other way a line and the record it parses to can say different things, and the
+    one the duplicate-key check misses. `{"effect": "\u0064eny"}` parses to exactly
+    `deny` — so the chain authenticates it and every hash matches — while a human
+    reading the file, or grepping it for `deny`, finds neither. Nothing legitimate
+    produces it: `json.dumps` escapes control characters and, with `ensure_ascii`,
+    everything above 0x7E, and never a printable ASCII character.
+    """
+    match = _ASCII_ESCAPE.search(line)
+    return match.group(0) if match else None
 
 
 def _path_key(path: Path) -> str:
@@ -672,7 +692,12 @@ class JSONLAuditSink:
 
         Pointing a new sink at the new path needs nothing — that path has no history.
         """
-        _PATH_HIGH_WATER.pop(_path_key(self.path), None)
+        # Under the same lock every other read and write of this map takes. Without it,
+        # a `record()` already past its read of the mark and not yet at its write-back
+        # re-inserts the pre-rotation `(seq, hash)` after the pop — and the next record
+        # on the rotated log is numbered from the old chain again.
+        with self._path_lock():
+            _PATH_HIGH_WATER.pop(_path_key(self.path), None)
 
     def verify(self) -> bool:
         """Re-walk the file and confirm the hash chain is intact."""
@@ -801,6 +826,12 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
                     f"line {lineno}: the record on disk repeats the key {duplicate!r}, so what a reader sees "
                     "and what the chain authenticates are different values"
                 )
+            respelt = _respelt_ascii(stripped)
+            if respelt is not None:
+                return False, (
+                    f"line {lineno}: the record on disk spells a printable character as {respelt} — it parses "
+                    "to a value no reader of the file can see, and no JSON writer produces that escape"
+                )
             if not matched:
                 return False, f"line {lineno}: hash mismatch — record was altered after it was written"
             prev = str(stored)
@@ -821,7 +852,15 @@ def _verify_tip(log: Path, count: int, tip: str, key: bytes | None) -> tuple[boo
             "not that the end of the log is still there; truncation cannot be ruled out"
         )
     try:
-        rec = json.loads(sidecar.read_text(encoding="utf-8"))
+        text = sidecar.read_text(encoding="utf-8")
+        # The sidecar is the one file whose whole job is to say how long the log is, and
+        # it was exempt from the check every line of the log gets. Keeping the genuine
+        # triple last and prepending a fabricated `records` makes `json.loads` take the
+        # real one — so the MAC still authenticates — while a reader sees the forgery.
+        forged = _duplicate_key(text) or _respelt_ascii(text)
+        if forged is not None:
+            return False, f"tip file {sidecar.name} says two different things about {forged!r}"
+        rec = json.loads(text)
         expected_count = int(rec["records"])
         expected_tip = str(rec["hash"])
         mac = str(rec["mac"])

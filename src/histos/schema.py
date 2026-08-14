@@ -165,7 +165,7 @@ def _transparent(body: Any) -> list[Any]:
     return items
 
 
-def _separates(separator: int, rest: Any) -> bool:
+def _separates(separator: frozenset[int], rest: Any) -> bool:
     """Whether ``separator`` really marks an iteration boundary in a body.
 
     Three conditions, and the middle two are the ones that caught this out. The rest of
@@ -179,16 +179,16 @@ def _separates(separator: int, rest: Any) -> bool:
     admitted a genuinely exponential pattern, which is why nullability is checked here
     rather than assumed away.
     """
-    if rest is None:
+    if rest is None or not separator:
         return False
     firsts, lasts, nullable = rest
     if nullable or firsts is None or lasts is None:
         return False
-    return separator not in firsts and separator not in lasts
+    return separator.isdisjoint(firsts) and separator.isdisjoint(lasts)
 
 
 def _anchored_body(body: Any) -> bool:
-    """Whether a repeat body opens with a separator its own tail cannot produce.
+    r"""Whether a repeat body opens with a separator its own tail cannot produce.
 
     ``(?:,\\d+)*`` and ``(?:-[a-z0-9]+)*`` are how every list and slug pattern is
     written, and they are safe for a reason the nesting rule cannot see: each iteration
@@ -196,16 +196,38 @@ def _anchored_body(body: Any) -> bool:
     exactly one way to split the input across iterations and nothing to backtrack over.
     ``(?:\\d+)*`` has no such separator and is the classic bomb.
 
-    Deliberately narrow — one leading literal, and only when the remainder of the body
-    cannot itself start with that character. Anything less certain falls through to the
-    rules below, because being wrong here means admitting a bomb.
+    Deliberately narrow — one leading item of fixed width, and only when the remainder
+    of the body cannot itself start or end with anything that item can match. Anything
+    less certain falls through to the rules below, because being wrong here means
+    admitting a bomb.
+
+    A *class*, not only a literal. The test that matters is disjointness from the rest
+    of the body, and `[-_]`, `[.:]` and `[/\\]` answer it exactly as `-` does — they
+    are how a real pattern spells "either of these two delimiters". Insisting on a bare
+    `LITERAL` refused `^(?:[a-z]+[-_]){2,4}$` and `^(?:\w+[/\\]){1,8}$` while accepting
+    the single-delimiter spelling of the same shape, both measured at 0.0 ms.
     """
     items = _transparent(body)
-    if len(items) < 2 or items[0][0] is not _re_const.LITERAL:
+    if len(items) < 2:
         return False
-    separator = items[0][1]
+    separator = _fixed_width_alphabet(items[0])
     rest = _edges(_re_parser.SubPattern(body.state, items[1:]))
     return _separates(separator, rest)
+
+
+def _fixed_width_alphabet(item: Any) -> frozenset[int]:
+    """The characters a one-character item can match, or empty if it is not one.
+
+    A separator has to consume exactly one character to mark a boundary, so a repeat, a
+    group or an anchor is not one however narrow its alphabet.
+    """
+    edges = _edges(item)
+    if edges is None:
+        return frozenset()
+    firsts, lasts, nullable = edges
+    if nullable or firsts is None or lasts is None or firsts != lasts:
+        return frozenset()
+    return firsts
 
 
 def _terminated_body(body: Any) -> bool:
@@ -216,9 +238,9 @@ def _terminated_body(body: Any) -> bool:
     marked by a character the body cannot otherwise match, so the split is unique.
     """
     items = _transparent(body)
-    if len(items) < 2 or items[-1][0] is not _re_const.LITERAL:
+    if len(items) < 2:
         return False
-    separator = items[-1][1]
+    separator = _fixed_width_alphabet(items[-1])
     return _separates(separator, _edges(_re_parser.SubPattern(body.state, items[:-1])))
 
 
