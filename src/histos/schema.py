@@ -1155,10 +1155,34 @@ class Field:
                 f"{self.type!r} — it would read as a bound and enforce nothing",
                 code="invalid_field",
             )
-        if self.min_items is not None and self.max_items is not None and self.min_items > self.max_items:
+        # Every twin pair, not just the array one. The identical contradiction in the
+        # pairs declared a few lines above and below — `min_length`/`max_length`,
+        # `minimum`/`maximum`, `exclusive_minimum`/`exclusive_maximum` — constructed
+        # fine, `Policy.validate()` returned `[]`, and every value was then denied at
+        # call time with `arg_schema`: a field nothing can satisfy, discovered in
+        # production rather than at load.
+        for low, high in (
+            ("min_items", "max_items"),
+            ("min_length", "max_length"),
+            ("minimum", "maximum"),
+            ("exclusive_minimum", "exclusive_maximum"),
+        ):
+            lo, hi = getattr(self, low), getattr(self, high)
+            if lo is not None and hi is not None and lo > hi:
+                raise PolicyError(
+                    f"{low} {lo} is greater than {high} {hi}, so no value can ever satisfy this field",
+                    code="invalid_field",
+                )
+        # The exclusive pair is unsatisfiable when equal too: nothing is both strictly
+        # above and strictly below the same number.
+        if (
+            self.exclusive_minimum is not None
+            and self.exclusive_maximum is not None
+            and self.exclusive_minimum == self.exclusive_maximum
+        ):
             raise PolicyError(
-                f"min_items {self.min_items} is greater than max_items {self.max_items}, so no value can "
-                "ever satisfy this field",
+                f"exclusive_minimum and exclusive_maximum are both {self.exclusive_minimum}, so no value "
+                "can ever satisfy this field",
                 code="invalid_field",
             )
         if self.multiple_of is not None and self.multiple_of == 0:

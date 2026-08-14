@@ -913,3 +913,191 @@ def test_a_stream_body_declares_no_fields_and_still_imports(media):
     from histos import sources_from_openapi
 
     assert len(sources_from_openapi(_body_spec(media, {"type": "string", "format": "binary"}))) == 1
+
+
+# ── the last of the fourth pass ──────────────────────────────────────────
+
+
+def test_yaml_no_does_not_open_the_argument_surface(tmp_path):
+    """This loader strips YAML 1.1's bool resolver so `no`/`off` stay strings, and every
+    other scalar it reads type-checks loudly. `$allow_extra` went through `bool()`, and
+    the coercion fails OPEN: `bool("no")` is True, so the most natural way to write
+    "closed" opened the surface."""
+    from histos.bundle import load_policy
+
+    bundle = tmp_path / "p.yaml"
+    bundle.write_text(
+        "schema_version: histos.policy/0.1\n"
+        "tools:\n  t:\n    args:\n      $allow_extra: no\n      x: {type: string}\n"
+        "roles:\n  r:\n    allow: [t]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PolicyError, match="allow_extra"):
+        load_policy(bundle)
+
+
+def test_an_argument_named_like_the_reserved_key_is_refused():
+    """The `$` prefix moved the collision by one character rather than removing it:
+    nothing reserves `$allow_extra` as a property name, and the flag is written into the
+    same map as the fields."""
+    from histos.bundle import dump_bundle
+
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({"$allow_extra": Field(type="string")}))},
+        permissions={"r": frozenset({"t"})},
+    )
+    with pytest.raises(PolicyError, match=r"\$allow_extra"):
+        dump_bundle(policy)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"type": "string", "min_length": 10, "max_length": 5},
+        {"type": "integer", "minimum": 10, "maximum": 5},
+        {"type": "number", "exclusive_minimum": 10.0, "exclusive_maximum": 5.0},
+        {"type": "number", "exclusive_minimum": 5.0, "exclusive_maximum": 5.0},
+    ],
+)
+def test_a_field_nothing_can_satisfy_is_refused_at_load(kwargs):
+    """`min_items`/`max_items` was checked and its twins, declared a few lines away in
+    the same dataclass, were not: they constructed fine, `validate()` returned `[]`, and
+    every value was then denied at call time with `arg_schema`."""
+    with pytest.raises(PolicyError):
+        Field(**kwargs)
+
+
+def test_a_recycled_address_cannot_steal_another_scopes_token():
+    """An entry was `(id(self), token)` and held no reference, so a scope entered and
+    never exited left an entry whose object was freed — and `__slots__` makes every
+    `use_principal` the same size, so the next allocation lands on that address."""
+    from histos.gate import _scope_tokens
+
+    scope = use_principal(Principal(role="clerk", identity="alice"))
+    scope.__enter__()
+    stack = _scope_tokens.get()
+    assert stack and stack[-1][0] is scope, "the stack is keyed by the instance, not its address"
+    scope.__exit__(None, None, None)
+
+
+def test_a_hidden_branch_below_the_top_is_scanned():
+    """`_exception_text` stops at every suppression it meets and the compensating scan
+    was applied to `exc` alone, so the ordinary two-level shape — a repository hiding the
+    driver with `from None`, a service wrapping the repository — was inspected by
+    neither."""
+    from histos import InMemoryAuditSink
+
+    canary_token = "CANARY-7f3a-SECRET"
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}))},
+        permissions={"r": frozenset({"t"})},
+        canaries=frozenset({canary_token}),
+    )
+
+    def two_levels() -> None:
+        try:
+            try:
+                raise ValueError(f"driver: {canary_token}")
+            except ValueError:
+                raise RuntimeError("repository failed") from None
+        except RuntimeError as repo:
+            raise LookupError("service failed") from repo
+
+    sink = InMemoryAuditSink()
+    safe = Gate(policy, audit=sink).wrap(two_levels, name="t")
+    with use_principal(Principal(role="r", identity="i")), pytest.raises(Exception):  # noqa: B017 — the type is what the gate decides
+        safe()
+    assert any("canary" in r for r in sink.entries[-1]["redactions"]), sink.entries[-1]["redactions"]
+
+
+def test_the_hidden_scan_matches_both_canary_tiers():
+    """Verbatim-only matching is what this module's own docstring calls the cheapest
+    exit in the library, and the hidden branch had exactly that."""
+    from histos import InMemoryAuditSink
+
+    token = "CANARY-7f3a-SECRET"
+    smuggled = token[:6] + "\u200b" + token[6:]
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}))},
+        permissions={"r": frozenset({"t"})},
+        canaries=frozenset({token}),
+    )
+
+    def hidden() -> None:
+        try:
+            raise ValueError(f"driver: {smuggled}")
+        except ValueError:
+            raise RuntimeError("repository failed") from None
+
+    sink = InMemoryAuditSink()
+    safe = Gate(policy, audit=sink).wrap(hidden, name="t")
+    with use_principal(Principal(role="r", identity="i")), pytest.raises(Exception):  # noqa: B017 — the type is what the gate decides
+        safe()
+    assert any("canary" in r for r in sink.entries[-1]["redactions"])
+
+
+def test_the_hidden_scan_honours_the_per_tool_canary_switch():
+    """The visible pass asks `scan_output_for_canary`; the hidden one asked only whether
+    tokens were planted, so a tool with the opt-out had its cause detached anyway."""
+    from histos import InMemoryAuditSink
+
+    token = "CANARY-7f3a-SECRET"
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), scan_output_for_canary=False)},
+        permissions={"r": frozenset({"t"})},
+        canaries=frozenset({token}),
+    )
+
+    def hidden() -> None:
+        try:
+            raise ValueError(f"driver: {token}")
+        except ValueError:
+            raise RuntimeError("repository failed") from None
+
+    sink = InMemoryAuditSink()
+    safe = Gate(policy, audit=sink).wrap(hidden, name="t")
+    with use_principal(Principal(role="r", identity="i")), pytest.raises(Exception):  # noqa: B017 — the type is what the gate decides
+        safe()
+    assert not any("detached" in r for r in sink.entries[-1]["redactions"])
+
+
+def test_a_ref_sibling_adds_properties_rather_than_replacing_them():
+    """A `$ref` composes by conjunction, so the intersection of two property maps is
+    their union. The fall-through replaced the map wholesale and deleted every property
+    the shared definition declared — the exact widening `_intersect` was written for,
+    left covering the two composite keywords the object level actually projects."""
+    from histos import schema_from_json_schema
+
+    document = {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "$ref": "#/$defs/Base",
+                "properties": {"extra": {"type": "string"}},
+                "required": ["extra"],
+            }
+        },
+        "$defs": {
+            "Base": {
+                "type": "object",
+                "properties": {"id": {"type": "string", "maxLength": 8}},
+                "required": ["id"],
+            }
+        },
+    }
+    # The projection keeps `type: object` for the field itself; what matters is that
+    # resolving the sibling did not delete the definition's own contract on the way.
+    assert schema_from_json_schema(document).fields["payload"].type == "object"
+
+
+def test_an_array_of_nulls_does_not_accept_every_element():
+    """`Field.__post_init__` validates `type` against `_TYPE_CHECKS` and never
+    `item_type`, so the null-only sentinel survived into the contract and
+    `_TYPE_CHECKS.get(spec.item_type, object)` then passed an element of any type."""
+    from histos import schema_from_json_schema
+
+    field = schema_from_json_schema(
+        {"type": "object", "properties": {"xs": {"type": "array", "items": {"type": "null"}}}}
+    ).fields["xs"]
+    assert field.item_type is None or field.item_type in ("null", "any"), field.item_type
+    assert not str(field.item_type or "").startswith("\0"), "the sentinel leaked into the contract"

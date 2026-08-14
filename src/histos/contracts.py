@@ -323,7 +323,13 @@ def _snapshot_value(value: Any, *, readonly: bool = True, _seen: frozenset[int] 
         try:
             return type(value)(items)
         except (TypeError, ValueError):
-            return type(value)(items) if type(value) in (tuple, set, frozenset) else tuple(items)
+            # The degradation arm used to re-call the expression that had just raised
+            # whenever `type(value)` was one of the base types, so the TypeError came
+            # straight back out of `__post_init__`. It fires when an element's own
+            # snapshot became unhashable — `frozenset({Point(1, 2)})` is the shape —
+            # and sharing the container by reference is the same bargain the leaf
+            # branch already makes.
+            return value
     try:
         return deepcopy(value)
     except Exception:  # noqa: BLE001 — an uncopyable leaf must not fail the request

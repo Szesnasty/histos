@@ -342,7 +342,19 @@ def _schema_from_node(where: str, node: Any) -> Schema | None:
     # from a dump/load closed. `histos import --out` therefore wrote a policy that denies
     # arguments the imported source explicitly allows, and `histos import --update` never
     # converged — it re-dumped a different policy every run.
-    allow_extra = bool(node.get("$allow_extra", False))
+    # Type-checked, not coerced. This loader deliberately strips YAML 1.1's bool
+    # resolver so `no`/`off`/`n`/`yes` stay strings, and every other scalar it reads
+    # checks loudly — but this one went through `bool()`, and the coercion fails OPEN:
+    # `bool("no")` is True, so `$allow_extra: no`, the most natural way to write
+    # "closed" in YAML, opened the argument surface.
+    raw_allow_extra = node.get("$allow_extra", False)
+    if not isinstance(raw_allow_extra, bool):
+        raise PolicyError(
+            f"`$allow_extra` in {where} must be true or false, got {raw_allow_extra!r} — YAML's "
+            "`no`/`off` are ordinary strings in a histos bundle, and any string here would read as "
+            "true and open the argument surface"
+        )
+    allow_extra = raw_allow_extra
     return Schema(
         {
             name: _field_from_compact(f"field {name!r} of {where}", spec)
@@ -796,6 +808,17 @@ def _field_to_compact(field: Field) -> dict[str, Any]:
 def _schema_to_node(schema: Schema | None) -> dict[str, Any] | None:
     if schema is None:
         return None
+    # Refused rather than merely made unlikely. The `$` prefix moved the collision by
+    # one character: nothing reserves `$allow_extra` as a property name, a JSON Schema
+    # `properties` key may be any string, and the flag is written into the same map as
+    # the fields — so a tool with an argument spelled exactly that way silently lost it
+    # on the way out and had the argument surface opened on the way back in.
+    if "$allow_extra" in schema.fields:
+        raise PolicyError(
+            "a tool argument named `$allow_extra` cannot be written in this format: the key is "
+            "reserved for the schema's own open/closed flag, and emitting both would make the "
+            "argument and the flag the same entry"
+        )
     node: dict[str, Any] = {name: _field_to_compact(field) for name, field in schema.fields.items()}
     # Emitted only when true, so every closed schema — which is all of them unless a
     # source said otherwise — dumps byte-identically to how it always did.
