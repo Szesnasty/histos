@@ -938,48 +938,77 @@ def test_a_partial_write_does_not_cost_the_whole_log(tmp_path, monkeypatch):
     accepted bytes stayed in an append-only file with no newline, and every later append
     landed on that same physical line — so one transient quota event cost not one record
     but the log, permanently: `verify_chain` said "not valid JSON" there and never
-    recovered."""
+    recovered.
+
+    Injected at `os.write`, which is the layer the append actually uses. It used to go
+    through the buffered handle, and that was the second half of the same bug: the
+    buffer kept whatever the raw layer had not accepted, the rollback truncated the file,
+    and then `close()` flushed the leftover straight back onto it — the torn line
+    restored by the cleanup that exists to prevent it. Both halves are pinned here: the
+    file is intact immediately after the failure, and still intact after the handle has
+    been closed."""
+    key = b"k" * 32
     log = tmp_path / "a.jsonl"
-    sink = JSONLAuditSink(log, key=b"k" * 32)
+    sink = JSONLAuditSink(log, key=key)
     for n in range(3):
         sink.record({"effect": "allow", "rule": "allow", "n": n})
-    assert verify_chain(log, key=b"k" * 32)[0]
+    assert verify_chain(log, key=key)[0]
+    intact = log.read_bytes()
 
-    class TearsOnce:
-        """A handle that accepts half of one big write and then reports ENOSPC."""
+    real_write = os.write
+    torn = {"done": False}
 
-        def __init__(self, real):
-            self._real = real
-            self._torn = False
+    def short_write(fd, data):
+        """Accept a prefix and report a full volume, the way ENOSPC arrives."""
+        if not torn["done"] and len(data) > 40:
+            torn["done"] = True
+            real_write(fd, data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data)
 
-        def write(self, data):
-            if not self._torn and len(data) > 40:
-                self._torn = True
-                self._real.write(data[: len(data) // 2])
-                self._real.flush()
-                raise OSError(27, "File too large")
-            return self._real.write(data)
-
-        def __getattr__(self, name):
-            return getattr(self._real, name)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return self._real.__exit__(*exc)
-
-    real_open = JSONLAuditSink._open_append
-    monkeypatch.setattr(JSONLAuditSink, "_open_append", lambda self: TearsOnce(real_open(self)))
+    monkeypatch.setattr(os, "write", short_write)
     with pytest.warns(RuntimeWarning, match="could not be written"):
         sink.record({"effect": "deny", "rule": "rbac", "identity": "mallory"})
     monkeypatch.undo()
 
-    assert log.read_bytes().endswith(b"\n"), "a torn line was left behind"
-    assert verify_chain(log, key=b"k" * 32)[0], "the log did not survive the failed write"
-    sink.record({"effect": "allow", "rule": "allow", "n": "after"})
-    ok, detail = verify_chain(log, key=b"k" * 32)
+    assert log.read_bytes() == intact, "the failed write left bytes behind"
+    assert sink.failed == 1
+    ok, detail = verify_chain(log, key=key)
     assert ok, detail
+
+    # ...and the log keeps working once the volume has room again.
+    sink.record({"effect": "allow", "rule": "allow", "n": "after"})
+    ok, detail = verify_chain(log, key=key)
+    assert ok, detail
+
+
+def test_a_short_write_with_no_exception_is_also_rolled_back(tmp_path):
+    """`os.write` may return fewer bytes than it was given without raising at all. That
+    is the same torn line arriving quietly."""
+    key = b"k" * 32
+    log = tmp_path / "a.jsonl"
+    sink = JSONLAuditSink(log, key=key)
+    sink.record({"effect": "allow", "rule": "allow"})
+    intact = log.read_bytes()
+
+    real_write = os.write
+    short = {"done": False}
+
+    def half(fd, data):
+        if not short["done"] and len(data) > 40:
+            short["done"] = True
+            return real_write(fd, data[: len(data) // 2])
+        return real_write(fd, data)
+
+    os.write = half  # type: ignore[assignment]
+    try:
+        with pytest.warns(RuntimeWarning, match="could not be written"):
+            sink.record({"effect": "deny", "rule": "rbac"})
+    finally:
+        os.write = real_write  # type: ignore[assignment]
+
+    assert log.read_bytes() == intact
+    assert verify_chain(log, key=key)[0]
 
 
 def test_rotation_has_a_remedy_that_actually_works(tmp_path):

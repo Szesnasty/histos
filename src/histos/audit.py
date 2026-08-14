@@ -25,6 +25,7 @@ Design points:
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import hmac
 import json
@@ -623,10 +624,25 @@ class JSONLAuditSink:
             # and swallowed with it. Truncating back to where the line started leaves the
             # file exactly as it was, and the record is lost the ordinary way, through
             # `failed` and the gap the chain already reports.
+            # Written straight to the descriptor, not through the buffered handle, and
+            # that is the whole point rather than a style choice. `os.fdopen(fd, "a+b")`
+            # is a `BufferedRandom` with an 8 KiB buffer, and a record is far smaller —
+            # so `fh.write()` never reaches the disk and a full volume can only surface
+            # from `fh.flush()`. CPython's flush advances over the bytes the raw layer
+            # accepted and leaves the remainder *in the buffer*. The rollback below then
+            # truncated the file back — freeing exactly the space the leftover needed —
+            # and the `with` statement closed the handle, `close()` flushed, and the
+            # buffered tail landed straight back on the file the rollback had just
+            # repaired. The torn line this code exists to prevent, restored by the
+            # cleanup. `os.write` on an `O_APPEND` descriptor leaves nothing anywhere
+            # for `close()` to replay, and a short return is visible here where it can
+            # be rolled back.
             start = os.fstat(fh.fileno()).st_size
+            payload_bytes = line.encode("utf-8", "surrogatepass")
             try:
-                fh.write(line.encode("utf-8", "surrogatepass"))
-                fh.flush()
+                written = os.write(fh.fileno(), payload_bytes)
+                if written != len(payload_bytes):
+                    raise OSError(errno.ENOSPC, f"wrote {written} of {len(payload_bytes)} bytes")
             except BaseException:
                 with contextlib.suppress(OSError, ValueError):
                     os.ftruncate(fh.fileno(), start)
