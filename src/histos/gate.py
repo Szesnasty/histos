@@ -923,6 +923,11 @@ class Gate:
         self._audit_key = audit_key if audit_key is not None else os.urandom(32)
         self._decision_seq = 0
         self._seq_lock = threading.Lock()
+        # Decisions this Gate could not record, whatever the sink was. `JSONLAuditSink`
+        # counts its own, but `AuditSink` is a Protocol and a host's collector cannot be
+        # made to — so the gap in the trail was legible only as a RuntimeWarning, which
+        # is not something a monitor reads. Alarm on this instead.
+        self.audit_failures = 0
         self._wrapped_tools: set[str] = set()
         # tool name -> the raw callable gated under it, so a second `protect()` call on
         # this Gate cannot quietly enforce a different function against the same contract.
@@ -1924,15 +1929,70 @@ class Gate:
         # effect, so a sink that raises there does not prevent anything: it replaces a
         # completed call's result with the collector's traceback and throws the value
         # away. Reporting the sink is right; letting it take the call with it is not.
+        # `failed` is read either side because the shipped sink is *total*: it absorbs
+        # its own write errors, so the gate saw a clean return and could not count the
+        # loss. That is the ordinary configuration, and it was the one where a host had
+        # nothing to alarm on but a RuntimeWarning.
+        before = getattr(self.audit, "failed", None)
         try:
             self.audit.record(record.to_dict())
-        except Exception as exc:  # noqa: BLE001 — a sink must never decide a call's fate
-            warnings.warn(
-                f"histos: the audit sink {type(self.audit).__name__} raised while recording this call: "
-                f"{type(exc).__name__}: {exc}. The call itself was unaffected, and this record is lost.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        except Exception as exc:  # noqa: BLE001 — only `strict` may decide a call's fate
+            self._sink_failed(exc, phase, executed)
+        else:
+            after = getattr(self.audit, "failed", None)
+            if isinstance(before, int) and isinstance(after, int) and after > before:
+                with self._seq_lock:
+                    self.audit_failures += after - before
+
+    def _sink_failed(self, exc: Exception, phase: str, executed: bool) -> None:
+        """One rule for a sink that raised: only ``strict`` makes it fatal.
+
+        Three separate things were wrong with catching it here and warning.
+
+        *`strict` was inert.* `JSONLAuditSink(strict=True)` re-raises, and this was the
+        only caller of `record()` in the library, so the blanket `except` caught the
+        re-raise and turned it back into a warning. `strict=True` and `strict=False`
+        behaved identically through `protect()`, `gate()` and `Gate` — every entry point
+        the README teaches — while the sink's own warning text named `strict=True` as
+        the remedy. It is honoured here now, on both phases, because "a lost record is
+        worse than a failed call" is a statement about evidence, not about timing.
+
+        *The justification was post-only.* "The side effect already happened, so raising
+        prevents nothing" is true on POST and false on PRE, where the tool has not run
+        and a raising sink is the only thing between an allowed call and an execution
+        with no record of the decision. The default is still to continue — a collector
+        outage should not stop an agent, and enforcement is unaffected either way, as
+        the denial path never reaches the tool — but the message says which side of the
+        call it is on instead of claiming the harmless one, and `audit_failures` counts
+        it for a host that wants to alarm on the gap rather than parse warnings.
+
+        *The warning could raise.* Under ``-W error`` — a perfectly ordinary CI setting
+        — `warnings.warn` raises, so the "totality" the sink documents ended at this
+        line: on POST the side effect stood, the record was lost *and* the caller got a
+        RuntimeWarning instead of the value. A warning filter is a reporting choice, not
+        a security one, so it does not get to decide a call. When the warning cannot be
+        delivered the loss goes to stderr, which cannot be turned into an exception.
+        """
+        with self._seq_lock:
+            self.audit_failures += 1
+        if phase == "post":
+            note = "the call had already run, so its side effect stands"
+        elif executed:
+            note = "the call is about to run with no record of the decision that allowed it"
+        else:
+            note = "the call was refused, and the refusal went unrecorded"
+        message = (
+            f"histos: the audit sink {type(self.audit).__name__} raised while recording this call "
+            f"({phase} phase): {type(exc).__name__}: {exc}. This record is lost and {note}. "
+            "Read Gate.audit_failures for the count, or give the sink strict=True to raise instead."
+        )
+        if getattr(self.audit, "strict", False):
+            raise exc
+        try:
+            warnings.warn(message, RuntimeWarning, stacklevel=3)
+        except Exception:  # noqa: BLE001 — `-W error` is a reporting choice, not a veto
+            with contextlib.suppress(Exception):
+                print(message, file=sys.stderr)
 
 
 def gate(

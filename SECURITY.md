@@ -397,6 +397,33 @@ the same length/pattern caps as a scalar string, but there is no cross-field or
 deep-structure validation. A tool that takes deeply nested arguments must not assume
 the gate validated the inner structure; validate it in the tool, or keep arguments flat.
 
+### `project_output` reads the field names an object publishes, and `__slots__` publishes none it can trust
+
+`project_output=True` is deny-by-default on the return surface: any key not declared in
+`returns` is dropped, so an undeclared field — where a secret hides, out of reach of
+name-based redaction — never egresses. It walks mappings and sequences, and it also
+enters the shapes that publish their field names: **dataclasses, NamedTuples, and any
+object keeping its state in an instance `__dict__`** (which covers Pydantic v1 and v2
+models and every ordinary class). A record it had to drop a field from comes back as a
+mapping, because a record minus a required field cannot be rebuilt as itself; one that
+needed no drop keeps its type.
+
+Two shapes it does **not** enter:
+
+- an object whose state lives only in **`__slots__`**. Slots cannot separate a user's
+  record from a stdlib value type — reading them would project a `UUID` into
+  `{"int": ..., "is_safe": ...}` and destroy the value — so a slots-only object is
+  treated as a leaf;
+- a C extension type that keeps its state where no Python attribute shows it.
+
+Both are **named in the audit record** as `output:uninspectable:<type>`, so the trail
+separates "there was nothing undeclared to drop" from "there was something here nobody
+could look inside". Neither is redacted: a value sitting under a *declared* key is not
+an undeclared field, and treating every uninspectable value as a projection failure
+took ordinary returns — a field holding a `datetime`, a `Decimal`, a `Path` — down with
+it. If you need those refused rather than noted, use `strict_returns`, which is the
+all-or-nothing knob, or declare the field with a type the validator can check.
+
 ### A scope that spans a `yield` is refused by reading frames, and frames can be hidden
 
 A generator has no context of its own — it runs in whichever context resumes it — so a
