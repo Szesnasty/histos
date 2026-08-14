@@ -381,11 +381,25 @@ OpenAPI schema is written by whatever server the user pointed at, and stdlib `re
 no execution bound; screening is what a zero-dependency core can do without swapping
 in a non-stdlib engine.
 
+Adjacent repeats over overlapping alphabets are judged by **how many ways the run can
+split its input** — the product of their caps, each clamped to the 4 096-character
+argument limit — rather than by how many of them there are. `\d+\d+` is 4 096², sixteen
+million splits and 49 ms of held GIL per call, and is refused; `^[a-zA-Z]{1,10}[a-zA-Z0-9]{0,20}$`
+is two hundred splits and 0.00 ms, and loads. Counting instead of multiplying refused
+both, which cost the ordinary username validator its tool at MCP import time — a control
+that silently removes the thing it protects. Anything that gets past the structural
+screen still has to get past a load-time **timing probe**, which measures rather than
+predicts.
+
 The screen is structural and therefore conservative in one direction: it can refuse a
-pattern that would in practice have been fine. It does not claim to catch every
-pathological regex ever written — a polynomial (not exponential) blowup on a very long
-input is still possible, which is why the length cap below is the second bound rather
-than the only one. *(Array arguments are bounded twice: per element by the string
+pattern that would in practice have been fine. Known false positives, all loud at load
+time and all with a working rewrite: a bounded multiline body
+(`^(?:[^\r\n]{0,80}\r?\n){0,50}[^\r\n]{0,80}$`), a comma-separated identifier list whose
+separator is preceded by `\s*`, and `^(?:[A-Z][a-z0-9]*)+$`. In each the boundary is in
+fact forced — by the `\n`, by the `,`, by the case change — and the screen cannot see it.
+It does not claim to catch every pathological regex ever written either: a polynomial
+(not exponential) blowup on a very long input is still possible, which is why the length
+cap below is the second bound rather than the only one. *(Array arguments are bounded twice: per element by the string
 length cap, and in aggregate by a scan budget, so neither an oversized element nor an
 unbounded element count can turn one schema-valid call into a stall.)*
 

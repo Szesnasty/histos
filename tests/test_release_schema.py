@@ -603,20 +603,59 @@ def test_widening_the_separator_admits_none_of_the_bombs(pattern):
         Field(type="string", pattern=pattern)
 
 
-def test_two_adjacent_bounded_repeats_stay_refused_deliberately():
-    """`^[a-z]{1,3}[a-z]{1,3}$` costs 0.0 ms and is refused, and that is the call rather
-    than an oversight. A finite bound does not stop a run accumulating a degree — it
-    caps how much input each rung can eat, and measured on this machine:
+@pytest.mark.parametrize(
+    "cap,runs,verdict",
+    [
+        # The table this rule was originally set from, measured under `re.fullmatch` on
+        # 4 KiB of the pattern's own alphabet failing at the last character:
+        #
+        #     max=  64   2 runs 0.0 ms   3 runs   1.4 ms   4 runs      88 ms
+        #     max= 512   2 runs 1.3 ms   3 runs   656 ms   4 runs  13 226 ms
+        #     max=4096   2 runs 39  ms   3 runs 6 645 ms   (identical to unbounded)
+        #
+        # The first reading of it was "a finite bound does not stop a run accumulating a
+        # degree, so refuse every adjacent pair". That reads the rows down the wrong axis:
+        # what separates 0.0 ms from 13 seconds is not how many repeats there are, it is
+        # the *product* of their caps — the number of ways the run can split its input.
+        # The threshold below is set from that product, and it reproduces every verdict
+        # this table asks for, which counting did not.
+        (64, 2, "load"),  # 4 096 splits, 0.0 ms
+        (64, 3, "load"),  # 262 144, 1.4 ms
+        (64, 4, "refuse"),  # 16.7 M, 88 ms
+        (512, 2, "load"),  # 262 144, 1.3 ms
+        (512, 3, "refuse"),  # 134 M, 656 ms
+        (512, 4, "refuse"),  # 68.7 G, 13.2 s
+        (4096, 2, "refuse"),  # 16.7 M, 39 ms — a bound at the argument cap is not a bound
+        (4096, 3, "refuse"),  # 68.7 G, 6.6 s
+    ],
+)
+def test_the_cost_of_an_adjacent_run_is_its_product_not_its_length(cap, runs, verdict):
+    pattern = "^" + f"[a-z]{{1,{cap}}}" * runs + "$"
+    if verdict == "refuse":
+        with pytest.raises(PolicyError, match="backtrack"):
+            Field(type="string", pattern=pattern)
+    else:
+        Field(type="string", pattern=pattern)
 
-        max=  64   2 runs 0.0 ms   3 runs   1.4 ms   4 runs      88 ms
-        max= 512   2 runs 1.3 ms   3 runs   656 ms   4 runs  13 226 ms
-        max=4096   2 runs 39  ms   3 runs 6 645 ms   (identical to unbounded)
 
-    A bound of 4096 behaves exactly like no bound, because the argument cap is 4096. So
-    any threshold that admits the cheap end is a judgement about where the expensive end
-    starts, and being wrong about it is a hung process holding the GIL. The refusal is
-    loud and names the rewrite, which is this module's stated bargain."""
-    with pytest.raises(PolicyError, match="backtrack"):
-        Field(type="string", pattern=r"^[a-z]{1,3}[a-z]{1,3}$")
-    # ...and the single-repeat spelling an author actually means is fine.
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"^[a-zA-Z]{1,10}[a-zA-Z0-9]{0,20}$",  # a username validator — 200 splits, 0.00 ms
+        r"^\w{1,64}\w{1,64}$",  # 4 096 splits, 0.03 ms
+        r"^[a-z]{1,100}[a-z0-9]{1,100}$",  # 10 000 splits, 0.05 ms
+        r"^[A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}[A-Z0-9]{0,16}$",  # IBAN
+    ],
+)
+def test_an_ordinary_bounded_validator_is_not_refused(pattern):
+    """Counting adjacent repeats refused these, and refusing them buys nothing.
+
+    The username shape is the one that mattered: `sources_from_mcp` skips a tool whose
+    pattern will not load, so an MCP server shipping the most ordinary validator there
+    is lost the tool at import — a control silently removing the thing it protects.
+    """
+    Field(type="string", pattern=pattern)
+
+
+def test_the_single_repeat_spelling_an_author_means_is_still_fine():
     Field(type="string", pattern=r"^[a-z]{2,6}$")
