@@ -262,7 +262,7 @@ def _leaf_separates(op: Any, av: Any, neighbours: list[_Neighbour]) -> bool:
     firsts = points[0]
     if firsts is None:
         return False
-    return all(edges is None or edges[1] is None or firsts.isdisjoint(edges[1]) for _, edges, _ in neighbours)
+    return all(edges is None or edges[1] is None or firsts.isdisjoint(edges[1]) for _, edges, _, _ in neighbours)
 
 
 def _shape_key(node: Any) -> Any:
@@ -407,9 +407,11 @@ def _branch_edges(branches: Any) -> _Edges | None:
     return (frozenset(first), frozenset(last), nullable)
 
 
-# A variable repeat still adjacent to whatever comes next: its shape, its ends, and
-# whether its body is a bare `.` (which the trailing-repeat exemption below has to know).
-_Neighbour = tuple[Any, _Edges | None, bool]
+# A variable repeat still adjacent to whatever comes next: its shape, its ends, whether
+# its body is a bare `.` (which the trailing-repeat exemption below has to know), and how
+# many times it may iterate — clamped to the longest argument the gate will hand it,
+# because a cap above that is not a cap.
+_Neighbour = tuple[Any, _Edges | None, bool, int]
 
 
 def _clashes(a: _Neighbour, b: _Neighbour) -> bool:
@@ -419,18 +421,19 @@ def _clashes(a: _Neighbour, b: _Neighbour) -> bool:
     legal *start* of the later one — which is why `(?:ab)+(?:cd)+` is fine and
     `(?:ab)+(?:bc)+` is not.
     """
-    prev_key, prev_edges, _ = a
-    key, edges, _ = b
+    prev_key, prev_edges, _, _ = a
+    key, edges, _, _ = b
     if edges is not None and prev_edges is not None:
         return bool(prev_edges[1] & edges[0])
     return prev_key == key
 
 
-# How many mutually ambiguous variable repeats may stand in one run.
+# How much work a run of mutually ambiguous variable repeats may cost.
 #
-# One, and the reason is a measurement rather than a preference. Under `re.fullmatch` —
-# which is how the gate applies a pattern — on input built from the pattern's own
-# alphabet and failing at the last character:
+# The rule used to be a *count* — one repeat, and a second one adjacent to it refused the
+# pattern. The measurements it was set from are all unbounded repeats, under
+# `re.fullmatch` (which is how the gate applies a pattern), on input built from the
+# pattern's own alphabet and failing at the last character:
 #
 #     \d+\d+                                     2 runs      49 ms at 4 KiB
 #     [A-Za-z0-9]+[A-Za-z0-9_-]+                 2 runs      38 ms
@@ -439,22 +442,59 @@ def _clashes(a: _Neighbour, b: _Neighbour) -> bool:
 #     ^.+,[^\n]+,[^\n]+$                         3 runs   9 588 ms
 #     [a-z]+[a-z]+[a-z]+[a-z]+                   4 runs  13 800 ms at 500 B
 #
-# So a pair is quadratic with a small constant and a triple is an outage. Admitting
-# pairs was considered and rejected: 49 ms of held GIL per 4 KiB argument is a 20×
-# amplification an attacker can send on repeat, and this module's stated bargain is that
-# a false positive is a loud load-time error naming a rewrite while a false negative is
-# a hung process. Pairs stay refused; the shapes that actually blow up were the ones
-# getting through, and they are what the two fixes below close.
-_MAX_AMBIGUOUS_RUN = 1
+# Counting refuses those correctly and refuses a great deal else with them, because a
+# `+` and a `{1,10}` counted the same. `^[a-zA-Z]{1,10}[a-zA-Z0-9]{0,20}$` — a username
+# validator, and the shape half the MCP servers in the wild ship — was refused at import,
+# as were `^\w{1,64}\w{1,64}$` and `^[a-z]{1,100}[a-z0-9]{1,100}$`. Measured on the same
+# 4 KiB failing input: 0.00 ms, 0.03 ms, 0.05 ms. Refusing those buys nothing and costs
+# the import.
+#
+# What the cost actually tracks is the number of ways the run can split its input, which
+# is the *product* of the caps, not how many of them there are (each cap clamped to
+# `_MAX_PATTERN_INPUT`, since a bound above the longest possible argument is not a bound).
+# Measured on `^[a-z]{1,c}[a-z]{1,c}$` and its three-repeat sibling, same 4 KiB input:
+#
+#     product        pair          triple
+#       1 024      0.008 ms
+#       4 096      0.028 ms      0.157 ms
+#      16 384      0.109 ms      1.278 ms
+#     262 144      1.575 ms      9.937 ms   (c=512 pair / c=128 triple)
+#      16 777 216  37.832 ms     ~600 ms
+#
+# So ~6 ns per split, and a product is a good predictor across both shapes. The threshold
+# is set at four million — about 24 ms predicted, half the probe's 50 ms budget — so the
+# shapes that are genuinely quadratic-with-a-large-constant are still refused at load
+# (`\d+\d+` is 4 096², sixteen million), the cheap bounded ones load, and anything in
+# between still has to get past the timing probe, which measures rather than predicts.
+#
+# The bargain is unchanged: a false positive is a loud load-time error naming a rewrite,
+# a false negative is a hung process. What changed is that the estimate is no longer
+# 200 000× out on the ordinary case.
+_MAX_AMBIGUOUS_SPLITS = 4_000_000
+
+
+def _repeat_cap(av: tuple[Any, ...]) -> int:
+    """How many times this repeat may iterate, clamped to the longest argument."""
+    high = av[1]
+    if high is _re_const.MAXREPEAT:
+        return _MAX_PATTERN_INPUT
+    return min(int(high), _MAX_PATTERN_INPUT)
 
 
 def _neighbour_clash(neighbours: list[_Neighbour], candidate: _Neighbour) -> str | None:
-    """Whether adding ``candidate`` makes the ambiguous run longer than we allow."""
+    """Whether adding ``candidate`` makes the ambiguous run cost more than we allow."""
     clashing = [n for n in neighbours if _clashes(n, candidate)]
-    if len(clashing) < _MAX_AMBIGUOUS_RUN:
+    if not clashing:
         return None
-    _, edges, _ = candidate
-    if edges is not None and any(e is not None for _, e, _ in clashing):
+    splits = candidate[3]
+    for n in clashing:
+        splits *= n[3]
+        if splits > _MAX_AMBIGUOUS_SPLITS:
+            break
+    if splits <= _MAX_AMBIGUOUS_SPLITS:
+        return None
+    _, edges, _, _ = candidate
+    if edges is not None and any(e is not None for _, e, _, _ in clashing):
         return "two repeats in a row that can match the same character, e.g. `[a-z]+[a-z0-9]+`"
     return "the same thing repeated twice in a row, e.g. `\\d+\\d+`"
 
@@ -505,7 +545,7 @@ def _backtracking_risk(
                 return "a variable-length repeat nested inside another repeat, e.g. `(a+)+`"
             dot_repeat = _is_dot(av[2])
             trailing_dot = variable_repeat and tail and op is _re_const.MAX_REPEAT and dot_repeat
-            if trailing_dot and not any(previous_dot for _, _, previous_dot in neighbours):
+            if trailing_dot and not any(previous_dot for _, _, previous_dot, _ in neighbours):
                 # a greedy `.`-repeat with nothing after it swallows the rest of the input on
                 # its first try and never has to give any of it back, so it cannot be the
                 # second half of an ambiguous pair. Refusing it cost `^\s*[-*]\s+.+$` and
@@ -559,7 +599,11 @@ def _backtracking_risk(
             # `\d+\d+` is the canonical quadratic pattern, and putting a separator in
             # front of it was enough to admit it. Measured at 4 168 ms on 2 000
             # characters, while the structurally identical `^\d+\d+\d+$` is refused.
-            neighbour = (_shape_key(av[2]), body_edges, dot_repeat) if variable_repeat and _unbounded(av) else None
+            neighbour = (
+                (_shape_key(av[2]), body_edges, dot_repeat, _repeat_cap(av))
+                if variable_repeat and _unbounded(av)
+                else None
+            )
             if neighbour is not None and not pinned:
                 clash = _neighbour_clash(neighbours, neighbour)
                 if clash is not None:
