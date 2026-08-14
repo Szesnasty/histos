@@ -255,6 +255,14 @@ class use_principal:  # noqa: N801 — it is spelled and used as a function
     ``contextvars.copy_context().run(...)`` (``asyncio.create_task`` and ``TaskGroup``
     already do this per task).
 
+    The refusal is **best-effort**, and SECURITY.md says where it stops. It works by
+    reading the call stack, so it sees the literal spelling, `@contextmanager`
+    producers, `ExitStack`, and a subclass that does not override ``__enter__`` — but a
+    hand-written object that takes this context manager in an ``__enter__`` of its own
+    and releases it later interposes an ordinary frame, and at enter time the stack
+    cannot tell that frame from one that wrote the ``with`` itself. Do not wrap this in
+    a scope object of your own inside a producer.
+
     A class rather than ``@contextmanager`` so that ``__enter__``'s caller is exactly
     one frame up: the check has to name the frame that wrote the ``with``, and through
     ``contextlib``'s own generator machinery that index is a guess.

@@ -66,7 +66,48 @@ a compatibility break for anyone, because nothing is on PyPI yet.
   `@asynccontextmanager` workaround the refusal recommends.
 - **A malformed OpenAPI node is a refusal, not a traceback.** Seven of eight
   escaped as `AttributeError`, so the per-tool skip did not apply and `histos
-  import` wrote nothing.
+  import` wrote nothing. A `requestBody` whose media type this importer cannot
+  project is refused too, when it declares named fields — dropping it produced a
+  policy that denied every argument the document declares. A byte-stream body
+  (`application/octet-stream`, an image) declares no names and still imports.
+- **The read-only guarantee reaches all the way down.** `Schema.fields` was a
+  plain dict inside a frozen `Schema`, so a field could be replaced in a Gate's
+  live ruleset under the pre-edit `policy_hash`; and `Principal.attributes` was a
+  `ReadOnlyDict` whose nested containers were writable, so
+  `attributes["tenants"].append(...)` edited a bound trust anchor. Nested
+  mappings and lists are read-only now (`ReadOnlyList` is a `list` subclass, so
+  constraint comparisons are unchanged); a bound tool still receives an ordinary
+  mutable copy.
+- **`permissions` accepts the spellings `canaries` accepts.**
+  `Policy(permissions={"analyst": "read_doc"})` raised an uncaught `TypeError`
+  out of `validate()`, which is documented as *returning* structural problems.
+- **Re-protecting a tool set no longer fails.** Wrap identity was the unwrapped
+  function object, so a bound method — rebuilt on every attribute access — read
+  as a different tool, and `gate.policy = tightened` followed by a re-wrap was
+  refused at load. Two `functools.partial`s of one function read as the *same*
+  tool, which was the same bug pointing the other way. Targets are also held
+  weakly now, so a Gate no longer retains every per-request closure it wrapped.
+- **A bound outside the type that consults it is refused.**
+  `Field(type="string", maximum=10)` and `Field(type="integer", pattern=...)`
+  loaded clean and enforced nothing. So did every unsatisfiable twin pair —
+  `min_length=10, max_length=5` — which was checked for `min_items`/`max_items`
+  only.
+- **`$allow_extra` is type-checked rather than coerced.** `bool("no")` is True,
+  so `$allow_extra: no` — the natural way to write "closed" in YAML, where this
+  loader deliberately keeps `no` a string — opened the argument surface. An
+  argument literally named `$allow_extra` is refused at dump time.
+- **The suppressed-exception scan reaches every hidden branch**, matches both
+  canary tiers, and honours the per-tool `scan_output_for_canary` switch. It ran
+  at the top level only, so a repository hiding a driver error under a service
+  that wraps the repository was inspected by neither pass.
+- **A `$ref` sibling composes by conjunction.** It could downgrade `x-sensitive`
+  from `secret` to `pii`, delete a numeric bound via a no-op draft-04 boolean,
+  and replace `properties`/`required` instead of taking the union.
+- **`list[Optional[str]]` imports as an untyped element** instead of narrowing to
+  `string` and denying every null the source allows; and the null-only sentinel
+  no longer leaks into `item_type`, where it made every element type pass.
+- **A `Principal` attribute holding a cycle no longer raises**, and the snapshot
+  keeps `defaultdict`, `Counter`, `OrderedDict` and namedtuples as themselves.
 
 ## [0.1.0] - 2026-08-12
 
@@ -103,7 +144,9 @@ nothing is on PyPI yet — which is exactly why they land now rather than in 0.2
   silently did not exist.
 - **`use_principal()` refuses to open inside a generator.** A generator has no
   context of its own, so the binding leaked into the caller and interleaved streams
-  could run as each other.
+  could run as each other. The refusal reads the call stack and is therefore
+  best-effort: a hand-written scope object that takes it in an `__enter__` of its own
+  interposes a frame the check cannot distinguish. SECURITY.md scopes the guarantee.
 - **`Gate.wrap()` refuses a callable that is already gated**, and `protect()` refuses
   two tools sharing one `__name__`, or a lambda.
 - **A Gate's ruleset is read-only.** `gate.policy.permissions[role] |= {...}` took
