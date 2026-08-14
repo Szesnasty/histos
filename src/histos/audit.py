@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import hashlib
 import hmac
 import json
@@ -342,9 +343,28 @@ def _respelt_ascii(line: str) -> str | None:
     reading the file, or grepping it for `deny`, finds neither. Nothing legitimate
     produces it: `json.dumps` escapes control characters and, with `ensure_ascii`,
     everything above 0x7E, and never a printable ASCII character.
+
+    The backslash run in front of it has to be counted, because not every occurrence of
+    those six characters is an escape. A tool argument holding the *literal text* of one
+    — a regex, a code snippet, a fragment of documentation about this very check — is
+    serialised by ``json.dumps`` as a doubled backslash followed by five ordinary
+    characters. Searching the raw line found that too, so ``verify_chain`` reported a log
+    this library had written one line earlier as forged: a verifier crying wolf on an
+    honest file, which is worse than no check at all, because it is what teaches an
+    operator to stop reading it.
+
+    An escape is real only when the backslashes before it are even in number, each pair
+    being one escaped backslash that stands for itself.
     """
-    match = _ASCII_ESCAPE.search(line)
-    return match.group(0) if match else None
+    for match in _ASCII_ESCAPE.finditer(line):
+        backslashes = 0
+        index = match.start()
+        while index > 0 and line[index - 1] == "\\":
+            backslashes += 1
+            index -= 1
+        if backslashes % 2 == 0:
+            return match.group(0)
+    return None
 
 
 def _path_key(path: Path) -> str:
@@ -357,16 +377,62 @@ def _path_key(path: Path) -> str:
     hands two sinks on one file two different locks — on Windows, where `flock` is
     absent, leaving nothing at all serialising them. Both on exactly the two platforms
     this release added to CI.
+
+    Case-folding on darwin and win32 was the first answer, and it guesses. macOS APFS
+    can be formatted case-*sensitive* and any mounted image may be, Windows has ReFS and
+    WSL mounts, and on such a volume the fold over-merges two genuinely different logs.
+    The comment here used to claim the failure direction was the safe one — "a chain
+    reported broken rather than an erasure missed" — and that is not what happens. Two
+    tenants, `Acme/log.jsonl` and `acme/log.jsonl`, on a case-sensitive volume:
+    `acme`'s first-ever record is written with `seq=4` and a `prev` taken from `Acme`'s
+    tip, so it is born broken; and one tenant calling the published remedy `rotated()`
+    on their own sink clears the *other* tenant's `_PATH_HIGH_WATER` entry, after which
+    erasing that other log and appending verifies **clean**. An erasure missed, by the
+    documented recovery procedure, from an unprivileged neighbouring log.
+
+    So ask the filesystem instead of the platform — but ask it the right question. The
+    identity that matters here is the **location**, not the file: `_PATH_HIGH_WATER`
+    exists precisely to remember that a log used to be here after someone deleted it, so
+    keying on ``st_ino`` would forget the moment the file did, which is the one moment it
+    is for. The location is the parent directory's ``st_dev``/``st_ino`` — which survives
+    the log's deletion — plus the name, folded only when that directory's volume really
+    does fold, measured once per directory by :func:`_folds_case`.
     """
     resolved = os.path.realpath(path)
-    # `os.path.normcase` is a no-op on POSIX — it folds case only on Windows — so it
-    # does nothing on macOS, which is where this was demonstrated. Folded on the two
-    # platforms whose filesystems are case-insensitive by default, which are the two
-    # this release added to CI. A case-sensitive APFS volume would over-merge two logs
-    # in one directory differing only in case; that is a pathological place to keep an
-    # audit trail, and the failure direction is the safe one — a chain reported broken
-    # rather than an erasure missed.
-    return resolved.casefold() if sys.platform in ("darwin", "win32") else resolved
+    parent = os.path.dirname(resolved) or os.sep
+    name = os.path.basename(resolved)
+    if _folds_case(parent):
+        name = name.casefold()
+    try:
+        stat = os.stat(parent)
+    except OSError:
+        # No directory to anchor to. Fold the whole spelling on the same evidence.
+        return resolved.casefold() if _folds_case(parent) else resolved
+    return f"{stat.st_dev}:{stat.st_ino}:{name}"
+
+
+@functools.lru_cache(maxsize=512)
+def _folds_case(directory: str) -> bool:
+    """Whether this directory's volume treats two spellings of a name as one file.
+
+    Measured, read-only, once per directory per process: stat the directory under its
+    own name and under a case-swapped spelling of that name, and ask whether both
+    landed on the same inode. If a *different* directory happens to occupy the swapped
+    spelling the answer is still right — two spellings coexisting as distinct entries is
+    what case-sensitive means.
+
+    Falls back to the platform default only when there is nothing to measure: a name
+    with no cased characters at all, or a filesystem error. Under that fallback this
+    behaves exactly as the old unconditional fold did.
+    """
+    parent, name = os.path.split(directory)
+    swapped = name.swapcase()
+    if parent and swapped != name:
+        try:
+            return os.path.samestat(os.stat(directory), os.stat(os.path.join(parent, swapped)))
+        except OSError:
+            return False
+    return sys.platform in ("darwin", "win32")
 
 
 def tip_path_for(log: str | Path) -> Path:
