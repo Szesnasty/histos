@@ -528,12 +528,17 @@ def _backtracking_risk(
                     pinned = True
                     neighbours[:] = [n for n in neighbours if n[1] is None or n[1][1] & separator]
                 held[0] = None
-            neighbour = (
-                (_shape_key(av[2]), body_edges, dot_repeat)
-                if variable_repeat and _unbounded(av) and not pinned
-                else None
-            )
-            if neighbour is not None:
+            # A pin excuses the *check*, never the *registration*. The disjointness test
+            # reads `body_edges[0]` — the body's firsts — so all it establishes is that
+            # this repeat's LEFT boundary cannot move. Dropping the repeat from the run
+            # on that evidence declared its RIGHT boundary safe too, and nothing had
+            # looked at it: the next repeat over the same alphabet then saw an empty run
+            # and loaded as a run of one. `^[a-z.-]+\.\d+\d+.+$` is the shape —
+            # `\d+\d+` is the canonical quadratic pattern, and putting a separator in
+            # front of it was enough to admit it. Measured at 4 168 ms on 2 000
+            # characters, while the structurally identical `^\d+\d+\d+$` is refused.
+            neighbour = (_shape_key(av[2]), body_edges, dot_repeat) if variable_repeat and _unbounded(av) else None
+            if neighbour is not None and not pinned:
                 clash = _neighbour_clash(neighbours, neighbour)
                 if clash is not None:
                     return clash
