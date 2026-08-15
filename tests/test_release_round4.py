@@ -251,9 +251,17 @@ def test_an_enum_member_is_a_value_and_not_a_record():
         assert safe() == {"c": Colour.RED}
 
 
-def test_a_correctly_declared_record_keeps_its_type():
-    """Projection rebuilds a record as a mapping only when something had to be dropped —
-    the same bargain a dict gets. A caller's attribute access survives the common case.
+def test_a_projected_record_always_comes_back_as_a_mapping():
+    """It used to keep its type when nothing had to be dropped, and that was a hole.
+
+    The passes that run *after* projection — the canary scan, the secret detectors, the
+    sensitive-field walk — enter mappings and sequences. A record handed back intact
+    sailed past all three, so a planted token inside a fully declared field egressed
+    with `redactions: []`: an audit line byte-identical to "there was nothing to remove".
+
+    Projection is opt-in and transforming. A caller who switched it on asked for a
+    filtered mapping, and one every later pass can read is the only kind worth handing
+    back.
     """
     import dataclasses
 
@@ -261,10 +269,38 @@ def test_a_correctly_declared_record_keeps_its_type():
     class Row:
         public: str
 
-    safe = Gate(_projecting({"public": Field(type="string")})).wrap(lambda: Row("fine"), name="t")  # noqa: E731
+    safe = Gate(_projecting({"public": Field(type="string")})).wrap(lambda: Row("fine"), name="t")
     with use_principal(Principal(role="ok", identity="i")):
         out = safe()
-    assert isinstance(out, Row) and out.public == "fine"
+    assert out == {"public": "fine"}
+
+
+def test_a_canary_inside_a_projected_record_is_found():
+    """The property the bargain above was costing."""
+    import dataclasses
+
+    token = "CANARY-7f3a-SECRET"
+
+    @dataclasses.dataclass
+    class Row:
+        public: str
+
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t",
+                args=Schema({}),
+                returns=Schema({"public": Field(type="string")}),
+                project_output=True,
+            )
+        },
+        permissions={"ok": frozenset({"t"})},
+        canaries=frozenset({token}),
+    )
+    safe = Gate(policy).wrap(lambda: Row(token), name="t")
+    with use_principal(Principal(role="ok", identity="i")):
+        out = safe()
+    assert token not in repr(out), f"the canary egressed inside a record: {out!r}"
 
 
 def test_a_slots_only_object_is_still_named_in_the_trail():

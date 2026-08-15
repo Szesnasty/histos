@@ -135,15 +135,7 @@ def _path_key(path: Path) -> str:
     """
     resolved = os.path.realpath(path)
     parent = os.path.dirname(resolved) or os.sep
-    name = os.path.basename(resolved)
-    if _folds_case(parent):
-        name = name.casefold()
-    try:
-        stat = os.stat(parent)
-    except OSError:
-        # No directory to anchor to. Fold the whole spelling on the same evidence.
-        return resolved.casefold() if _folds_case(parent) else resolved
-    return f"{stat.st_dev}:{stat.st_ino}:{name}"
+    return resolved.casefold() if _folds_case(parent) else resolved
 
 
 @functools.lru_cache(maxsize=512)

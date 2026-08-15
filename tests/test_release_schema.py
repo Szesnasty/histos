@@ -659,5 +659,32 @@ def test_an_ordinary_bounded_validator_is_not_refused(pattern):
     Field(type="string", pattern=pattern)
 
 
+def test_the_split_budget_is_spent_by_the_pattern_not_by_each_run():
+    """Two repeats over disjoint classes do not clash, so each run was scored alone.
+
+    Eight independent quadratic runs over eight disjoint alphabets are eight separate
+    262 144s, every one of them under the threshold, every one admitted — while the
+    engine re-explores each earlier run's surviving splits under every split of a later
+    one. The 194-character pattern that shape produces was refused before the product
+    rule went in, admitted after it, and then ran until it was killed.
+    """
+    runs = "".join(f"[{a}-{chr(ord(a) + 2)}]{{1,512}}[{a}-{chr(ord(a) + 2)}]{{1,512}}" for a in "adgjmpsv")
+    with pytest.raises(PolicyError, match="backtrack"):
+        Field(type="string", pattern=f"^{runs}$")
+
+
+def test_a_run_is_not_charged_for_its_own_prefix():
+    """The arithmetic the fix above needs to get right.
+
+    Each clash inside one run recomputes that run's *whole* product, so charging them
+    all multiplies a run's partial answers together — and refuses three 64-caps, which
+    is 262 144 splits and 1.4 ms. A run ends where a repeat clashes with nothing, and
+    that is the only place the charge resets.
+    """
+    Field(type="string", pattern=r"^[a-z]{1,64}[a-z]{1,64}[a-z]{1,64}$")
+    # ...and a separator that pins the boundary still ends the run, so this stays cheap.
+    Field(type="string", pattern=r"^.+,\d+$")
+
+
 def test_the_single_repeat_spelling_an_author_means_is_still_fine():
     Field(type="string", pattern=r"^[a-z]{2,6}$")
