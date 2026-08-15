@@ -242,9 +242,16 @@ def _leaf_fields(value: Any) -> dict[str, Any] | None:
     # and the point here is reachability, not how the class chose to store it. `UUID` and
     # friends are not leaves, so the reason slots stay opaque in `_record_fields` — that
     # reading them would project a value into its internals — does not apply.
-    for name in getattr(type(value), "__slots__", ()) or ():
-        if isinstance(name, str) and name not in found and hasattr(value, name):
-            found[name] = getattr(value, name)
+    #
+    # Every class in the MRO, and `__slots__` may be one bare string. Reading it off the
+    # instance's own class alone missed `class Money(str): __slots__ = ("currency",)`
+    # subclassed once more, which is ordinary, and this comment claimed slots were
+    # covered while a token in an inherited one was still unreachable.
+    for klass in type(value).__mro__:
+        declared = getattr(klass, "__slots__", ())
+        for name in (declared,) if isinstance(declared, str) else declared or ():
+            if isinstance(name, str) and name not in found and hasattr(value, name):
+                found[name] = getattr(value, name)
     return found or None
 
 

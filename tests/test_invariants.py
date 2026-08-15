@@ -501,6 +501,19 @@ def _leaf(base, value, token):
     return obj
 
 
+def _slotted_leaf(token):
+    """The same thing written the idiomatic way, and subclassed once more.
+
+    `class Money(str): __slots__ = ("hidden",)` keeps its attribute off `__dict__`, and
+    a class that inherits it declares `__slots__ = ()` of its own — so reading the
+    instance's own class alone finds nothing at all.
+    """
+    base = type("Slotted", (str,), {"__slots__": ("hidden",)})
+    obj = type("Derived", (base,), {"__slots__": ()})("12.30")
+    obj.hidden = token
+    return obj
+
+
 @pytest.mark.parametrize("base,value", [(str, "12.30"), (int, 7), (bytes, b"x"), (float, 1.5)])
 def test_a_canary_in_an_attribute_of_a_leaf_subclass_does_not_reach_the_caller(base, value):
     """For any value the scanners read end to end, what hangs *off* it is still output.
@@ -514,6 +527,14 @@ def test_a_canary_in_an_attribute_of_a_leaf_subclass_does_not_reach_the_caller(b
     out, exc, sink = _run(_policy(), lambda: {"v": _leaf(base, value, CANARY)})
     reached = getattr(out.get("v"), "hidden", None) if isinstance(out, dict) else None
     assert reached != CANARY, "a canary on a leaf's attribute reached the caller"
+    assert sink.entries[-1]["redactions"], "and the trail recorded nothing about it"
+
+
+def test_a_canary_in_an_inherited_slot_of_a_leaf_does_not_reach_the_caller():
+    """However the class chose to store it. Reachability is the question, not layout."""
+    out, exc, sink = _run(_policy(), lambda: {"v": _slotted_leaf(CANARY)})
+    reached = getattr(out.get("v"), "hidden", None) if isinstance(out, dict) else None
+    assert reached != CANARY, "a canary in an inherited slot reached the caller"
     assert sink.entries[-1]["redactions"], "and the trail recorded nothing about it"
 
 
