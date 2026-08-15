@@ -256,6 +256,13 @@ def test_the_committed_demo_lock_matches_what_the_importer_produces_now():
     from histos.importers.mcp import sources_from_mcp
     from histos.provenance.lockfile import contract_hash, description_hash, schema_hash
 
+    # The demo server imports `mcp`, which only the `demos` CI job installs — the core
+    # library has zero runtime dependencies and the `test` job keeps it that way. Skipped
+    # rather than made optional, and the `demos` job runs this file explicitly so the gate
+    # still runs somewhere: a check that quietly never executes is the state this test was
+    # written to catch in the first place.
+    pytest.importorskip("mcp", reason="the rug-pull demo's server needs it; the demos job has it")
+
     demo = Path(__file__).resolve().parent.parent / "demo" / "04-mcp-rug-pull"
     lock_path = demo / "docuvault.policy.lock.json"
     assert lock_path.exists(), "the lock this test exists to check is gone"

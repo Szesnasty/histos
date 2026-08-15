@@ -281,7 +281,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[yaml]" mcp
+          python -m pip install -e ".[yaml,dev]" mcp
           # hunt.py drives LangChain's and LangGraph's real executors; demo 02's
           # model-free checks import its graph. Neither pulls in a model.
           python -m pip install -r demo/00-mediation/requirements.txt
@@ -296,6 +296,13 @@ jobs:
         run: |
           cd demo/02-accounts-payable
           python run.py checks
+
+      # The lock-freshness gate lives in the test suite but needs the demo server, which
+      # only this job installs. Run it here so it is not permanently skipped: it exists
+      # because a stale lock shipped once, in the demo whose whole subject is that a lock
+      # catches the rug-pull.
+      - name: The committed lock still matches what the importer produces
+        run: pytest tests/test_lockfile.py -q
 
       - name: Every demo policy is valid and reviewable
         run: |
