@@ -56,18 +56,13 @@ from __future__ import annotations
 import contextlib
 import inspect
 import os
-import sys
-import threading
 import time
-import warnings
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from histos._version import __version__
 from histos.audit import AuditSink, InMemoryAuditSink
-from histos.auditrecord import AuditRecord, digest_args
 from histos.callsig import (
     _any_gate_stamp,
     _exposed_name,
@@ -100,6 +95,7 @@ from histos.policyref import (
     _resolve_fixed_principal,
     _resolve_mode,
 )
+from histos.recorder import DecisionRecorder
 
 # The pieces `gate.py` used to hold inline, now beside it. `_current_principal` and
 # `_scope_tokens` are imported rather than re-declared on purpose: they are
@@ -174,7 +170,17 @@ class Gate:
         output_budget: int = _DEFAULT_OUTPUT_BUDGET,
         strict: bool = False,
     ) -> None:
+        # The recorder is built first, before anything that can push into it. The
+        # `policy` setter re-stamps the hash the recorder writes on every row, and it
+        # runs two lines below — so constructing the recorder after it was an
+        # AttributeError on the ordinary path, which is the kind of ordering a
+        # collaborator makes visible and five attributes on one object did not.
+        self.audit = audit if audit is not None else InMemoryAuditSink()
+        # Per-Gate HMAC key so audit digests resist brute-forcing low-entropy args.
+        # Pass a stable key to correlate digests across processes.
+        self._audit_key = audit_key if audit_key is not None else os.urandom(32)
         self.enforcement = _resolve_mode(mode, enforcement)
+        self._recorder = DecisionRecorder(self.audit, self._audit_key, enforced=self._enforce)
         # The setter takes a `PolicySource` and coerces it; mypy type-checks the
         # assignment against the *getter*, which is narrower by design.
         self.policy = policy  # type: ignore[assignment]
@@ -191,19 +197,9 @@ class Gate:
             escalate=escalate,
             output_budget=output_budget,
         )
-        self.audit = audit if audit is not None else InMemoryAuditSink()
         self._confirm = confirm
         self._confirm_suspends = confirm_suspends
-        # Per-Gate HMAC key so audit digests resist brute-forcing low-entropy args
-        # . Pass a stable key to correlate digests across processes.
-        self._audit_key = audit_key if audit_key is not None else os.urandom(32)
-        self._decision_seq = 0
-        self._seq_lock = threading.Lock()
-        # Decisions this Gate could not record, whatever the sink was. `JSONLAuditSink`
-        # counts its own, but `AuditSink` is a Protocol and a host's collector cannot be
-        # made to — so the gap in the trail was legible only as a RuntimeWarning, which
-        # is not something a monitor reads. Alarm on this instead.
-        self.audit_failures = 0
+
         self._wrapped_tools: set[str] = set()
         # tool name -> the raw callable gated under it, so a second `protect()` call on
         # this Gate cannot quietly enforce a different function against the same contract.
@@ -213,6 +209,15 @@ class Gate:
         # a framework's tool object is often an unhashable model instance.
         self._wrappers: list[weakref.ReferenceType[Any]] = []
         self._refresh_policy_hash()
+
+    @property
+    def audit_failures(self) -> int:
+        """Decisions this Gate could not record, whatever the sink did with them.
+
+        The count lives on the recorder; it is read here because a host alarming on a
+        gap in the trail should not have to know that.
+        """
+        return self._recorder.failures
 
     @property
     def enforcement(self) -> str:
@@ -241,6 +246,9 @@ class Gate:
             raise PolicyError("mode must be 'enforce' or 'observe', got None")
         self._enforcement = _resolve_mode(value, None)
         self._enforce = self._enforcement == "enforce"
+        recorder = getattr(self, "_recorder", None)  # absent during __init__, by design
+        if recorder is not None:
+            recorder.enforced = self._enforce
 
     @property
     def mode(self) -> str:
@@ -273,6 +281,11 @@ class Gate:
 
     def _refresh_policy_hash(self) -> None:
         self._policy_hash = self._policy.content_hash()
+        # The recorder stamps every row with these, so they are pushed rather than read
+        # back: a record naming a hash that did not decide it is the one thing the trail
+        # cannot survive, and that is exactly what a stale copy here would produce.
+        self._recorder.policy_hash = self._policy_hash
+        self._recorder.policy_version = self._policy.policy_version
 
     # ── coverage / "no silent bypass" ─────
 
@@ -617,7 +630,9 @@ class Gate:
             # No trusted identity → fail closed. Identity is never inferred.
             if active is None:
                 decision = self._no_principal()
-                self._emit(tool_name, call_args, decision, "pre", started, None, self._will_execute(decision))
+                self._recorder.record(
+                    tool_name, call_args, decision, "pre", started, None, self._will_execute(decision)
+                )
                 if self._enforce:
                     raise GateDenied(decision)
                 return _invoke(tool, binder, call_args)
@@ -627,7 +642,7 @@ class Gate:
             exec_source = dict(call_args)
             binding_denial = self._apply_bindings(tool_name, active, call_args, rebound, overrides)
             if binding_denial is not None:
-                self._emit(
+                self._recorder.record(
                     tool_name,
                     call_args,
                     binding_denial,
@@ -682,7 +697,7 @@ class Gate:
                     # that reached the approval stage and parked produced no record at
                     # all, so the trail could not show that a human had been asked.
                     # `executed=False`, because a suspension is "no decision yet".
-                    self._emit(
+                    self._recorder.record(
                         tool_name,
                         call_args,
                         GateDecision(
@@ -725,7 +740,7 @@ class Gate:
                 if raced is not None:
                     pre = raced
 
-            self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre), rebound)
+            self._recorder.record(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre), rebound)
             if self._enforce and pre.effect is not Effect.ALLOW:
                 # Deny-by-default over the *effect space*, not a list of the effects
                 # that block. Written the other way round, an effect this branch has
@@ -778,7 +793,9 @@ class Gate:
 
             if active is None:
                 decision = self._no_principal()
-                self._emit(tool_name, call_args, decision, "pre", started, None, self._will_execute(decision))
+                self._recorder.record(
+                    tool_name, call_args, decision, "pre", started, None, self._will_execute(decision)
+                )
                 if self._enforce:
                     raise GateDenied(decision)
                 return await _invoke(tool, binder, call_args)
@@ -788,7 +805,7 @@ class Gate:
             exec_source = dict(call_args)
             binding_denial = self._apply_bindings(tool_name, active, call_args, rebound, overrides)
             if binding_denial is not None:
-                self._emit(
+                self._recorder.record(
                     tool_name,
                     call_args,
                     binding_denial,
@@ -832,7 +849,7 @@ class Gate:
                     # that reached the approval stage and parked produced no record at
                     # all, so the trail could not show that a human had been asked.
                     # `executed=False`, because a suspension is "no decision yet".
-                    self._emit(
+                    self._recorder.record(
                         tool_name,
                         call_args,
                         GateDecision(
@@ -865,7 +882,7 @@ class Gate:
                 if raced is not None:
                     pre = raced
 
-            self._emit(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre), rebound)
+            self._recorder.record(tool_name, call_args, pre, "pre", started, active, self._will_execute(pre), rebound)
             if self._enforce and pre.effect is not Effect.ALLOW:
                 # Deny-by-default over the *effect space*, not a list of the effects
                 # that block. Written the other way round, an effect this branch has
@@ -911,7 +928,7 @@ class Gate:
         post_req = GateRequest(tool_name, call_args, active, phase="post")
         post, final = self.engine.post(post_req, result)
         # The tool has already run by definition on the post phase.
-        self._emit(tool_name, call_args, post, "post", started, active, True)
+        self._recorder.record(tool_name, call_args, post, "post", started, active, True)
         if post.effect is Effect.DENY and self._enforce:
             raise GateDenied(post)
         # observe mode never modifies the result.
@@ -952,7 +969,7 @@ class Gate:
                 "and the audit trail have nothing to attach to. Call it with keyword arguments."
             ),
         )
-        self._emit(tool_name, dict(kwargs), decision, "pre", started, active, self._will_execute(decision))
+        self._recorder.record(tool_name, dict(kwargs), decision, "pre", started, active, self._will_execute(decision))
         if self._enforce:
             raise GateDenied(decision)
         return tool(*args, **kwargs)
@@ -992,7 +1009,7 @@ class Gate:
             "`bytes(...)` — and return that.",
         )
         # executed=True without argument: the tool body ran to completion.
-        self._emit(tool_name, call_args, decision, "post", started, active, True)
+        self._recorder.record(tool_name, call_args, decision, "post", started, active, True)
         if not self._enforce:
             # observe mode never modifies the result, and closing it would modify it
             # more thoroughly than any redaction — the caller would get an exhausted
@@ -1037,7 +1054,7 @@ class Gate:
                 "inspect materialised text, so nothing scanned it.",
             )
         # The tool ran — it just ended by raising.
-        self._emit(tool_name, call_args, post, "post", started, active, True)
+        self._recorder.record(tool_name, call_args, post, "post", started, active, True)
         # observe mode records what it *would* have removed and changes nothing.
         if post.effect is Effect.ALLOW or not self._enforce:
             return exc
@@ -1161,118 +1178,6 @@ class Gate:
         return result
 
     # ── audit emit ───────────────────────────────────────────────────
-
-    def _emit(
-        self,
-        tool: str,
-        args: dict[str, Any],
-        decision: GateDecision,
-        phase: str,
-        started: float,
-        principal: Principal | None,
-        executed: bool,
-        rebound: list[str] | None = None,
-    ) -> None:
-        # `+= 1` is a read-modify-write, so two threads sharing a Gate could stamp the
-        # same `decision_id` on two different decisions — and `decision_id` is what an
-        # investigator uses to say "this call, not that one". Cheap to make atomic.
-        with self._seq_lock:
-            self._decision_seq += 1
-            decision_id = self._decision_seq
-        record = AuditRecord(
-            ts=time.time(),
-            decision_id=decision_id,
-            phase=phase,
-            tool=tool,
-            role=principal.role if principal is not None else "<none>",
-            identity=principal.identity if principal is not None else None,
-            effect=decision.effect.value,
-            rule=decision.rule,
-            reason=decision.reason,
-            args_digest=digest_args(args, self._audit_key),
-            arg_keys=sorted(args),
-            rebound_args=sorted(rebound or ()),
-            field_name=decision.field,
-            expected=decision.expected,
-            received=decision.received,
-            redactions=list(decision.redactions),
-            enforced=self._enforce,
-            executed=executed,
-            latency_us=int((time.perf_counter() - started) * 1_000_000),
-            policy_hash=self._policy_hash,
-            policy_version=self.policy.policy_version,
-            gate_version=__version__,
-        )
-        # The shipped sinks are total, and `AuditSink` is a Protocol, so a host's own
-        # sink — a database write, an HTTP post to a collector — cannot be made to be.
-        # `_emit` runs on the POST path too, after the tool body has produced its side
-        # effect, so a sink that raises there does not prevent anything: it replaces a
-        # completed call's result with the collector's traceback and throws the value
-        # away. Reporting the sink is right; letting it take the call with it is not.
-        # `failed` is read either side because the shipped sink is *total*: it absorbs
-        # its own write errors, so the gate saw a clean return and could not count the
-        # loss. That is the ordinary configuration, and it was the one where a host had
-        # nothing to alarm on but a RuntimeWarning.
-        before = getattr(self.audit, "failed", None)
-        try:
-            self.audit.record(record.to_dict())
-        except Exception as exc:  # noqa: BLE001 — only `strict` may decide a call's fate
-            self._sink_failed(exc, phase, executed)
-        else:
-            after = getattr(self.audit, "failed", None)
-            if isinstance(before, int) and isinstance(after, int) and after > before:
-                with self._seq_lock:
-                    self.audit_failures += after - before
-
-    def _sink_failed(self, exc: Exception, phase: str, executed: bool) -> None:
-        """One rule for a sink that raised: only ``strict`` makes it fatal.
-
-        Three separate things were wrong with catching it here and warning.
-
-        *`strict` was inert.* `JSONLAuditSink(strict=True)` re-raises, and this was the
-        only caller of `record()` in the library, so the blanket `except` caught the
-        re-raise and turned it back into a warning. `strict=True` and `strict=False`
-        behaved identically through `protect()`, `gate()` and `Gate` — every entry point
-        the README teaches — while the sink's own warning text named `strict=True` as
-        the remedy. It is honoured here now, on both phases, because "a lost record is
-        worse than a failed call" is a statement about evidence, not about timing.
-
-        *The justification was post-only.* "The side effect already happened, so raising
-        prevents nothing" is true on POST and false on PRE, where the tool has not run
-        and a raising sink is the only thing between an allowed call and an execution
-        with no record of the decision. The default is still to continue — a collector
-        outage should not stop an agent, and enforcement is unaffected either way, as
-        the denial path never reaches the tool — but the message says which side of the
-        call it is on instead of claiming the harmless one, and `audit_failures` counts
-        it for a host that wants to alarm on the gap rather than parse warnings.
-
-        *The warning could raise.* Under ``-W error`` — a perfectly ordinary CI setting
-        — `warnings.warn` raises, so the "totality" the sink documents ended at this
-        line: on POST the side effect stood, the record was lost *and* the caller got a
-        RuntimeWarning instead of the value. A warning filter is a reporting choice, not
-        a security one, so it does not get to decide a call. When the warning cannot be
-        delivered the loss goes to stderr, which cannot be turned into an exception.
-        """
-        with self._seq_lock:
-            self.audit_failures += 1
-        if phase == "post":
-            note = "the call had already run, so its side effect stands"
-        elif executed:
-            note = "the call is about to run with no record of the decision that allowed it"
-        else:
-            note = "the call was refused, and the refusal went unrecorded"
-        message = (
-            f"histos: the audit sink {type(self.audit).__name__} raised while recording this call "
-            f"({phase} phase): {type(exc).__name__}: {exc}. This record is lost and {note}. "
-            "Read Gate.audit_failures for the count, or give the sink strict=True to raise instead."
-        )
-        if getattr(self.audit, "strict", False):
-            raise exc
-        try:
-            warnings.warn(message, RuntimeWarning, stacklevel=3)
-        except Exception:  # noqa: BLE001 — `-W error` is a reporting choice, not a veto
-            with contextlib.suppress(Exception):
-                print(message, file=sys.stderr)
 
 
 def gate(
