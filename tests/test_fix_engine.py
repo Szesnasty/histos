@@ -29,7 +29,7 @@ from histos import (
 )
 from histos.decide.engine import Engine
 from histos.decide.limits import LimitStore
-from histos.errors import ToolErrorRedacted
+from histos.errors import PolicyError, ToolErrorRedacted
 from histos.policy.contracts import Effect, GateRequest
 
 CANARY = "CANARY-7f3a-SECRET"
@@ -425,8 +425,29 @@ def test_a_contract_with_no_confirmation_window_still_requires_confirmation():
 
 @pytest.mark.parametrize("window", [0, -1, -900, "900", 900.5, True])
 def test_a_confirmation_window_no_approval_could_satisfy_is_refused(window):
-    """Downgrading an unusable window to 'no expiry' turns a stricter policy into a looser one."""
-    decision = _confirm_decision(confirmation_expires_in=window)
+    """Downgrading an unusable window to 'no expiry' turns a stricter policy into a looser one.
+
+    The refusal moved earlier. `ToolContract.__post_init__` now checks the three integers
+    the way it always checked `access` — a window no approval could satisfy is a policy
+    that cannot be enforced, and this codebase refuses one of those where it is written
+    rather than at every call for the life of the process.
+
+    The engine's own check stays, and the second half of this test is why: it is the
+    backstop for a contract that reached the engine without passing the constructor, and
+    a guard nothing exercises is a guard nobody can trust.
+    """
+    with pytest.raises(PolicyError, match="confirmation_expires_in"):
+        _confirm_decision(confirmation_expires_in=window)
+
+    smuggled = ToolContract(
+        name="refund",
+        args=Schema({"amount": Field(type="integer")}),
+        requires_confirmation=True,
+        confirmation_expires_in=900,
+    )
+    object.__setattr__(smuggled, "confirmation_expires_in", window)  # past the constructor
+    engine = Engine(Policy(tools={"refund": smuggled}, permissions={"agent": frozenset({"refund"})}), LimitStore())
+    decision = engine.pre(GateRequest("refund", {"amount": 1}, Principal(role="agent")))
     assert decision.effect is Effect.DENY
     assert decision.rule == "confirm_error"
     assert decision.field == "confirmation.expires_in"
