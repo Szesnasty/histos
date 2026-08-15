@@ -30,10 +30,21 @@ import json
 import re
 from dataclasses import dataclass
 
+from histos.decide.canary import _INVISIBLE
+
 CHECKSUM = "checksum"
 STRUCTURAL = "structural"
 
 REDACTION_MARK = "[REDACTED-SECRET]"
+
+# The same set the canary scan strips, for the same reason and from the same place: one
+# definition of "invisible", so the two controls on one piece of text cannot disagree
+# about what is in it. See `histos.decide.canary`.
+_INVISIBLE_TABLE = dict.fromkeys(ord(ch) for ch in _INVISIBLE)
+
+# The canary module's bound, for the identical per-character index map. Above it a hit is
+# reported spanning the whole text rather than located.
+_MAX_MAPPED_CHARS = 65_536
 
 
 @dataclass(frozen=True)
@@ -182,7 +193,54 @@ _JWT_RUN = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
 
 
 def scan_string(text: str) -> list[Detection]:
-    """All secret detections in ``text``, checksum-verified where possible."""
+    """All secret detections in ``text``, checksum-verified where possible.
+
+    Read twice when it has to be: once as it came, and once with every Unicode format
+    character removed. The canary scan beside this one has normalised since the second
+    adversarial pass; these patterns matched the text as written, so a single invisible
+    character split every one of them. `deny_secret_args` is on by default and refuses a
+    checksum-confidence secret in an argument — and one soft hyphen walked a card number
+    straight into the tool, for all 170 spellings of "invisible".
+
+    Only Cf characters are removed, and deliberately not the separators the canary
+    normalisation also drops. A format character has no business inside a PAN, an IBAN or
+    a JWT, so deleting it invents no match; deleting `.` or `_` would splice two adjacent
+    honest values into a third that checksums by chance, and this scan denies calls.
+    """
+    found = _scan_verbatim(text)
+    stripped = text.translate(_INVISIBLE_TABLE)
+    if len(stripped) == len(text):
+        return found  # nothing invisible in it, so there is no second reading
+    return _merge(found, _relocated(text, stripped))
+
+
+def _relocated(text: str, stripped: str) -> list[Detection]:
+    """Detections in the invisible-stripped text, with spans back in the original.
+
+    The span has to cover the format characters interleaved through the secret, or
+    redaction would leave their fragments behind. Mapping is a per-character Python loop
+    — the thing `str.translate` exists here to avoid — so it runs only on text that
+    actually carries one, and is bounded exactly as the canary index map is. Past the
+    bound the secret is reported spanning the whole text, which drops the value rather
+    than redacting part of it: "there is one in here and I cannot say where" is an
+    honest answer, and it is the one the canary path gives too.
+    """
+    hits = _scan_verbatim(stripped)
+    if not hits:
+        return []
+    if len(text) > _MAX_MAPPED_CHARS:
+        return [Detection(d.kind, d.confidence, 0, len(text)) for d in hits]
+    origin = [i for i, ch in enumerate(text) if ch not in _INVISIBLE]
+    return [Detection(d.kind, d.confidence, origin[d.start], origin[d.end - 1] + 1) for d in hits]
+
+
+def _merge(verbatim: list[Detection], relocated: list[Detection]) -> list[Detection]:
+    """Both readings, without reporting one secret twice for the same span."""
+    seen = {(d.kind, d.start, d.end) for d in verbatim}
+    return verbatim + [d for d in relocated if (d.kind, d.start, d.end) not in seen]
+
+
+def _scan_verbatim(text: str) -> list[Detection]:
     found: list[Detection] = []
 
     for m in _DIGIT_RUN.finditer(text):

@@ -753,3 +753,70 @@ def test_the_invisible_character_table_still_covers_what_python_knows():
         if unicodedata.category(chr(cp)) == "Cf" and cp not in _STRIP_TABLE
     ]
     assert not unknown, f"Unicode {unicodedata.unidata_version} knows format characters the table does not: {unknown}"
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "4111 1111 1111 1111",  # PAN, Luhn-clean, issuer prefix
+        "DE89370400440532013000",  # IBAN, mod-97
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",  # JWT that decodes
+    ],
+)
+def test_an_invisible_character_does_not_smuggle_a_secret_past_the_gate(secret):
+    """The twin of the canary gap, in the control that hard-denies.
+
+    `deny_secret_args` is on by default and refuses a checksum-confidence secret in an
+    argument. The canary scan beside it normalises before matching; the detectors match
+    the text as it came, so one `Cf` character — a soft hyphen, a bidi mark, a tag
+    character — split every pattern and all 170 of them walked a PAN into the tool.
+
+    Both halves are asked here: the denial has to hold, and it has to be the same denial,
+    because a control that reads as on and is not is worse than one that is off.
+    """
+    from histos.decide import detectors
+
+    reached: list[str] = []
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({"note": Field(type="string")}), deny_secret_args=True)},
+        permissions={"r": frozenset({"t"})},
+    )
+    safe = Gate(policy, audit=InMemoryAuditSink()).wrap(lambda note: reached.append(note), name="t")
+
+    def call(argument):
+        with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+            safe(note=argument)
+
+    call(secret)
+    assert not reached, "the premise: a plain checksum secret is denied"
+
+    smuggled = secret[:6] + "­" + secret[6:]  # SOFT HYPHEN, invisible in every renderer
+    call(smuggled)
+    assert not reached, f"a soft hyphen walked a {detectors.scan_string(secret)[0].kind} into the tool"
+
+    # And on the way out, where the same detectors redact rather than deny.
+    redacted, kinds = detectors.redact_string(f"here it is: {smuggled}")
+    assert kinds, "the outbound half found nothing"
+    assert secret[:6] not in redacted and secret[-6:] not in redacted, f"only partly redacted: {redacted!r}"
+
+
+@pytest.mark.parametrize("padding", [1_000, 100_000])
+def test_a_secret_carrying_an_invisible_character_is_never_partly_redacted(padding):
+    """Both sides of the index-map bound, because half a redaction is the worse outcome.
+
+    Locating a hit found in stripped text needs a per-character map back to the original,
+    which is the Python loop `str.translate` is here to avoid — so it is bounded, exactly
+    as the canary index map is. Under the bound the span has to cover the interleaved
+    format characters or their fragments stay behind; over it the answer is the whole
+    text, which drops the value instead of redacting part of it.
+    """
+    from histos.decide import detectors
+
+    pan = "4111 1111 1111 1111"
+    smuggled = pan[:6] + "­" + pan[6:]
+    text = "note " * (padding // 5) + smuggled + " end"
+
+    redacted, kinds = detectors.redact_string(text)
+    assert "pan" in kinds, "the card number was not found at all"
+    assert pan[:6] not in redacted, f"the leading digits survived: {redacted[:80]!r}"
+    assert pan[-6:] not in redacted, "the trailing digits survived"
