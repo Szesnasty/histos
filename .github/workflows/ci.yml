@@ -304,6 +304,12 @@ jobs:
       - name: The committed lock still matches what the importer produces
         run: pytest tests/test_lockfile.py -q
 
+      # Every attack the five adversarial passes found, run against the shipped library
+      # through its public surface. Exits with the number that reached something, so a
+      # regression in any of them fails the job rather than printing a line nobody reads.
+      - name: The review's own attacks, against the shipped library
+        run: python demo/05-the-review/attacks.py
+
       - name: Every demo policy is valid and reviewable
         run: |
           for policy in demo/*/security.policy.yaml; do
