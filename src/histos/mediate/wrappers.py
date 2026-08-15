@@ -103,7 +103,7 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
         exec_args = checked_args if gate._enforce else {**exec_source, **supplied}
         call_args = checked_args
 
-        req = GateRequest(tool_name, call_args, active, phase="pre")
+        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=gate._recorder.policy_hash)
         pre = gate.engine.pre(req)
 
         # Human/operator confirmation resolved via a host callback (never a tool
@@ -258,7 +258,7 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
         exec_args = checked_args if gate._enforce else {**exec_source, **supplied}
         call_args = checked_args
 
-        req = GateRequest(tool_name, call_args, active, phase="pre")
+        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=gate._recorder.policy_hash)
         pre = await gate.engine.apre(req)
 
         if pre.effect is Effect.REQUIRE_CONFIRMATION and gate._confirm is not None:
@@ -351,7 +351,7 @@ def _finish(
     lazy = _uninspectable_kind(result)
     if lazy is not None:
         return _refuse_uninspectable(gate, tool_name, call_args, active, started, result, lazy)
-    post_req = GateRequest(tool_name, call_args, active, phase="post")
+    post_req = GateRequest(tool_name, call_args, active, phase="post", policy_hash=gate._recorder.policy_hash)
     post, final = gate.engine.post(post_req, result)
     # The tool has already run by definition on the post phase.
     gate._recorder.record(tool_name, call_args, post, "post", started, active, True)
@@ -465,7 +465,7 @@ def _finish_exception(
     Returns ``exc`` itself when nothing had to be removed — the caller re-raises it
     with its original traceback intact, so the common case is unchanged.
     """
-    post_req = GateRequest(tool_name, call_args, active, phase="post")
+    post_req = GateRequest(tool_name, call_args, active, phase="post", policy_hash=gate._recorder.policy_hash)
     post, text = gate.engine.post_exception(post_req, exc, mutate=gate._enforce)
     # `post_exception` reads the exception's *text*, so an exception carrying its
     # payload as a lazy object — `raise ToolError(rows_iterator)` — is the raising

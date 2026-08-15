@@ -1092,9 +1092,29 @@ def test_the_documented_reach_of_the_output_scan_is_the_real_one(shape):
     reached = not escaped
     assert reached == _REACHED_BY_THE_SCANNERS[shape], (
         f"the scan {'now reaches' if reached else 'no longer reaches'} {shape!r}; "
-        f"update this table and the two passages in SECURITY.md that state it, "
-        f"then this test again — trail said redactions={sink.entries[-1]['redactions']}"
+        f"update this table, the two passages in SECURITY.md that state it, and D7 in "
+        f"docs/tech-debt.md — trail said redactions={sink.entries[-1]['redactions']}"
     )
+
+
+# Both documents state the reach, and naming only one of them is how they came apart:
+# SECURITY.md was corrected and `docs/tech-debt.md` D7 went on describing the old, wider
+# residual for another pass. A reviewer found it, not this suite.
+_RESIDUAL_STATED_IN = ("SECURITY.md", "docs/tech-debt.md")
+
+
+@pytest.mark.parametrize("document", _RESIDUAL_STATED_IN)
+def test_both_documents_name_the_same_residual(document):
+    """Neither may claim the scan misses a shape the table above says it reaches."""
+    import pathlib as _pathlib
+
+    text = (_pathlib.Path(__file__).resolve().parents[1] / document).read_text(encoding="utf-8")
+    reached_now = [s for s, ok in _REACHED_BY_THE_SCANNERS.items() if ok]
+    for shape, phrase in (("dataclass field", "dataclass"), ("instance __dict__", "Pydantic")):
+        assert shape in reached_now  # guard: this test is about shapes that ARE reached
+        claim = f"{phrase} attribute or any other opaque object"
+        assert claim not in text, f"{document} still says {phrase} attributes are unreachable"
+    assert "__slots__" in text, f"{document} does not state the residual that is still real"
 
 
 @pytest.mark.parametrize(
@@ -1133,3 +1153,51 @@ def test_a_limit_that_cannot_be_enforced_is_refused_where_it_is_written(bad):
 def test_an_ordinary_limit_is_still_accepted(good):
     """The other half, because refusing honest work is the failure in the other direction."""
     ToolContract(name="t", args=Schema({}), **good)
+
+
+def test_an_approval_does_not_survive_the_ruleset_it_was_granted_under():
+    """The control three documents claim and nothing implemented.
+
+    `README.md`, and two docstrings I wrote in this file earlier today on the strength
+    of a comment in `authz.py`, say an approval binds to the policy hash. It does not:
+    the fingerprint covers the tool, the arguments and the whole principal, and nothing
+    about the rules in force. So an approval granted at 10:00 under a strict ruleset is
+    still spendable at 10:06 after a deploy loosened it, and the audit line then reads
+    "approved by the finance officer" about a decision made under rules that officer
+    never saw.
+
+    This is not a remote bypass — spending it needs the ability to change the Gate's
+    policy, and anyone with that can simply drop `requires_confirmation`. It is the
+    evidence story failing quietly, which is the thing the confirmation mechanism is
+    for, and it was claimed as working.
+    """
+    from histos.mediate.approvals import ApprovalStore, request_fingerprint
+
+    def ruleset(**extra):
+        return Policy(
+            tools={
+                "pay": ToolContract(
+                    name="pay",
+                    args=Schema({"amount": Field(type="integer")}),
+                    requires_confirmation=True,
+                    **extra,
+                )
+            },
+            permissions={"r": frozenset({"pay"})},
+        )
+
+    strict, loose = ruleset(), ruleset(scan_output_for_canary=False)
+    assert strict.content_hash() != loose.content_hash(), "the premise: two different rulesets"
+
+    alice = Principal(role="r", identity="alice")
+    paid: list[int] = []
+    store = ApprovalStore(strict)
+    gate = Gate(strict, audit=InMemoryAuditSink(), confirm=store.as_confirm())
+    safe = gate.wrap(lambda amount: paid.append(amount) or "ok", name="pay")
+
+    store.grant(request_fingerprint("pay", {"amount": 100}, alice))
+    gate.policy = loose  # a deploy, between the approval and the call
+
+    with use_principal(alice), contextlib.suppress(Exception):
+        safe(amount=100)
+    assert not paid, "an approval issued against one ruleset was spent under another"
