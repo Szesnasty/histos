@@ -21,6 +21,7 @@ When you close one: delete the marker, keep the test.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import typing
 import warnings
@@ -40,6 +41,7 @@ from histos import (
     verify_chain,
 )
 from histos.errors import PolicyError
+from histos.mediate.identity import _current_principal
 
 CANARY = "CANARY-7f3a-SECRET"
 
@@ -632,3 +634,73 @@ def test_a_form_body_is_refused_however_deep_its_allOf_goes():
     content = {"application/x-www-form-urlencoded": {"schema": {"$ref": "#/components/schemas/L0"}}}
 
     assert _declares_fields(spec, content, "pay"), "a declared form body was dropped in silence"
+
+
+def test_no_identity_is_bound_once_every_scope_has_been_left():
+    """For any order of exits, leaving every scope leaves nothing bound.
+
+    `with` is LIFO and cannot produce this, but a middleware that enters on request-start
+    and exits on response-end can: two overlapping requests in one context, the first to
+    finish exiting the outer scope. `__exit__` reset *its own* token without checking
+    whether it was the innermost, so `ContextVar.reset` restored the value from before
+    that token — and the inner scope's later reset then restored the outer's principal.
+    Both scopes closed, and the code after them ran as the first caller.
+    """
+    outer = use_principal(Principal(role="a", identity="outer"))
+    inner = use_principal(Principal(role="b", identity="inner"))
+    outer.__enter__()
+    inner.__enter__()
+
+    with contextlib.suppress(PolicyError):  # refusing is a fine answer; leaking is not
+        outer.__exit__(None, None, None)
+    with contextlib.suppress(PolicyError):
+        inner.__exit__(None, None, None)
+
+    left = _current_principal.get()
+    assert left is None, f"{left.identity!r} is still bound after both its scopes were left"
+
+
+@pytest.mark.parametrize("value", [10**15 + 1, 10**18 + 1, 2**60 + 1, 10**20 + 7, 9, 10])
+def test_two_policies_with_one_content_hash_reach_the_same_verdict(value):
+    """The pinning guarantee, stated as the property it actually is.
+
+    `content_hash` is what an approval binds to, what the lockfile pins and what drift
+    detection compares — so two rulesets sharing a hash must be one ruleset. Numbers are
+    rendered through `canonical_number` before hashing, deliberately: `JSON.parse`
+    collapses `3` and `3.0`, so a hash a second implementation has to reproduce cannot
+    depend on a distinction that implementation's parser cannot see.
+
+    That collapse is only honest if the two spellings *enforce* identically, and
+    `multiple_of` had two code paths — exact modulo when both sides were `int`, a float
+    division plus `isclose(rel_tol=1e-9)` otherwise. At 1e18 that tolerance is a window
+    about a billion wide, so `multiple_of=3.0` accepted what `multiple_of=3` rejected,
+    under one hash.
+    """
+    from histos.policy.validation import validate
+
+    as_int = Schema({"n": Field(type="integer", multiple_of=3)})
+    as_float = Schema({"n": Field(type="integer", multiple_of=3.0)})
+
+    def content_hash(schema):
+        return Policy(
+            tools={"t": ToolContract(name="t", args=schema)}, permissions={"r": frozenset({"t"})}
+        ).content_hash()
+
+    assert content_hash(as_int) == content_hash(as_float), "the premise: these two hash the same"
+    assert bool(validate(as_int, {"n": value})) == bool(validate(as_float, {"n": value})), (
+        f"{value} is admitted by one spelling of the same hashed policy and refused by the other"
+    )
+
+
+@pytest.mark.parametrize("bad", [None, "high", "HIGH", 3])
+def test_a_contract_is_refused_where_it_is_built_not_where_it_is_hashed(bad):
+    """The rule `authz.py` states and `ToolContract` applies to two of its three fields.
+
+    `access` and `on_output_violation` are checked in `__post_init__` and name what was
+    wrong. `sensitivity` was not, so a wrong one built fine and surfaced later as
+    `AttributeError: 'str' object has no attribute 'value'` from inside `content_hash()`
+    — at Gate construction, naming neither the tool nor the field. A policy that cannot
+    be hashed is refused where it is written.
+    """
+    with pytest.raises(PolicyError, match="sensitivity"):
+        ToolContract(name="t", args=Schema({}), sensitivity=bad)

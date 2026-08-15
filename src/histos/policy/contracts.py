@@ -114,6 +114,20 @@ class ToolContract:
                 f"tool {self.name!r}: on_output_violation must be 'redact_all'|'deny'|'allow', "
                 f"got {self.on_output_violation!r}"
             )
+        # The third field of the same kind, and the one that was not checked. It is read
+        # as `sensitivity.value` when the policy is fingerprinted, so a string — the
+        # obvious thing to write, and what the file format itself stores — built without
+        # complaint and then surfaced as `AttributeError: 'str' object has no attribute
+        # 'value'` from inside `content_hash()`, at Gate construction, naming neither the
+        # tool nor the field. `authz.py` states the rule for constraint literals: a
+        # policy that cannot be hashed is refused where it is written, not where it is
+        # hashed. It applies here too.
+        if not isinstance(self.sensitivity, Sensitivity):
+            allowed = "|".join(repr(s.value) for s in Sensitivity)
+            raise PolicyError(
+                f"tool {self.name!r}: sensitivity must be a Sensitivity member ({allowed} as "
+                f"Sensitivity.LOW and so on), got {self.sensitivity!r}"
+            )
 
     def needs_resource_resolver(self) -> bool:
         """Every constraint is resource-bound in Policy Format 0.1, so any constraint
