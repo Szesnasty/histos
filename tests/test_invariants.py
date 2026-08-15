@@ -969,3 +969,58 @@ def test_everything_the_gate_enforces_is_inside_the_content_hash(holder):
 
     assert not uncovered, f"{holder} has fields this test says nothing about: {uncovered}"
     assert not unpinned, f"{holder} fields the gate enforces and the content hash ignores: {unpinned}"
+
+
+@pytest.mark.parametrize("holder", ["Field", "ToolContract"])
+def test_every_enforced_field_survives_the_document(holder):
+    """A policy written to a file and read back has to be the same policy.
+
+    The sibling check asks whether a field is inside `content_hash`. This asks the other
+    half, which is not implied by it: a field can be hashed in memory and still be
+    dropped by the writer or the reader, and then the committed document enforces
+    something the author never wrote — with the lockfile and drift detection both
+    comparing the version that lost it.
+
+    Same reflection, same reason: a list of fields to check is the thing that goes stale.
+    """
+    import json
+
+    from histos import dump_bundle, load_bundle
+    from histos.policy.authz import Binding, Constraint
+    from histos.policy.contracts import Sensitivity
+
+    _A_DIFFERENT_VALUE["sensitivity"] = Sensitivity.HIGH
+    _A_DIFFERENT_VALUE["constraints"] = (Constraint("f", "eq", value=1),)
+    _A_DIFFERENT_VALUE["bindings"] = (Binding("f", "tenant"),)
+
+    plain = Field(type="any")
+    base = ToolContract(name="t", args=Schema({"a": plain}), returns=Schema({"r": Field(type="any")}))
+
+    def written_and_read_back(tool):
+        before = Policy(tools={"t": tool}, permissions={"r": frozenset({"t"})}, canaries=frozenset({CANARY}))
+        after = load_bundle(json.loads(json.dumps(dump_bundle(before))))
+        return before.content_hash(), after.content_hash()
+
+    lost, uncovered = [], []
+    for spec in dataclasses.fields(Field if holder == "Field" else ToolContract):
+        if spec.name in _NOT_A_RULE or spec.name in ("args", "returns"):
+            continue  # `args`/`returns` are covered field by field via the Field pass
+        if spec.name not in _A_DIFFERENT_VALUE:
+            uncovered.append(spec.name)
+            continue
+        value = _A_DIFFERENT_VALUE[spec.name]
+        tool = (
+            dataclasses.replace(base, args=Schema({"a": dataclasses.replace(plain, **{spec.name: value})}))
+            if holder == "Field"
+            else dataclasses.replace(base, **{spec.name: value})
+        )
+        try:
+            before_hash, after_hash = written_and_read_back(tool)
+        except Exception as exc:  # noqa: BLE001 — a writer that cannot write it is the same defect
+            lost.append(f"{spec.name} ({type(exc).__name__}: {exc})")
+            continue
+        if before_hash != after_hash:
+            lost.append(f"{spec.name} (came back as a different ruleset)")
+
+    assert not uncovered, f"{holder} has fields this test says nothing about: {uncovered}"
+    assert not lost, f"{holder} fields that do not survive being written to a document: {lost}"
