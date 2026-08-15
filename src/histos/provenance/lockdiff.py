@@ -8,8 +8,8 @@ makes the second invisible in the noise of the first, and reporting only the sec
 misses the rug-pull this whole mechanism exists to catch.
 
 So the diff is rendered by *where it lands*, the count of changes reaching enforcement is
-what the exit code keys on, and the description change is still printed in full — because
-a human reading it is the control for that one.
+reported separately, and description changes are shown as reviewed-to-current hunks —
+because a human reading the changed prose is the control for that one.
 """
 
 from __future__ import annotations

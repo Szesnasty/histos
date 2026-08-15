@@ -236,21 +236,25 @@ def cmd_compare(args: argparse.Namespace) -> int:
 def cmd_all(_: argparse.Namespace) -> int:
     print(f"model: {MODEL}\n")
     tally = {False: 0, True: 0}
+    failed = False
     for invoice_id, *_rest in INVOICES:
         print("=" * 78)
         print(f"{BOLD}invoice {invoice_id} — {LABELS[invoice_id]}{OFF}")
         for label, gated in ((f"{RED}WITHOUT histos{OFF}", False), (f"{GREEN}WITH histos{OFF}", True)):
             print(f"\n  {label}")
-            calls, bundle, _state = _settle(invoice_id, gated=gated)
+            calls, bundle, state = _settle(invoice_id, gated=gated)
             if _render(calls, bundle):
                 tally[gated] += 1
+            if state.get("error"):
+                print(f"    {RED}{BOLD}! the workflow never ran: {str(state['error'])[:160]}{OFF}")
+                failed = True
         print()
     total = len(INVOICES)
     print("=" * 78)
     print("  invoices where money went somewhere it should not")
     print(f"    AP application alone: {tally[False]}/{total}")
     print(f"    with histos:          {tally[True]}/{total}")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_session(_: argparse.Namespace) -> int:
@@ -262,6 +266,7 @@ def cmd_session(_: argparse.Namespace) -> int:
     correct to every remaining check.
     """
     print(f"model: {MODEL}\n")
+    failed = False
     for label, gated in ((f"{RED}WITHOUT histos{OFF}", False), (f"{GREEN}WITH histos{OFF}", True)):
         print("=" * 78)
         print(f"{label}  — settling the whole inbox")
@@ -276,9 +281,15 @@ def cmd_session(_: argparse.Namespace) -> int:
         for invoice_id, *_rest in INVOICES:
             if bundle is not None:
                 with use_principal(ap_principal()):
-                    process(graph, invoice_id, approver=bundle.officer)
+                    run_state = process(graph, invoice_id, approver=bundle.officer)
             else:
-                process(graph, invoice_id)
+                run_state = process(graph, invoice_id)
+            if run_state.get("error"):
+                print(
+                    f"    {RED}{BOLD}! invoice {invoice_id} workflow never ran: "
+                    f"{str(run_state['error'])[:140]}{OFF}"
+                )
+                failed = True
 
         conn = connect()
         paid = conn.execute("SELECT invoice_id, amount_pln, iban FROM payments ORDER BY id").fetchall()
@@ -299,20 +310,23 @@ def cmd_session(_: argparse.Namespace) -> int:
         else:
             print(f"    {GREEN}✓ no money went anywhere it should not{OFF}")
         print()
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_process(args: argparse.Namespace) -> int:
     print(f"model: {MODEL}   policy {'ON' if args.histos else 'OFF'}")
     if args.ask and not args.histos:
         print(f"{DIM}  (--ask needs --histos: without a policy nothing asks anyone){OFF}")
-    calls, bundle, _state = _settle(args.invoice_id, gated=args.histos, interactive=args.ask)
+    calls, bundle, state = _settle(args.invoice_id, gated=args.histos, interactive=args.ask)
     _render(calls, bundle, indent="  ")
     conn = connect()
     print(f"\n{DIM}  payments now on file:{OFF}")
     for row in conn.execute("SELECT invoice_id, iban, amount_pln FROM payments"):
         print(f"{DIM}    invoice {row['invoice_id']}  {row['amount_pln']:>6} PLN → {row['iban']}{OFF}")
     conn.close()
+    if state.get("error"):
+        print(f"\n{RED}{BOLD}! the workflow never ran: {str(state['error'])[:160]}{OFF}")
+        return 1
     return 0
 
 
