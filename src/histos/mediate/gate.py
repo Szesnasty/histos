@@ -56,8 +56,8 @@ from __future__ import annotations
 import contextlib
 import os
 import weakref
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from histos.decide.content_rules import ContentRules
@@ -67,9 +67,9 @@ from histos.decide.limits import LimitStore
 from histos.errors import PolicyError
 from histos.mediate import coverage as _coverage
 from histos.mediate import wrappers as _wrappers
+from histos.mediate.binding import apply_bindings
 from histos.mediate.callsig import (
     _any_gate_stamp,
-    _schema_constrains,
 )
 from histos.mediate.inspection import (
     _detect_async,
@@ -81,65 +81,26 @@ from histos.mediate.policyref import (
     _resolve_fixed_principal,
     _resolve_mode,
 )
+from histos.mediate.protection import ProtectResult, protect_tools
 from histos.mediate.recorder import DecisionRecorder
 from histos.mediate.toolref import (
     _IdentityRef,
     _same_tool,
     _wrap_identity,
 )
-from histos.policy.contracts import Effect, GateDecision, GateRequest, Policy, Principal, ToolContract
-from histos.policy.frozen import _snapshot_value
-from histos.provenance.infer import infer_contract, infer_schema
+from histos.policy.contracts import Effect, GateDecision, GateRequest, Policy, Principal
 
 # The pieces `gate.py` used to hold inline, now beside it. `_current_principal` and
 # `_scope_tokens` are imported rather than re-declared on purpose: they are
 # process-wide singletons, and a second copy of either means `use_principal` binds
 # one while the engine reads the other, with every test of both modules still green.
 # `tests/test_characterisation.py` pins that they stay single.
-from histos.review import PolicyReview, review_policy
 from histos.trail.audit import AuditSink, InMemoryAuditSink
 
 # ── protect() result ─────────────────────────────────────────────────────
 
 
 @dataclass
-class ProtectResult:
-    """What :func:`protect` / :meth:`Gate.protect` return.
-
-    A small object, never a tuple — a tuple return ages badly. ``.tools`` maps
-    each tool's name to its wrapped form, ``.coverage`` says which tools had a
-    contract and a grant, and ``.review`` is the full tri-state
-    :class:`~histos.review.PolicyReview` for the resulting policy.
-
-    Iterating the result yields the wrapped tools, so
-    ``agent.tools = list(protect(tools, policy=p))`` reads naturally — and reads
-    naturally is the point. These are **new** objects; the originals stay alive and
-    ungated, so a result that is computed and dropped protects nothing while every
-    name-based report stays green. :meth:`Gate.ungated_tools` is the assertion that
-    catches it, and it has to be asked of the objects the agent is handed.
-    """
-
-    tools: dict[str, Callable[..., Any]] = field(default_factory=dict)
-    coverage: list[dict[str, Any]] = field(default_factory=list)
-    review: PolicyReview | None = None
-
-    @property
-    def report(self) -> list[dict[str, Any]]:
-        """Deprecated alias for :attr:`coverage`."""
-        return self.coverage
-
-    def __iter__(self) -> Iterator[Callable[..., Any]]:
-        return iter(self.tools.values())
-
-    def summary(self) -> str:
-        ready = sum(1 for r in self.coverage if r["status"] == "ready")
-        needs = [r["tool"] for r in self.coverage if r["status"] != "ready"]
-        line = f"{ready}/{len(self.coverage)} tools fully covered"
-        if needs:
-            line += f"; needs a decision: {', '.join(needs)}"
-        return line
-
-
 class Gate:
     """Holds a policy plus shared limit + audit state, and wraps tools against it."""
 
@@ -179,7 +140,10 @@ class Gate:
             if issues:
                 raise PolicyError("invalid policy: " + "; ".join(issues))
         self.limits = limits if limits is not None else LimitStore()
-        self.engine = Engine(
+        # Annotated because the type now has to be legible from another module:
+        # `binding.py` reads `gate.engine.policy`, and an attribute whose type is
+        # only inferable from this constructor is not a type a reader outside it has.
+        self.engine: Engine = Engine(
             self.policy,
             self.limits,
             content_rules=content_rules,
@@ -302,65 +266,8 @@ class Gate:
         rebound: list[str] | None = None,
         overrides: dict[str, Any] | None = None,
     ) -> GateDecision | None:
-        """Overwrite bound args with trusted principal attributes (Phase 0.1).
-
-        The bound value is what the tool and every check see, so a hijacked model
-        passing ``tenant_id="attacker"`` simply has it replaced. Fail closed if the
-        principal lacks the attribute — never inject a missing/None trusted value.
-
-        ``rebound`` collects the fields that were actually *changed*, and it exists
-        because a rewrite is an authorization decision that used to leave no trace.
-        A run where the gate silently redirected an SMS from the attacker's number to
-        the caller's own recorded `effect=allow` and nothing else, so an auditor —
-        and a measurement — could not tell it apart from a call the policy simply had
-        no opinion about. Fields whose value already matched are not listed: nothing
-        was overridden, and reporting one would inflate the count of interventions.
-
-        The value itself never reaches the record. Only the field name does.
-        """
-        contract = self.engine.policy.contract_for(tool_name)
-        if contract is None or not contract.bindings:
-            return None
-        # A caller that supplies `overrides` is asking for the rewrites rather than for
-        # them to be applied — the gate does that so observe can evaluate the bound
-        # arguments while executing the unbound ones. Everyone else, including the
-        # conformance corpus, gets the straightforward thing: `call_args` comes back
-        # bound.
-        apply_in_place = overrides is None
-        if overrides is None:
-            overrides = {}
-        for b in contract.bindings:
-            if b.principal_attr not in active.attributes:
-                return GateDecision(
-                    Effect.DENY,
-                    "arg_binding_unresolved",
-                    f"principal is missing trusted attribute {b.principal_attr!r} for arg {b.field!r}",
-                    field=b.field,
-                )
-            # Copied on the way out. `Principal` deep-copies on construction, which
-            # stops the *caller* rewriting a bound identity; it does not stop the tool,
-            # and a bind hands the tool the stored object itself. So an ordinary
-            # `tenants.append(...)` inside a tool body edited the trust anchor that the
-            # next call in the same request would be authorized against — the one value
-            # in the library that must not be reachable from anything the model can
-            # influence.
-            # The same walk `Principal` snapshots with, and for the same reason twice
-            # over. A bare `copy.deepcopy` here raised on any attribute holding an
-            # uncopyable descendant — a lock, a session, an open file — so teaching the
-            # *constructor* to tolerate one only moved the outage from construction to
-            # call time, where it arrived as an uncaught TypeError out of the wrapper
-            # with no audit record for a call the policy had already allowed.
-            # `readonly=False`: the *anchor* is immutable, a *handout* is a plain copy.
-            # The stored attribute is a ReadOnlyDict/ReadOnlyList so nobody holding the
-            # Principal can edit a bound identity, but a tool mutating the argument it
-            # was given harms nothing and refusing it would break ordinary tool bodies.
-            trusted = _snapshot_value(active.attributes[b.principal_attr], readonly=False)
-            if rebound is not None and (b.field not in call_args or call_args[b.field] != trusted):
-                rebound.append(b.field)
-            overrides[b.field] = trusted
-        if apply_in_place:
-            call_args.update(overrides)
-        return None
+        """See :func:`histos.mediate.binding.apply_bindings`."""
+        return apply_bindings(self, tool_name, active, call_args, rebound, overrides)
 
     def _consume_limit(self, tool_name: str, active: Principal) -> GateDecision | None:
         """Atomically consume a limit slot at the point of execution.
@@ -539,104 +446,16 @@ class Gate:
     ) -> ProtectResult:
         """Wrap every tool, inferring missing arg schemas, and report coverage.
 
-        ``infer_missing`` fills in an argument schema from each tool's signature
-        so args are still validated — but a tool with no RBAC grant
-        or no contract stays denied-by-default until a human adds the policy.
-        The report says exactly which tools "need a decision".
-
-        The honest limit on inference: it never writes a *contract* for a tool a role
-        already grants. Such a tool keeps denying with ``unknown_tool``, because the one
-        thing inference must not do is supply the declaration the grant is waiting for.
-
-        ``review`` describes the policy as **authored**, not as inferred, so it can name
-        a gap ``coverage`` reports as filled — a tool whose arg schema was guessed from a
-        signature is still a tool nobody wrote a schema for. The two halves answer
-        different questions: ``coverage`` says what is enforced now, ``review`` says what
-        a human still owes the policy.
+        The work is in :func:`histos.mediate.protection.protect_tools`, which takes a
+        Gate rather than being one — see that module on why the dependency runs that way.
         """
-        bound = _resolve_fixed_principal(fixed_principal, principal)
-        result = ProtectResult()
-        # The review describes the policy the HUMAN wrote, so it is read off a snapshot
-        # taken before any inference. Reviewing the live policy afterwards made the
-        # report erase its own worst finding: `role 'admin' grants unknown tool
-        # 'delete_user'` came back clean, because protect() had just declared the tool
-        # the warning was about. A report that answers for its own edits is worse than
-        # no report.
-        authored = replace(self.policy, tools=dict(self.policy.tools))
-        # Inference accumulates here and is installed once, through the property setter,
-        # rather than written into the live ruleset item by item. The Gate's policy is
-        # read-only precisely so an in-place edit cannot take effect against a
-        # `policy_hash` computed before it, and `protect()` must not be the one caller
-        # that goes around that.
-        tools: dict[str, ToolContract] = dict(self.policy.tools)
-        for tool in tool_objects:
-            tool_name = getattr(tool, "__name__", None)
-            if not tool_name:
-                raise PolicyError("cannot determine a tool name in protect(); wrap it individually with name=")
-            # The name is the policy key, so two tools answering to one name is not a
-            # collision to resolve — it is two different callables enforcing one
-            # contract. `result.tools` kept the last, `coverage` listed the name twice
-            # as ready, and the agent was handed a tool gated against somebody else's
-            # rules. Two modules each defining `def delete(...)` is all it takes.
-            if tool_name in result.tools:
-                raise PolicyError(
-                    f"protect() was handed two tools named {tool_name!r} "
-                    f"({getattr(tool, '__qualname__', tool_name)!r} and one before it). The name is the "
-                    "policy key, so one of them would be enforced against the other's contract. Wrap them "
-                    "separately with Gate.wrap(tool, name=...) and give each its own name.",
-                )
-            if tool_name == "<lambda>":
-                raise PolicyError(
-                    "protect() was handed a lambda, which has no stable name to key a policy on. "
-                    "Wrap it with Gate.wrap(tool, name=...)."
-                )
-
-            contract = self.policy.contract_for(tool_name)
-            has_policy = contract is not None
-            granted = any(tool_name in self.policy.allowed_tools(role) for role in self.policy.permissions)
-            # An inferred schema is a convenience, never a grant, and never a stand-in
-            # for one that can reject something. A signature with unannotated
-            # parameters or `**kwargs` infers to a schema that accepts every argument
-            # of every type; installing that where the policy had none replaced the
-            # documented `unknown_tool` / `no_arg_schema` denial with a check that
-            # cannot fail — a fail-open reached by the DEFAULT argument, while the
-            # coverage report still said "needs-policy" about a tool that just ran.
-            # So it is only installed when it actually constrains.
-            #
-            # And never for a tool that is already GRANTED but undeclared. Inferring a
-            # schema fills a hole in a contract a human wrote; inferring the contract
-            # itself writes the declaration the grant was waiting for, and `unknown_tool`
-            # — the denial that makes "nothing is silently left ungated" true — became an
-            # allow for a tool whose `tools:` entry someone had deleted or renamed. That
-            # combination keeps denying until a human declares it.
-            if contract is None and infer_missing and not granted:
-                inferred = infer_contract(tool)
-                if inferred.args is not None and _schema_constrains(inferred.args):
-                    tools[tool_name] = inferred
-            elif contract is not None and contract.args is None and infer_missing:
-                schema = infer_schema(tool)
-                if _schema_constrains(schema):
-                    tools[tool_name] = replace(contract, args=schema)
-
-            if has_policy and granted:
-                status = "ready"
-            elif not has_policy:
-                status = "needs-policy"  # inferred schema only; no RBAC → denies by default
-            else:
-                status = "needs-grant"  # contract exists but no role may call it yet
-
-            result.tools[tool_name] = self.wrap(tool, name=tool_name, fixed_principal=bound)
-            result.coverage.append(
-                {"tool": tool_name, "status": status, "granted": granted, "had_contract": has_policy}
-            )
-
-        if tools != dict(self.policy.tools):
-            self.policy = replace(self.policy, tools=tools)  # type: ignore[assignment]
-        # The names go in explicitly because the snapshot is, correctly, blind to them:
-        # a tool the policy never declared is not in `authored.tools`, so without this
-        # the review would answer for three tools while the agent holds four.
-        result.review = review_policy(authored, discovered=result.tools)
-        return result
+        return protect_tools(
+            self,
+            tool_objects,
+            fixed_principal=fixed_principal,
+            principal=principal,
+            infer_missing=infer_missing,
+        )
 
     # ── audit emit ───────────────────────────────────────────────────
 
