@@ -843,7 +843,15 @@ def _cyclic_dict():
     return d
 
 
-def _deep(levels=4000):
+def _deep(levels=20_000):
+    """Deep enough to exhaust the stack on *any* runner, which 4000 was not.
+
+    A 4000-deep argument fits the 8 MB thread stack a Linux or macOS runner gives you and
+    does not fit Windows' 1 MB — so the first version of this check was green locally and
+    green on ten of eleven CI jobs while the defect it was written for was still open on
+    the eleventh. A bound that only one platform enforces is not a bound this suite can
+    rely on, so the data goes past all of them.
+    """
     top = current = {}
     for _ in range(levels):
         nxt: dict = {"pad": "x"}
