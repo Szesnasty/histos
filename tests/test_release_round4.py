@@ -812,7 +812,12 @@ def test_a_bound_outside_the_type_that_consults_it_is_refused(kwargs):
         {"type": "integer", "minimum": 1, "maximum": 5},
         {"type": "array", "item_type": "string", "max_length": 8, "max_items": 3},
         {"type": "array", "item_type": "integer", "minimum": 0, "unique_items": True},
-        {"type": "any", "maximum": 10, "pattern": "^a+$"},
+        # `any` keeps only the three string bounds: `_check_string_value` is dispatched
+        # on `isinstance(value, str)`, so those fire whatever the declaration says. The
+        # numeric and array ones are read under a literal type test and are stone dead
+        # here — this parametrisation used to assert `maximum=10` was fine on an untyped
+        # field, which is exactly the silent no-op the guard exists to refuse.
+        {"type": "any", "pattern": "^a+$", "max_length": 8},
         {"type": "number", "exclusive_minimum": 0.0},
     ],
 )

@@ -150,7 +150,18 @@ class DecisionRecorder:
             "Read Gate.audit_failures for the count, or give the sink strict=True to raise instead."
         )
         if getattr(self.audit, "strict", False):
-            raise exc
+            # Detached and suppressed, both. `record()` is called from inside the
+            # wrapper's `except` handler, so CPython had already stamped `__context__`
+            # on the sink's exception at the moment the sink raised — and that context
+            # is the tool's *original*, unredacted error, which still carries whatever
+            # the post-gate took out of the message the caller sees. SECURITY.md states
+            # the original is attached as neither `__cause__` nor `__context__`, and
+            # `traceback.format_exception` walks both, so `strict=True` put the canary
+            # back on screen through the one flag that exists to make evidence stricter.
+            # `from None` alone hides it from the formatted traceback and leaves the
+            # attribute set on the object for an error reporter to pick up.
+            exc.__context__ = None
+            raise exc from None
         try:
             warnings.warn(message, RuntimeWarning, stacklevel=3)
         except Exception:  # noqa: BLE001 — `-W error` is a reporting choice, not a veto

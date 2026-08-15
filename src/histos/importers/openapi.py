@@ -110,9 +110,29 @@ def _json_schema_of(spec: dict[str, Any], content: Any, *, where: str) -> dict[s
         return None
     if not isinstance(content, dict):
         raise _malformed(f"the `content` of {where}", content, "a mapping of media type to schema")
-    body = content.get("application/json", {})
+    # Matched by base type, not by exact spelling. `application/json; charset=utf-8`,
+    # `application/vnd.api+json` (JSON:API) and `application/merge-patch+json` (RFC 7396,
+    # which Azure ARM and a great many REST APIs use) are all JSON, and reading them as
+    # "no JSON here" used to drop the body silently. Since the drop became a refusal that
+    # is the whole operation, so the match has to be the one the media type means.
+    body = content.get("application/json")
+    if not isinstance(body, dict):
+        body = next(
+            (
+                media
+                for media_type, media in content.items()
+                if isinstance(media_type, str) and isinstance(media, dict) and _is_json_media_type(media_type)
+            ),
+            None,
+        )
     schema = _deref(spec, body.get("schema"), where=where) if isinstance(body, dict) else None
     return schema if isinstance(schema, dict) else None
+
+
+def _is_json_media_type(media_type: str) -> bool:
+    """`application/json`, with any parameters, and the `+json` structured suffixes."""
+    base = media_type.split(";", 1)[0].strip().lower()
+    return base == "application/json" or base.endswith("+json")
 
 
 def _declares_fields(spec: dict[str, Any], content: Any, name: str) -> bool:
@@ -134,7 +154,12 @@ def _declares_fields(spec: dict[str, Any], content: Any, name: str) -> bool:
             schema = _deref(spec, media.get("schema"), where=f"requestBody {media_type} of {name!r}")
         except PolicyError:
             return True  # a body whose schema cannot even be resolved is not a stream
-        if isinstance(schema, dict) and (schema.get("properties") or schema.get("type") == "object"):
+        # `properties` only. A bare `{"type": "object"}` — the opaque-payload shape a
+        # merge-patch body and every "free-form object" body uses — names nothing, so
+        # there is nothing for the projection to lose and refusing it costs the operation
+        # its query parameters for no gain. The docstring above always said "declares
+        # named fields"; the extra arm contradicted it.
+        if isinstance(schema, dict) and schema.get("properties"):
             return True
     return False
 

@@ -40,6 +40,26 @@ def _unwrap_target(fn: Callable[..., Any]) -> Callable[..., Any]:
     return target
 
 
+def _same_tool(a: Any, b: Any) -> bool:
+    """Whether two wrap identities describe the same tool, without asking the host.
+
+    The check was `previous != target`, which delegates the question to the tool object's
+    own `__eq__` — and a great many tool objects have one. A Pydantic model, a dataclass,
+    an ORM row, anything comparing by value: two genuinely different tools that happen to
+    hold equal fields answer "same", and the collision that stops one contract enforcing
+    two callables is waved through. The one case `==` was adopted for is a bound method,
+    and that case is written out here instead.
+    """
+    if a is b:
+        return True
+    if inspect.ismethod(a) and inspect.ismethod(b):
+        return a.__self__ is b.__self__ and a.__func__ is b.__func__
+    if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
+        # A partial's key: its target compared as a tool, its bound arguments by value.
+        return _same_tool(a[0], b[0]) and a[1:] == b[1:]
+    return False
+
+
 def _wrap_identity(fn: Any) -> Any:
     """The value that answers "is this the same *tool*", which is not "the same object".
 

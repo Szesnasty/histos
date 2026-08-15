@@ -152,13 +152,35 @@ def _folds_case(directory: str) -> bool:
     with no cased characters at all, or a filesystem error. Under that fallback this
     behaves exactly as the old unconditional fold did.
     """
+    # Probe an entry *inside* the directory, not the directory's own name. The name
+    # lives on the parent's volume, and at a mount point those are different
+    # filesystems — a case-sensitive image mounted under a case-insensitive one answered
+    # for the wrong one, which is the configuration a per-tenant volume produces.
+    try:
+        children = os.listdir(directory)
+    except OSError:
+        children = []
+    for child in children[:64]:
+        swapped = child.swapcase()
+        if swapped == child:
+            continue
+        try:
+            return os.path.samestat(os.stat(os.path.join(directory, child)), os.stat(os.path.join(directory, swapped)))
+        except OSError:
+            # This one spelling does not resolve. `str.swapcase` is not the volume's
+            # folding table — U+0131 DOTLESS I, ordinary in Turkish, swapcases to ASCII
+            # `I`, which APFS does not fold back — so a miss says nothing about the
+            # volume and the next child is tried.
+            continue
     parent, name = os.path.split(directory)
     swapped = name.swapcase()
     if parent and swapped != name:
         try:
             return os.path.samestat(os.stat(directory), os.stat(os.path.join(parent, swapped)))
         except OSError:
-            return False
+            pass
+    # Nothing measurable. The platform default, which is what the docstring promises and
+    # what this library did before the probe existed.
     return sys.platform in ("darwin", "win32")
 
 

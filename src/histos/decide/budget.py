@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from histos.decide.redaction import _record_fields
+
 
 def _stringify(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
@@ -97,6 +99,14 @@ def _node_count_over(obj: Any, budget: int) -> bool:
             return any(walk(k) or walk(v) for k, v in value.items())
         if isinstance(value, (list, tuple, set, frozenset)):
             return any(walk(v) for v in value)
+        # The same door the projector was given, and was not given here in the same
+        # commit. A record was charged one node and zero characters however much it
+        # wrapped, so the bound that exists to stop attacker-chosen output turning one
+        # call into a stall reported it under budget — and then the projector walked
+        # every field of it.
+        fields = _record_fields(value)
+        if fields is not None:
+            return any(walk(v) for v in fields.values())
         return False
 
     try:
@@ -147,6 +157,13 @@ def _text_blob(obj: Any, budget: int) -> tuple[str, bool]:
         elif isinstance(value, (list, tuple, set, frozenset)):
             for v in value:
                 walk(v)
+        else:
+            # Records too. `_project_output` was taught to enter them and this walk was
+            # not, so the character half of the budget saw nothing inside one either.
+            fields = _record_fields(value)
+            if fields is not None:
+                for v in fields.values():
+                    walk(v)
 
     walk(obj)
     return " ".join(pieces), truncated

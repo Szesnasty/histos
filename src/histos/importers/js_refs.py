@@ -148,7 +148,11 @@ def _intersect(target: dict[str, Any], sibling: dict[str, Any], *, where: str) -
             merged[key] = {**merged[key], **value}
             continue
         if key == "required" and isinstance(merged[key], list) and isinstance(value, list):
-            merged[key] = list(dict.fromkeys([*merged[key], *value]))
+            # By equality, not by hash. A `$ref` sibling whose `required` holds a list
+            # or an object raised `TypeError` from inside `_intersect`, and
+            # `project_tools` catches `PolicyError` and nothing else — so one malformed
+            # tool took the whole manifest down instead of being skipped.
+            merged[key] = [*merged[key], *(v for v in value if v not in merged[key])]
             continue
         if key in ("type", "pattern", "enum", "const", "format"):
             # Two of these cannot both hold unless they agree, and guessing which the
