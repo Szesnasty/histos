@@ -122,6 +122,28 @@ class ToolContract:
         # tool nor the field. `authz.py` states the rule for constraint literals: a
         # policy that cannot be hashed is refused where it is written, not where it is
         # hashed. It applies here too.
+        # The three integers, checked the same way and for the same reason. They were
+        # not, so `budget: "many"` built without complaint and then answered
+        # `internal_error` to every call for the life of the process — `0 >= "many"`
+        # raises inside the limit store — and `rate_limit: -1` denied every call with the
+        # reason "rate_limit", which reads as "you are calling too often" to an operator
+        # who has called zero times. Both fail closed, and both are a typo diagnosable
+        # only by running the tool.
+        #
+        # Zero is refused rather than read as "never": a tool nobody may call is spelled
+        # by not granting it, and a confirmation that expires in zero seconds is stale
+        # before it can be used. `bool` is excluded because `True` is 1 and
+        # `rate_limit: true` is a mistake, not a limit of one.
+        for name in ("rate_limit", "budget", "confirmation_expires_in"):
+            declared = getattr(self, name)
+            if declared is None:
+                continue
+            if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+                raise PolicyError(
+                    f"tool {self.name!r}: {name} must be a positive whole number of "
+                    f"{'seconds' if name == 'confirmation_expires_in' else 'calls'}, got {declared!r}",
+                    code="invalid_contract",
+                )
         if not isinstance(self.sensitivity, Sensitivity):
             allowed = "|".join(repr(s.value) for s in Sensitivity)
             raise PolicyError(

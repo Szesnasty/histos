@@ -1095,3 +1095,41 @@ def test_the_documented_reach_of_the_output_scan_is_the_real_one(shape):
         f"update this table and the two passages in SECURITY.md that state it, "
         f"then this test again — trail said redactions={sink.entries[-1]['redactions']}"
     )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"rate_limit": -1},
+        {"rate_limit": 0},
+        {"rate_limit": 1.5},
+        {"rate_limit": "ten"},
+        {"rate_limit": True},
+        {"budget": -5},
+        {"budget": "many"},
+        {"confirmation_expires_in": -1},
+        {"confirmation_expires_in": 0},
+    ],
+)
+def test_a_limit_that_cannot_be_enforced_is_refused_where_it_is_written(bad):
+    """The same rule as `sensitivity`, one field further along.
+
+    `access`, `on_output_violation`, `sensitivity` and every bound on a `Field` are
+    checked in `__post_init__`. The three integers on a contract were not, so
+    `budget: "many"` built fine and then answered `internal_error` to every call for the
+    life of the process, and `rate_limit: -1` denied every call with the reason
+    "rate_limit" — which reads as "you are calling too often" to an operator who has
+    called zero times. Fail-closed, and a typo that can only be diagnosed at runtime.
+
+    Zero is refused rather than read as "never": a tool nobody may call is spelled by not
+    granting it, and an expiry of zero seconds makes every approval stale before it is
+    used. Nothing in the tests, demos or docs spells it the other way.
+    """
+    with pytest.raises(PolicyError, match=next(iter(bad))):
+        ToolContract(name="t", args=Schema({}), **bad)
+
+
+@pytest.mark.parametrize("good", [{}, {"rate_limit": 1}, {"budget": 1000}, {"confirmation_expires_in": 60}])
+def test_an_ordinary_limit_is_still_accepted(good):
+    """The other half, because refusing honest work is the failure in the other direction."""
+    ToolContract(name="t", args=Schema({}), **good)
