@@ -115,34 +115,45 @@ class ApprovalStore:
         self._approved: dict[str, _Grant] = {}
         self._lock = threading.Lock()
 
-    def grant(self, fingerprint: str) -> None:
+    def grant(self, approved: GateRequest | str) -> None:
         """Record an out-of-band approval for one exact action. Host-only.
 
-        The ruleset in force is recorded beside the clock. `README.md` and this
-        module's own callers said an approval binds to the policy hash and nothing
-        did it: the fingerprint covers the tool, the arguments and the whole
-        principal, and says nothing about the rules. So an approval granted at 10:00
-        under a strict ruleset was still spendable at 10:06 after a deploy loosened
-        it, and the audit line then read "approved by the officer" about a decision
-        made under rules that officer never saw.
+        **Pass the request the gate paused** — `exc.request` off
+        `GateConfirmationRequired`. It carries the ruleset the gate actually decided
+        under, and that is the only place that information exists at the moment an
+        operator clicks approve.
 
-        The window is recorded here too, not read back at consume. `_window()` reads
-        `self._policy`, and this store keeps whatever `Policy` object it was handed:
-        `Gate.policy = ...` updates the Gate and the Engine and cannot reach in here, so
-        a store outlives the ruleset it was built with and would apply the *old*
-        `confirmation.expires_in` to a grant made under the new one. The window an
-        operator was shown when they approved is the window that binds.
+        A fingerprint string still works and is the weaker spelling. It cannot say which
+        ruleset it belongs to, so the store falls back to the policy it was *built* with
+        — and `Gate.policy = ...` replaces the Gate's policy and engine and cannot reach
+        in here. After one hot reload the store signed every grant with the outgoing
+        hash, `consume` correctly refused each one, and every tool requiring
+        confirmation was dead for the life of the process: fail-closed, and a permanent
+        outage reached through the documented way to change rules in flight. That is the
+        defect this overload exists to remove, and the string form is kept only because
+        it is published.
+
+        The window is recorded here too, never read back at consume, for the same
+        reason: `_window()` reads `self._policy`, so a store that has outlived its
+        ruleset would apply the *old* `confirmation.expires_in` to a grant made under
+        the new one. The window an operator was shown is the window that binds.
         """
+        if isinstance(approved, str):
+            with self._lock:
+                self._approved[approved] = _Grant(self._clock(), self._policy_hash(), None)
+            return
         with self._lock:
-            self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), None)
+            self._approved[fingerprint_of(approved)] = _Grant(
+                self._clock(),
+                approved.policy_hash or self._policy_hash(),
+                self._window(approved.tool_name),
+            )
 
     def grant_for(self, fingerprint: str, tool_name: str) -> None:
-        """:meth:`grant`, with the tool named so its declared window can be pinned.
+        """:meth:`grant` with the tool named, for a host that holds no request.
 
-        `grant()` alone cannot know which contract to read — a fingerprint is a hash and
-        says nothing about the tool. Naming it pins `confirmation.expires_in` as it
-        stands now; without it the window is read at consume, which is correct while the
-        store's policy is current and is the older, weaker guarantee.
+        Pins `confirmation.expires_in` as it stands now. Superseded by passing the
+        request itself, which pins the ruleset as well and is the spelling to reach for.
         """
         with self._lock:
             self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), self._window(tool_name))

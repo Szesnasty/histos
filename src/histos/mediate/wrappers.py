@@ -21,6 +21,7 @@ took out of the message.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections.abc import Callable
@@ -295,6 +296,32 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
                 outcome = gate._confirm(for_callback(req))
                 if inspect.isawaitable(outcome):
                     outcome = await outcome
+            except asyncio.CancelledError:
+                # Recorded, then re-raised untouched. The engine had already decided
+                # REQUIRE_CONFIRMATION and the wrapper was waiting on a human; a
+                # cancelled task raises this, which is not in `_confirm_suspends` unless
+                # a host thought to name it — so the call unwound with the sink empty. A
+                # high-risk call that reached the approval stage and left no trace is the
+                # "every decision is recorded" promise failing on the one call shape that
+                # most needs the record.
+                #
+                # Nothing ran, so `executed=False`. And the cancellation is re-raised as
+                # itself: swallowing a `CancelledError` breaks the shutdown that sent it.
+                gate._recorder.record(
+                    tool_name,
+                    call_args,
+                    GateDecision(
+                        Effect.REQUIRE_CONFIRMATION,
+                        "confirm_cancelled",
+                        f"{tool_name!r} was cancelled while awaiting an out-of-band approval",
+                    ),
+                    "pre",
+                    started,
+                    active,
+                    False,
+                    rebound,
+                )
+                raise
             except UndetachableArgument as exc:
                 pre = exc.as_decision()
                 outcome = None

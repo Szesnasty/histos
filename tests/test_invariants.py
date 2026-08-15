@@ -1652,3 +1652,96 @@ def test_the_record_says_which_mode_actually_ran_the_call(path, start, swap_to):
     assert record["executed"] is executed, (
         f"the tool {'ran' if executed else 'did not run'} and the record says executed={record['executed']}"
     )
+
+
+def test_an_approval_still_works_after_the_ruleset_is_swapped():
+    """Binding approvals to the ruleset must not make a hot reload permanent breakage.
+
+    `gate.policy = ...` replaces the Gate's policy and engine and cannot reach an
+    `ApprovalStore` the host built separately — so after one swap the store went on
+    signing every grant with the *old* hash, `consume` correctly refused each one, and
+    every tool requiring confirmation was dead for the life of the process. Fail-closed,
+    and a permanent outage reached through the documented way to change rules in flight.
+
+    Granting against the *request* the gate paused is what closes it: the request carries
+    the hash the gate decided under, so the operator approves the call in front of them
+    rather than whatever ruleset the store happened to be built with.
+    """
+    from histos.errors import GateConfirmationRequired
+    from histos.mediate.approvals import ApprovalStore
+
+    def ruleset(version):
+        return Policy(
+            tools={"pay": ToolContract(name="pay", args=Schema({}), requires_confirmation=True)},
+            permissions={"r": frozenset({"pay"})},
+            policy_version=version,
+        )
+
+    first, second = ruleset("1"), ruleset("2")
+    paid: list[int] = []
+    store = ApprovalStore(first)
+    gate = Gate(first, audit=InMemoryAuditSink(), confirm=store.as_confirm())
+    safe = gate.wrap(lambda: paid.append(1) or "ok", name="pay")
+
+    gate.policy = second  # the documented way to change rules in flight
+
+    with use_principal(Principal(role="r", identity="i")):
+        try:
+            safe()
+        except GateConfirmationRequired as exc:
+            store.grant(exc.request)  # the operator approves the call the gate paused
+        else:  # pragma: no cover - the tool must pause first
+            pytest.fail("the call did not pause for confirmation")
+        safe()
+
+    assert paid == [1], "an approval granted after a policy swap was refused by its own store"
+
+
+def test_a_cancelled_confirmation_still_leaves_a_record():
+    """"Every decision is recorded" has to survive the await being cancelled.
+
+    The engine had already decided REQUIRE_CONFIRMATION and the wrapper was waiting on
+    the host's callback. A cancelled task raises `asyncio.CancelledError`, which is not
+    in `confirm_suspends` unless a host names it — so the call unwound with the audit
+    sink completely empty: a high-risk call that reached the approval stage and left no
+    trace. Not a bypass, since nothing ran; a hole in the evidence, which is the other
+    half of what this library sells.
+    """
+    import asyncio
+
+    started = asyncio.Event()
+
+    async def confirm(req):
+        started.set()
+        await asyncio.sleep(30)  # the operator never answers
+        return True
+
+    ran: list[int] = []
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), requires_confirmation=True)},
+        permissions={"r": frozenset({"t"})},
+    )
+    sink = InMemoryAuditSink()
+
+    async def tool():
+        ran.append(1)
+        return "done"
+
+    safe = Gate(policy, audit=sink, confirm=confirm).wrap(tool, name="t")
+
+    async def go():
+        async def call():
+            with use_principal(Principal(role="r", identity="i")):
+                await safe()
+
+        task = asyncio.create_task(call())
+        await started.wait()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+
+    assert not ran, "the tool ran despite the confirmation being cancelled"
+    assert sink.entries, "a call that reached the approval stage left no record at all"
+    assert sink.entries[-1]["executed"] is False
