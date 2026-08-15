@@ -534,7 +534,7 @@ def test_a_wide_exception_group_is_read_to_the_end():
     of a group — ran the sixteen-link bound out on its members and came back incomplete.
     The caller turns that into a redact-all, so an ordinary `asyncio.TaskGroup` fan-out
     had its real error replaced by "the exception chain is longer than 16 links"."""
-    from histos.engine import _exception_text
+    from histos.excchain import _exception_text
 
     members = [ValueError(f"shard {i} failed") for i in range(40)]
     members[37] = ValueError("password authentication failed for user svc:hunter2")
@@ -544,7 +544,7 @@ def test_a_wide_exception_group_is_read_to_the_end():
 
 
 def test_a_deep_chain_is_still_cut():
-    from histos.engine import _MAX_EXCEPTION_CHAIN, _exception_text
+    from histos.excchain import _MAX_EXCEPTION_CHAIN, _exception_text
 
     deep: BaseException = ValueError("leaf")
     for i in range(_MAX_EXCEPTION_CHAIN * 2):
@@ -556,14 +556,14 @@ def test_a_deep_chain_is_still_cut():
 
 
 def test_pathological_breadth_is_still_cut():
-    from histos.engine import _MAX_EXCEPTION_NODES, _exception_text
+    from histos.excchain import _MAX_EXCEPTION_NODES, _exception_text
 
     group = ExceptionGroup("many", [ValueError(str(i)) for i in range(_MAX_EXCEPTION_NODES * 5)])
     assert _exception_text(group)[1]
 
 
 def test_a_cycle_in_the_chain_does_not_hang():
-    from histos.engine import _exception_text
+    from histos.excchain import _exception_text
 
     first, second = ValueError("a"), ValueError("b")
     first.__cause__, second.__cause__ = second, first

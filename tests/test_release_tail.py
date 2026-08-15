@@ -952,7 +952,7 @@ def test_the_raise_path_is_budgeted_like_the_return_path():
     """`_exception_text` materialised the whole chain and handed it to the NFKC pass and
     every detector. Tool error text is as attacker-controlled as tool output, so the
     raise path is the same DoS the return budget exists to close."""
-    from histos.engine import _exception_text
+    from histos.excchain import _exception_text
 
     text, incomplete = _exception_text(ValueError("x" * 5_000_000), 4_194_304)
     assert incomplete
