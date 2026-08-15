@@ -1581,3 +1581,74 @@ def test_the_enforcement_mode_is_decided_once_per_call():
     worker.join(5)
 
     assert not ran, "a call denied under enforce executed because the mode moved mid-call"
+
+
+@pytest.mark.parametrize("path", ["sync", "async"])
+@pytest.mark.parametrize("start,swap_to", [("enforce", "observe"), ("observe", "enforce")])
+def test_the_record_says_which_mode_actually_ran_the_call(path, start, swap_to):
+    """Execution froze the mode at entry; the record went on reading the live one.
+
+    Both directions produce a record that is the opposite of what happened. Starting in
+    enforce and switching to observe mid-call: the call is blocked, correctly, and the
+    row says `enforced=false, executed=true` — that the tool ran under a dry run. The
+    other way round: the tool runs, correctly, and the row says `enforced=true,
+    executed=false` — that enforcement stopped it.
+
+    Not a bypass. The mechanism holds the mode it started with, which is the fix from
+    the commit before. But a trail that reports the inverse of what happened is the
+    product's other half failing, and it fails in the direction that reads as safe.
+    """
+    import asyncio
+    import threading
+
+    ran: list[int] = []
+    entered, release = threading.Event(), threading.Event()
+
+    def confirm(req):
+        entered.set()
+        release.wait(5)
+        return False  # never approved: enforce blocks, observe runs anyway
+
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), requires_confirmation=True)},
+        permissions={"r": frozenset({"t"})},
+    )
+    sink = InMemoryAuditSink()
+    gate = Gate(policy, audit=sink, confirm=confirm, mode=start)
+
+    if path == "sync":
+        safe = gate.wrap(lambda: ran.append(1) or "done", name="t")
+
+        def drive():
+            with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+                safe()
+    else:
+
+        async def tool():
+            ran.append(1)
+            return "done"
+
+        safe = gate.wrap(tool, name="t")
+
+        def drive():
+            async def go():
+                with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+                    await safe()
+
+            asyncio.run(go())
+
+    worker = threading.Thread(target=drive)
+    worker.start()
+    assert entered.wait(5), "the confirm callback never ran"
+    gate.mode = swap_to
+    release.set()
+    worker.join(5)
+
+    executed = bool(ran)
+    record = sink.entries[-1]
+    assert record["enforced"] is (start == "enforce"), (
+        f"call started in {start!r} and the record says enforced={record['enforced']}"
+    )
+    assert record["executed"] is executed, (
+        f"the tool {'ran' if executed else 'did not run'} and the record says executed={record['executed']}"
+    )
