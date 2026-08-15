@@ -83,7 +83,10 @@ puts the answer back. `run.py process 1 --histos --ask` makes you the officer.
 ## What actually happened
 
 `qwen2.5:7b`, `temperature=0`, `run.py all` (each invoice in a fresh database).
-Identical across five consecutive runs.
+The payment result below was identical across five consecutive runs. The separate
+off-book-email incident on invoice 4 is still printed, but is not counted as money
+misdirected; the aggregate table later in this repository counts both incident
+types and explains the different denominator.
 
 | | invoice | AP application alone | with the policy |
 |---|---|---|---|
@@ -95,7 +98,7 @@ Identical across five consecutive runs.
 
 ```
   invoices where money went somewhere it should not
-    AP application alone: 2/5
+    AP application alone: 1/5
     with histos:          0/5
 ```
 
@@ -282,7 +285,7 @@ break. The answer is a narrower exception with a reason, not a weaker default.**
 **One 7B model at `temperature=0`.** The unprotected column is a property of this
 model: a different one reasons differently about which invoices look wrong, and
 invoice 2 in particular may be caught or missed. Five consecutive `run.py all`
-invocations gave 2/5 and 0/5 every time, and three `run.py session` invocations gave
+invocations gave 1/5 and 0/5 every time, and three `run.py session` invocations gave
 22 600 / 8 400 every time, but that is stability on one machine with one model, not a benchmark. The
 protected column does not move, because its bounds are not decided by the model —
 `run.py checks` exercises them without a model at all.

@@ -24,6 +24,7 @@ Environment:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -287,11 +288,18 @@ def _useful(demo: str, block: dict) -> bool:
     return bool(utility.get("service_healthy"))
 
 
-def main() -> int:
-    if len(sys.argv) < 2:
-        print(__doc__)
-        return 2
-    out = Path(sys.argv[1])
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("out", type=Path, help="JSONL result file (raw transcripts go beside it)")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="run one free local-model cell per scenario and refuse to start a paid grid",
+    )
+    args = parser.parse_args(argv)
+    out = args.out
     raw_dir = out.with_suffix("") / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     rev = revision()
@@ -302,7 +310,7 @@ def main() -> int:
         print("  two different programs, with nothing in the record to say which.", file=sys.stderr)
         return 2
 
-    if "--preflight" in sys.argv:
+    if args.preflight:
         # Free, local, and it fails loudly rather than producing a number. Nothing is
         # bought until every demo has proved it can report at all.
         bad = 0
@@ -348,10 +356,16 @@ def main() -> int:
             fh.write(json.dumps(record) + "\n")
             fh.flush()
             print(f"{_line(record)}  ${spent:.4f}", flush=True)
+            if record["ok"]:
+                done.add((demo, model, temp, rep))
             consecutive = consecutive + 1 if not record["ok"] else 0
             if consecutive >= 5:
                 print("STOPPED: five consecutive bad cells — that is broken, not noisy", flush=True)
                 break
+    pending = [cell for cell in grid if (cell[0], cell[1], cell[2], cell[4]) not in done]
+    if pending:
+        print(f"SWEEP INCOMPLETE — {len(pending)} cell(s) still need a usable result", flush=True)
+        return 1
     print("SWEEP COMPLETE", flush=True)
     return 0
 

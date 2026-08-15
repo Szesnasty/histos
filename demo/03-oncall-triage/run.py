@@ -278,14 +278,14 @@ def cmd_triage(args: argparse.Namespace) -> int:
     dispatch = guarded.dispatch if guarded else unprotected()
     _banner()
     print(f"policy {'ON' if args.histos else 'OFF'}")
-    _run(
+    result = _run(
         args.alert_id,
         dispatch,
         gated=args.histos,
         gate=guarded.gate if guarded else None,
         executions=guarded.executions if guarded else None,
     )
-    return 0
+    return 1 if result.run.error else 0
 
 
 def cmd_smoke(args: argparse.Namespace) -> int:

@@ -283,10 +283,15 @@ def test_the_committed_demo_lock_matches_what_the_importer_produces_now():
         sys.path.remove(str(demo))
 
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert lock["lock_version"] == 2, "the demo needs a reviewed baseline, not a legacy hash-only lock"
     stale: list[str] = []
     for source in sources_from_mcp(tools_list(build_v1())):
         recorded = lock["tools"].get(source.contract.name)
         assert recorded is not None, f"{source.contract.name} is not in the lock at all"
+        assert recorded.get("reviewed") == {
+            "shape": source.shape,
+            "description": source.description,
+        }, f"the demo lock does not carry the reviewed baseline for {source.contract.name}"
         if (
             contract_hash(source.contract) != recorded["contract_sha256"]
             or schema_hash(source.shape) != recorded["schema_sha256"]

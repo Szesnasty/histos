@@ -284,8 +284,7 @@ def cmd_schemas(args: argparse.Namespace) -> int:
 def cmd_attacks(_: argparse.Namespace) -> int:
     import attacks
 
-    attacks.main()
-    return 0
+    return attacks.main([])
 
 
 def main() -> int:

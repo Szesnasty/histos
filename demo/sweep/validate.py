@@ -28,6 +28,7 @@ tests cannot reach.
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -315,7 +316,11 @@ def _in_demo(demo: str, body: str) -> str | None:
     return (proc.stderr.strip().splitlines() or ["no output"])[-1][:160]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.parse_args(argv)
     print(f"validating the instrument against {len(CASES)} planted faults and controls\n")
     failures = 0
     area = ""

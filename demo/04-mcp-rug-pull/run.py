@@ -45,11 +45,11 @@ HERE = Path(__file__).resolve().parent
 POLICY_PATH = HERE / "docuvault.policy.json"
 AUTHORED_PATH = HERE / "docuvault.authored.policy.json"
 
-# What the importer guesses and a human has to decide. MCP does not carry
-# read/write or a sensitivity, so `ToolContract`'s defaults (`read` / `low`) end up
-# in the dumped bundle indistinguishably from a considered answer. Writing them
-# into the skeleton would tell a reviewer that a tool which emails documents out of
-# the company is a low-sensitivity read, so they are stripped and named instead.
+# What the importer cannot learn and a human has to decide. MCP does not carry
+# read/write or sensitivity, so the importer deliberately projects the conservative
+# placeholders `write` / `critical` and the review report names them as unreviewed.
+# This demo also strips them from the skeleton: absence cannot be mistaken for a
+# considered answer, while `histos review` still reports the in-memory placeholders.
 ASSUMED = ("access", "sensitivity")
 
 
@@ -192,40 +192,48 @@ def cmd_drift(args: argparse.Namespace) -> int:
 def _show(drift: Any, source: Any) -> None:
     """Print what an operator can actually see on review day.
 
-    The only artefact they kept is the lock, and the lock holds hashes. So this is
-    built from the lock plus what the server says *now* — never from the old build,
-    which nobody has — and it prints the new text whole rather than grepping it for
-    a phrase this demo happens to have authored.
+    This is built from the committed lock plus what the server says *now* — never
+    from the old build, which nobody has. Version-2 locks retain a bounded reviewed
+    copy so the report can show the difference. Older or size-capped locks degrade
+    explicitly to hash-only reporting instead of pretending they have a baseline.
     """
     if source is None or drift.status != "changed":
         return
 
-    if "description_sha256" in drift.changed:
-        print(f"\n  {DIM}description_sha256 moved. The description now reads, in full:{OFF}")
-        for line in (source.description or "").strip().splitlines():
-            print(f"    {RED}{line.strip()}{OFF}" if line.strip() else "")
+    if drift.diff:
+        print(f"\n  {DIM}reviewed lock → current server:{OFF}")
+        for line in drift.diff:
+            stripped = line.lstrip()
+            colour = GREEN if stripped.startswith("+") else RED if stripped.startswith("-") else OFF
+            print(f"    {colour}{line}{OFF}")
 
-    if "schema_sha256" in drift.changed:
-        print(f"\n  {DIM}schema_sha256 moved. The declared input schema is now:{OFF}")
-        shape = (source.shape or {}).get("input") or {}
-        for line in json.dumps(shape, indent=2).splitlines():
-            print(f"    {line}")
-        print(f"  {DIM}the lock stores a hash of this and not the shape itself, so there is{OFF}")
-        print(f"  {DIM}nothing here to diff against. Reviewing it means reading it.{OFF}")
+    for part in drift.unexplained:
+        print(f"\n  {YELLOW}{part} changed, but this lock has no reviewed {part} to diff.{OFF}")
+        if part == "description":
+            print(f"  {DIM}the current description reads:{OFF}")
+            for line in (source.description or "").splitlines() or [""]:
+                print(f"    {line}")
+        elif part == "shape":
+            print(f"  {DIM}the current declared input schema is:{OFF}")
+            shape = (source.shape or {}).get("input") or {}
+            for line in json.dumps(shape, indent=2).splitlines():
+                print(f"    {line}")
+        print(f"  {DIM}re-import after review to record a new baseline; the drift still exits 1.{OFF}")
 
 
 # ── explain ──────────────────────────────────────────────────────────────
 
 
 def cmd_explain(args: argparse.Namespace) -> int:
-    """Put the two builds side by side. Requires holding both, which is the point."""
+    """Put the two builds side by side as a teaching aid."""
     before = {s.name: s for s in sources_from_mcp(tools_list(build_v1()))}
     after = {s.name: s for s in sources_from_mcp(tools_list(BUILDS[args.to]()))}
     old, new = before["search_documents"], after["search_documents"]
 
     print(f"{BOLD}search_documents: v1 against {args.to}{OFF}")
-    print(f"  {DIM}this command holds both builds. On review day you hold the lock and the")
-    print(f"  server; that asymmetry is why the lock hashes three things and not one.{OFF}\n")
+    print(f"  {DIM}this command reconstructs both builds to explain the three signals. `drift`")
+    print("  needs only the committed lock and the current server: the lock records a bounded")
+    print(f"  reviewed copy beside the hashes, so the old server does not need to be retained.{OFF}\n")
     print(f"  {DIM}projected contract (what the gate enforces){OFF}")
     print(f"    v1:  args = {sorted((old.contract.args.fields if old.contract.args else {}) or {})}")
     print(f"    {args.to}:  args = {sorted((new.contract.args.fields if new.contract.args else {}) or {})}")
