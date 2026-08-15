@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from histos.decide.engine import for_callback
+from histos.decide.engine import UndetachableArgument, for_callback
 from histos.errors import (
     GateConfirmationRequired,
     GateDenied,
@@ -115,6 +115,9 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
             # policy had already decided needed a human. Fail closed and record it.
             try:
                 outcome = gate._confirm(for_callback(req))
+            except UndetachableArgument as exc:
+                pre = exc.as_decision()
+                outcome = None
             except gate._confirm_suspends:
                 # Recorded before it leaves. The comment above says a raising
                 # confirm "used to escape the gate as its own exception, with no
@@ -177,7 +180,15 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
                 # The request travels with the pause. `req.args` is post-binding, and
                 # that is the only spelling an approval will match — see
                 # GateConfirmationRequired.
-                raise GateConfirmationRequired(pre, for_callback(req))
+                try:
+                    paused = for_callback(req)
+                except UndetachableArgument as exc:
+                    # Not parked. The fingerprint an approval is granted against is
+                    # taken from the request that travels with this pause, so a call
+                    # whose arguments cannot be detached cannot be safely approved
+                    # either — the host would be fingerprinting a live dict.
+                    raise GateDenied(exc.as_decision()) from None
+                raise GateConfirmationRequired(pre, paused)
             raise GateDenied(pre)
 
         redacted: BaseException | None = None
@@ -266,6 +277,9 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
                 outcome = gate._confirm(for_callback(req))
                 if inspect.isawaitable(outcome):
                     outcome = await outcome
+            except UndetachableArgument as exc:
+                pre = exc.as_decision()
+                outcome = None
             except gate._confirm_suspends:
                 # Recorded before it leaves. The comment above says a raising
                 # confirm "used to escape the gate as its own exception, with no
@@ -318,7 +332,15 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
                 # The request travels with the pause. `req.args` is post-binding, and
                 # that is the only spelling an approval will match — see
                 # GateConfirmationRequired.
-                raise GateConfirmationRequired(pre, for_callback(req))
+                try:
+                    paused = for_callback(req)
+                except UndetachableArgument as exc:
+                    # Not parked. The fingerprint an approval is granted against is
+                    # taken from the request that travels with this pause, so a call
+                    # whose arguments cannot be detached cannot be safely approved
+                    # either — the host would be fingerprinting a live dict.
+                    raise GateDenied(exc.as_decision()) from None
+                raise GateConfirmationRequired(pre, paused)
             raise GateDenied(pre)
 
         redacted: BaseException | None = None

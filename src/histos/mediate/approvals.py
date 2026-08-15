@@ -40,9 +40,19 @@ import hashlib
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from histos.policy.canonical import canonical_json
 from histos.policy.contracts import GateRequest, Policy, Principal
+
+
+@dataclass(frozen=True)
+class _Grant:
+    """One approval: when it was made, under which ruleset, and for how long."""
+
+    at: float
+    policy_hash: str
+    window: float | None
 
 
 def request_fingerprint(tool_name: str, args: dict, principal: Principal) -> str:
@@ -102,7 +112,7 @@ class ApprovalStore:
         # Monotonic, not wall-clock: an NTP step backwards must not extend a window.
         self._clock = clock
         self._policy = policy
-        self._approved: dict[str, tuple[float, str]] = {}
+        self._approved: dict[str, _Grant] = {}
         self._lock = threading.Lock()
 
     def grant(self, fingerprint: str) -> None:
@@ -115,9 +125,27 @@ class ApprovalStore:
         under a strict ruleset was still spendable at 10:06 after a deploy loosened
         it, and the audit line then read "approved by the officer" about a decision
         made under rules that officer never saw.
+
+        The window is recorded here too, not read back at consume. `_window()` reads
+        `self._policy`, and this store keeps whatever `Policy` object it was handed:
+        `Gate.policy = ...` updates the Gate and the Engine and cannot reach in here, so
+        a store outlives the ruleset it was built with and would apply the *old*
+        `confirmation.expires_in` to a grant made under the new one. The window an
+        operator was shown when they approved is the window that binds.
         """
         with self._lock:
-            self._approved[fingerprint] = (self._clock(), self._policy_hash())
+            self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), None)
+
+    def grant_for(self, fingerprint: str, tool_name: str) -> None:
+        """:meth:`grant`, with the tool named so its declared window can be pinned.
+
+        `grant()` alone cannot know which contract to read — a fingerprint is a hash and
+        says nothing about the tool. Naming it pins `confirmation.expires_in` as it
+        stands now; without it the window is read at consume, which is correct while the
+        store's policy is current and is the older, weaker guarantee.
+        """
+        with self._lock:
+            self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), self._window(tool_name))
 
     def _policy_hash(self) -> str:
         """The ruleset this store was handed, or "" when it was handed none.
@@ -147,19 +175,20 @@ class ApprovalStore:
             entry = self._approved.pop(fingerprint, None)
             if entry is None:
                 return False
-            granted_at, granted_under = entry
             # The ruleset has to be the one the approval was issued against. Dropped
             # either way, like an expiry: an approval whose rules moved is spent, not
             # retryable, or "the policy changed" would mean "wait for the agent to ask
             # again". Both hashes must be present to compare — a request built by hand
             # carries none, and a store built without a policy recorded none.
-            if granted_under and request.policy_hash and request.policy_hash != granted_under:
+            if entry.policy_hash and request.policy_hash and request.policy_hash != entry.policy_hash:
                 return False
-            window = self._window(request.tool_name)
+            # The window pinned at grant, or — for a plain `grant()`, which cannot know
+            # which contract to read — whatever the store's policy says now.
+            window = entry.window if entry.window is not None else self._window(request.tool_name)
             # Dropped either way: an approval that timed out is spent, not retryable.
             # Leaving it in the store would make "expired" mean "expired until the
             # agent asks again", which is not an expiry.
-            return window is None or self._clock() - granted_at <= window
+            return window is None or self._clock() - entry.at <= window
 
     def as_confirm(self):
         """Return the callback to pass as ``Gate(confirm=...)``."""
