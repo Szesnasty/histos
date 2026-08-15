@@ -34,6 +34,7 @@ from histos.trail.logpath import (
     _PATH_HIGH_WATER,
     _PATH_LOCKS,
     _PATH_LOCKS_GUARD,
+    _lock_key,
     _path_key,
     tip_path_for,
 )
@@ -155,11 +156,13 @@ class JSONLAuditSink:
         is absent they were not serialised at all: interleaved appends, and a chain
         that ``histos audit verify`` then calls broken forever.
 
-        Keyed through `_path_key`, so two spellings of one file share a lock — including
-        two that differ only in case, which on macOS and Windows are the same file and
-        used to get two locks and, where `flock` is absent, no serialisation at all.
+        Keyed through `_lock_key`, so two spellings of one file share a lock — two that
+        differ only in case, which on macOS and Windows are the same file, and two that
+        differ by a mount, which `realpath` cannot see through. Deliberately *not*
+        `_path_key`: that one has to stay stable when a directory is recreated, which is
+        the opposite property, and the two maps in that module are keyed apart for it.
         """
-        key = _path_key(self.path)
+        key = _lock_key(self.path)
         with _PATH_LOCKS_GUARD:
             return _PATH_LOCKS.setdefault(key, threading.Lock())
 

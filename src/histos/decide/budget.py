@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from histos.decide.redaction import _record_fields
+from histos.decide.redaction import _leaf_fields, _record_fields
 
 
 def _stringify(value: Any) -> str:
@@ -104,7 +104,7 @@ def _node_count_over(obj: Any, budget: int) -> bool:
         # wrapped, so the bound that exists to stop attacker-chosen output turning one
         # call into a stall reported it under budget — and then the projector walked
         # every field of it.
-        fields = _record_fields(value)
+        fields = _record_fields(value) or _leaf_fields(value)
         if fields is not None:
             return any(walk(v) for v in fields.values())
         return False
@@ -164,6 +164,12 @@ def _text_blob(obj: Any, budget: int) -> tuple[str, bool]:
             if fields is not None:
                 for v in fields.values():
                     walk(v)
+        # And what hangs off a leaf, which neither branch above reaches: the first one
+        # reads a `str` subclass end to end and never looks at its attributes, and
+        # `_record_fields` refuses a leaf on purpose so the projector cannot shred one.
+        # A canary on such an attribute was reachable by the caller and invisible here.
+        for v in (_leaf_fields(value) or {}).values():
+            walk(v)
 
     walk(obj)
     return " ".join(pieces), truncated

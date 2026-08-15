@@ -489,3 +489,125 @@ def _one_write_tool_for_invariants(name: str = "charge") -> Policy:
         tools={name: ToolContract(name=name, args=Schema({}), access="write")},
         permissions={"teller": frozenset({name})},
     )
+
+
+# ── the sixth pass: what the repackaging made legible ────────────────────
+
+
+def _leaf(base, value, token):
+    """A builtin leaf carrying one author-defined attribute — `class Money(str)`."""
+    obj = type(f"Sub{base.__name__.title()}", (base,), {})(value)
+    obj.hidden = token
+    return obj
+
+
+@pytest.mark.parametrize("base,value", [(str, "12.30"), (int, 7), (bytes, b"x"), (float, 1.5)])
+def test_a_canary_in_an_attribute_of_a_leaf_subclass_does_not_reach_the_caller(base, value):
+    """For any value the scanners read end to end, what hangs *off* it is still output.
+
+    `_record_fields` refuses a leaf on purpose — projection must not shred
+    `Money("12.30")` into `{"currency": "EUR"}`. The scanners inherited that refusal and
+    have the opposite need: `class Money(str)` with a token on it left through the
+    default configuration with `effect=allow` and `redactions: []`, so the trail called
+    the output clean. The sixth distinct shape a canary has escaped in.
+    """
+    out, exc, sink = _run(_policy(), lambda: {"v": _leaf(base, value, CANARY)})
+    reached = getattr(out.get("v"), "hidden", None) if isinstance(out, dict) else None
+    assert reached != CANARY, "a canary on a leaf's attribute reached the caller"
+    assert sink.entries[-1]["redactions"], "and the trail recorded nothing about it"
+
+
+def test_the_lock_key_and_the_erasure_key_answer_opposite_questions(tmp_path, monkeypatch):
+    """Two maps, two requirements, and no single key can satisfy both.
+
+    The lock must collapse every spelling of one file onto one entry: `realpath` sees
+    through symlinks and nothing else, so a macOS firmlink and a Linux bind mount each
+    hand one log a second spelling, and two sinks over them took two locks and
+    interleaved appends into one hash chain.
+
+    The erasure memory must do the reverse and survive `rm -rf logs && mkdir logs` — a
+    recreated directory is a new inode, and anchoring the high-water mark to one orphans
+    it exactly when a deployment wipes a volume, after which the replaced log verifies
+    clean. Sharing one key between them traded one of these for the other, twice.
+    """
+    import os
+
+    from histos.trail.logpath import _lock_key, _path_key
+
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)  # stands in for the mount: same dev/ino, two spellings
+    monkeypatch.setattr(os.path, "realpath", lambda p, **_: os.fspath(p))
+    assert _lock_key(real / "log.jsonl") == _lock_key(alias / "log.jsonl")
+
+    monkeypatch.undo()
+    home = tmp_path / "logs"
+    home.mkdir()
+    before = _path_key(home / "log.jsonl")
+    home.rmdir()
+    home.mkdir()  # a new inode, and the same place
+    assert _path_key(home / "log.jsonl") == before
+
+
+def test_a_bound_the_source_wrote_is_never_a_reason_to_refuse_the_whole_tool():
+    """For any legal JSON Schema, the projection imports it or names what it cannot do.
+
+    `{"minimum": 1, "maximum": 100}` with no `type` is legal, ordinary, and what a great
+    many MCP servers emit. A guard against dead bounds turned it into a `PolicyError`
+    that takes the whole tool with it — the control refusing honest work, which is a
+    failure in the same way a leak is.
+    """
+    from histos import schema_from_json_schema
+
+    schema = schema_from_json_schema(
+        {
+            "type": "object",
+            "properties": {"limit": {"minimum": 1, "maximum": 100}, "tags": {"maxItems": 3}},
+            "required": ["limit"],
+        }
+    )
+    assert set(schema.fields) == {"limit", "tags"}
+
+
+@pytest.mark.parametrize("value", [0, 101, 5.5])
+def test_an_untyped_bound_that_imports_is_a_bound_that_fires(value):
+    """And the other half: importing it must not be the silent no-op the guard refused.
+
+    Refusing the tool and admitting an unenforced bound are the same failure wearing
+    different clothes. If `type` is absent the bound has to be dispatched on the value,
+    exactly as the string bounds beside it already are.
+    """
+    from histos import schema_from_json_schema
+    from histos.policy.validation import validate
+
+    schema = schema_from_json_schema(
+        {"type": "object", "properties": {"limit": {"minimum": 1, "maximum": 100, "multipleOf": 1}}}
+    )
+    assert validate(schema, {"limit": value}), f"{value!r} passed a bound the source declared"
+    assert validate(schema, {"limit": 50}) == []
+    assert validate(schema, {"limit": "not a number"}) == [], "an untyped field still admits other types"
+
+
+def test_a_form_body_is_refused_however_deep_its_allOf_goes():
+    """For any depth, a body naming fields the projection would lose is refused.
+
+    The walk gives up past four levels and returned "declares nothing", which is the
+    silent drop it was written to prevent — reachable by a hostile spec at the cost of
+    six lines of YAML.
+    """
+    from histos.importers.openapi import _declares_fields
+
+    depth = 8
+    schemas = {
+        f"L{i}": (
+            {"allOf": [{"$ref": f"#/components/schemas/L{i + 1}"}]}
+            if i + 1 < depth
+            else {"properties": {"iban": {"type": "string"}}}
+        )
+        for i in range(depth)
+    }
+    spec = {"components": {"schemas": schemas}}
+    content = {"application/x-www-form-urlencoded": {"schema": {"$ref": "#/components/schemas/L0"}}}
+
+    assert _declares_fields(spec, content, "pay"), "a declared form body was dropped in silence"
