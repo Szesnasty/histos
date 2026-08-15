@@ -191,7 +191,7 @@ def test_async_tools_go_through_the_same_chain():
 
 def test_a_failure_inside_redaction_drops_the_text_entirely(monkeypatch):
     """If the redaction machinery breaks, nothing about the text can be trusted."""
-    import histos.engine as engine_mod
+    import histos.decide.engine as engine_mod
 
     def boom(*_a, **_k):
         raise MemoryError("redactor exploded")

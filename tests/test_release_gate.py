@@ -25,7 +25,7 @@ from histos import (
     ToolContract,
     use_principal,
 )
-from histos.inspection import _uninspectable_kind
+from histos.mediate.inspection import _uninspectable_kind
 
 CLERK = Principal(identity="u1", role="clerk")
 
@@ -218,7 +218,7 @@ def test_the_uninspectable_guard_is_wired_into_both_finishers() -> None:
     generator, and "the guard exists but nothing calls it" is exactly the state it was
     found in.
     """
-    from histos import wrappers
+    from histos.mediate import wrappers
 
     assert "_uninspectable_kind" in wrappers._finish.__code__.co_names
     assert "_uninspectable_kind" in wrappers._finish_exception.__code__.co_names
@@ -452,8 +452,8 @@ def test_the_refusal_has_its_own_published_code_with_a_remedy() -> None:
     import json
     from pathlib import Path
 
-    from histos.auditrecord import _REASON_IS_POLICY_TEXT
-    from histos.contracts import _REMEDY
+    from histos.policy.contracts import _REMEDY
+    from histos.trail.auditrecord import _REASON_IS_POLICY_TEXT
 
     spec = json.loads((Path(__file__).resolve().parent.parent / "spec" / "decision-codes.json").read_text())
     published = {code["code"]: code for code in spec["codes"]}

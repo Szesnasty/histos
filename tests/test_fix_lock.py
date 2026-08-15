@@ -18,18 +18,18 @@ from pathlib import Path
 
 import pytest
 
-from histos.bundle import load_policy
 from histos.cli import main
-from histos.contracts import Sensitivity
 from histos.display import safe_text
 from histos.errors import PolicyError
+from histos.format.bundle import load_policy
 from histos.importers import contracts_from_mcp, contracts_from_openai, contracts_from_openapi, sources_from_mcp
-from histos.lockfile import (
+from histos.policy.contracts import Sensitivity
+from histos.provenance.lockdiff import compare
+from histos.provenance.lockfile import (
     LOCK_VERSION,
     MAX_RECORDED_DESCRIPTION_CHARS,
     MAX_RECORDED_SHAPE_BYTES,
     build_lock,
-    compare,
     load_lock,
     parse_lock,
 )

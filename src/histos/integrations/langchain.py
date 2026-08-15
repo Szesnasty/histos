@@ -21,8 +21,8 @@ from collections.abc import Callable
 from typing import Any
 
 from histos.errors import PolicyError
-from histos.gate import Gate
 from histos.integrations.base import ON_DENIED, denial_message, guard_callable
+from histos.mediate.gate import Gate
 
 try:  # pragma: no cover - exercised only where langchain is installed
     from langchain_core.tools import StructuredTool

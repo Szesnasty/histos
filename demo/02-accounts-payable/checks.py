@@ -185,7 +185,7 @@ def _gate_email_follows_table() -> str | None:
 @check("gate", "an approval is bound to the exact arguments, not to the tool")
 def _gate_approval_binding() -> str | None:
     reset()
-    from histos.approvals import request_fingerprint
+    from histos.mediate.approvals import request_fingerprint
 
     honest = request_fingerprint(
         "schedule_payment",

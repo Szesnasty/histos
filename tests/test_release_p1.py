@@ -468,7 +468,7 @@ def test_the_contextmanager_idiom_for_a_request_scope_is_allowed():
 
     with request_scope(Principal(role="ok", identity="i")):
         pass
-    from histos.identity import _current_principal
+    from histos.mediate.identity import _current_principal
 
     assert _current_principal.get() is None
 
@@ -532,7 +532,7 @@ def test_an_async_contextmanager_awaited_by_an_ordinary_coroutine_still_works():
     import asyncio
     import contextlib
 
-    from histos.identity import _current_principal
+    from histos.mediate.identity import _current_principal
 
     @contextlib.asynccontextmanager
     async def request_scope(principal):
@@ -551,7 +551,7 @@ def test_a_pytest_style_yield_fixture_is_not_refused(as_a_clerk):
     one of the two shapes the ban was too broad for — and only `contextlib` was ever
     exempted, so this raised at fixture setup and errored out every test using it.
     pytest brackets a yield fixture in the same Context, which is the safe case."""
-    from histos.identity import _current_principal
+    from histos.mediate.identity import _current_principal
 
     assert _current_principal.get().identity == "clerk-1"
 
@@ -563,7 +563,7 @@ def as_a_clerk():
 
 
 def test_reusing_one_use_principal_instance_still_unbinds():
-    from histos.identity import _current_principal
+    from histos.mediate.identity import _current_principal
 
     scope = use_principal(Principal(role="ok", identity="i"))
     with scope:
@@ -615,7 +615,7 @@ def test_one_use_principal_instance_shared_across_tasks_does_not_leak_an_identit
     principal bound at all executed gated write tools as the leaked one."""
     import asyncio
 
-    from histos.identity import _current_principal
+    from histos.mediate.identity import _current_principal
 
     admin = Principal(role="ok", identity="admin")
     scope = use_principal(admin)
@@ -825,7 +825,7 @@ def test_an_enum_member_with_its_own_iter_is_not_waived():
     member class that writes `__iter__` itself and yields whatever it likes."""
     import enum as _enum
 
-    from histos.inspection import _lazy_leaf_kind
+    from histos.mediate.inspection import _lazy_leaf_kind
 
     class Sneaky(_enum.Enum):
         A = 1
@@ -898,7 +898,7 @@ def test_walking_past_the_drivers_does_not_refuse_the_shapes_that_are_safe():
     import asyncio
     import contextlib
 
-    from histos.identity import _current_principal
+    from histos.mediate.identity import _current_principal
 
     P = Principal(role="ok", identity="i")
 

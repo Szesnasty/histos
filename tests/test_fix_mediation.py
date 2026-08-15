@@ -241,7 +241,7 @@ def test_a_raising_sync_confirm_fails_closed_and_is_audited() -> None:
     """The async path guarded this; the sync path did not, so a confirm callback that
     raised — its queue down, the operator's session expired — escaped as its own
     exception, and the call the policy had just said needed a human left no record."""
-    from histos.audit import InMemoryAuditSink
+    from histos.trail.audit import InMemoryAuditSink
 
     def boom(_req):
         raise RuntimeError("approvals queue is down")
@@ -300,7 +300,7 @@ def test_concurrent_calls_get_distinct_decision_ids() -> None:
     """`decision_id` is how an investigator says 'this call, not that one'."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from histos.audit import InMemoryAuditSink
+    from histos.trail.audit import InMemoryAuditSink
 
     policy = Policy(
         tools={

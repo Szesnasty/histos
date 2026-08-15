@@ -340,7 +340,7 @@ def test_the_respelling_attack_is_still_caught():
 
 
 def test_only_an_odd_backslash_run_makes_an_escape():
-    from histos.logpath import _respelt_ascii
+    from histos.trail.logpath import _respelt_ascii
 
     backslash = chr(92)
     for count, is_escape in ((1, True), (2, False), (3, True), (4, False)):
@@ -350,7 +350,7 @@ def test_only_an_odd_backslash_run_makes_an_escape():
 
 def test_the_erasure_memory_is_keyed_on_a_location_that_survives_the_file(tmp_path):
     """Keying on `st_ino` was the first answer and forgets at the one moment it is for."""
-    from histos.logpath import _path_key
+    from histos.trail.logpath import _path_key
 
     log = tmp_path / "x.jsonl"
     log.write_text("{}", encoding="utf-8")
@@ -369,7 +369,7 @@ def test_two_tenants_in_differently_cased_directories_do_not_share_a_key(tmp_pat
     appending verified clean. The fold is measured per directory now, so this holds on
     either kind of volume: distinct directories are never one key.
     """
-    from histos.logpath import _path_key
+    from histos.trail.logpath import _path_key
 
     (tmp_path / "Acme").mkdir()
     (tmp_path / "Zeta").mkdir()
@@ -379,7 +379,7 @@ def test_two_tenants_in_differently_cased_directories_do_not_share_a_key(tmp_pat
 def test_two_spellings_of_one_file_still_share_a_key(tmp_path):
     """The property the fold existed for, kept: on a case-insensitive volume one capital
     letter must not hand two sinks two locks and two erasure memories."""
-    from histos.logpath import _folds_case, _path_key
+    from histos.trail.logpath import _folds_case, _path_key
 
     if not _folds_case(str(tmp_path)):
         import pytest as _pytest
@@ -406,8 +406,8 @@ def test_every_field_keyword_reaches_the_contract_structure():
     """
     import dataclasses
 
-    from histos.contracts import _schema_structure
-    from histos.schema import Field, Schema
+    from histos.policy.contracts import _schema_structure
+    from histos.policy.schema import Field, Schema
 
     structure = _schema_structure(Schema({"f": Field(type="string")}))
     covered = set(structure["fields"]["f"])
@@ -416,9 +416,9 @@ def test_every_field_keyword_reaches_the_contract_structure():
 
 
 def test_unique_items_moves_every_hash_it_has_to():
-    from histos.contracts import Policy, ToolContract
-    from histos.lockfile import contract_hash
-    from histos.schema import Field, Schema
+    from histos.policy.contracts import Policy, ToolContract
+    from histos.policy.schema import Field, Schema
+    from histos.provenance.lockfile import contract_hash
 
     def build(unique: bool) -> ToolContract:
         return ToolContract(
@@ -441,7 +441,7 @@ def test_unique_items_is_linear_in_the_element_count():
     sends."""
     import time
 
-    from histos.schema import Field, Schema, validate
+    from histos.policy.schema import Field, Schema, validate
 
     schema = Schema({"ids": Field(type="array", unique_items=True)})
     payload = {"ids": list(range(8000))}
@@ -454,7 +454,7 @@ def test_unique_items_is_linear_in_the_element_count():
 
 
 def test_unique_items_still_catches_a_duplicate_of_either_kind():
-    from histos.schema import Field, Schema, validate
+    from histos.policy.schema import Field, Schema, validate
 
     schema = Schema({"ids": Field(type="array", unique_items=True)})
     assert validate(schema, {"ids": [1, 2, 2]}), "a hashable duplicate went unnoticed"
@@ -464,7 +464,7 @@ def test_unique_items_still_catches_a_duplicate_of_either_kind():
 
 def test_too_many_unhashable_elements_is_refused_rather_than_scanned():
     """ "This costs too much to check" and "this is fine" are not the same answer."""
-    from histos.schema import Field, Schema, validate
+    from histos.policy.schema import Field, Schema, validate
 
     schema = Schema({"ids": Field(type="array", unique_items=True)})
     errors = validate(schema, {"ids": [{"i": i} for i in range(600)]})
@@ -534,7 +534,7 @@ def test_a_wide_exception_group_is_read_to_the_end():
     of a group — ran the sixteen-link bound out on its members and came back incomplete.
     The caller turns that into a redact-all, so an ordinary `asyncio.TaskGroup` fan-out
     had its real error replaced by "the exception chain is longer than 16 links"."""
-    from histos.excchain import _exception_text
+    from histos.decide.excchain import _exception_text
 
     members = [ValueError(f"shard {i} failed") for i in range(40)]
     members[37] = ValueError("password authentication failed for user svc:hunter2")
@@ -544,7 +544,7 @@ def test_a_wide_exception_group_is_read_to_the_end():
 
 
 def test_a_deep_chain_is_still_cut():
-    from histos.excchain import _MAX_EXCEPTION_CHAIN, _exception_text
+    from histos.decide.excchain import _MAX_EXCEPTION_CHAIN, _exception_text
 
     deep: BaseException = ValueError("leaf")
     for i in range(_MAX_EXCEPTION_CHAIN * 2):
@@ -556,14 +556,14 @@ def test_a_deep_chain_is_still_cut():
 
 
 def test_pathological_breadth_is_still_cut():
-    from histos.excchain import _MAX_EXCEPTION_NODES, _exception_text
+    from histos.decide.excchain import _MAX_EXCEPTION_NODES, _exception_text
 
     group = ExceptionGroup("many", [ValueError(str(i)) for i in range(_MAX_EXCEPTION_NODES * 5)])
     assert _exception_text(group)[1]
 
 
 def test_a_cycle_in_the_chain_does_not_hang():
-    from histos.excchain import _exception_text
+    from histos.decide.excchain import _exception_text
 
     first, second = ValueError("a"), ValueError("b")
     first.__cause__, second.__cause__ = second, first
@@ -574,7 +574,7 @@ def test_a_cycle_in_the_chain_does_not_hang():
 
 
 def _wire_policy() -> Policy:
-    from histos.contracts import Constraint
+    from histos.policy.contracts import Constraint
 
     return Policy(
         tools={
@@ -624,7 +624,7 @@ def test_a_read_only_attribute_still_behaves_like_the_type_it_replaced():
 def test_a_bound_tool_still_receives_something_it_may_mutate():
     """The anchor is immutable; a handout is a plain copy. Refusing a tool body its own
     argument would be a behaviour change with nothing to show for it."""
-    from histos.contracts import Binding
+    from histos.policy.contracts import Binding
 
     seen: list[list[str]] = []
 
@@ -928,7 +928,7 @@ def test_yaml_no_does_not_open_the_argument_surface(tmp_path):
     other scalar it reads type-checks loudly. `$allow_extra` went through `bool()`, and
     the coercion fails OPEN: `bool("no")` is True, so the most natural way to write
     "closed" opened the surface."""
-    from histos.bundle import load_policy
+    from histos.format.bundle import load_policy
 
     bundle = tmp_path / "p.yaml"
     bundle.write_text(
@@ -945,7 +945,7 @@ def test_an_argument_named_like_the_reserved_key_is_refused():
     """The `$` prefix moved the collision by one character rather than removing it:
     nothing reserves `$allow_extra` as a property name, and the flag is written into the
     same map as the fields."""
-    from histos.bundledump import dump_bundle
+    from histos.format.bundledump import dump_bundle
 
     policy = Policy(
         tools={"t": ToolContract(name="t", args=Schema({"$allow_extra": Field(type="string")}))},
@@ -976,7 +976,7 @@ def test_a_recycled_address_cannot_steal_another_scopes_token():
     """An entry was `(id(self), token)` and held no reference, so a scope entered and
     never exited left an entry whose object was freed — and `__slots__` makes every
     `use_principal` the same size, so the next allocation lands on that address."""
-    from histos.identity import _scope_tokens
+    from histos.mediate.identity import _scope_tokens
 
     scope = use_principal(Principal(role="clerk", identity="alice"))
     scope.__enter__()

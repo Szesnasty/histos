@@ -37,7 +37,7 @@ from histos import (
 )
 from histos.importers import field_from_json_schema
 from histos.importers.sources import ToolImportSkipped
-from histos.schema import validate
+from histos.policy.schema import validate
 
 # A pydantic-shaped document: the argument's whole contract lives behind a `$ref`,
 # which is what FastMCP and the MCP Python SDK emit for any Enum or nested model.
@@ -694,7 +694,7 @@ def test_a_property_that_admits_only_null_admits_only_null(spelling):
     """Both spellings say the property permits exactly one value. Mapping them onto
     `("any", True)` said the opposite — no type check at all — so a field admitting only
     null accepted strings, objects, anything."""
-    from histos.schema import validate
+    from histos.policy.schema import validate
 
     schema = schema_from_json_schema({"type": "object", "properties": {"x": spelling}})
     assert schema.fields["x"].enum == (None,)
@@ -822,7 +822,7 @@ def test_a_union_inside_items_is_collapsed_like_one_outside_it():
     field = _one({"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "null"}]}})
     assert (field.type, field.item_type) == ("array", None)
 
-    from histos.schema import Schema, validate
+    from histos.policy.schema import Schema, validate
 
     schema = Schema({"xs": field})
     assert not validate(schema, {"xs": ["a", None]}), "the source allows a null element"
@@ -836,7 +836,7 @@ def test_unique_items_is_carried_and_enforced():
     """The same case `max_items` was rescued from, left behind in the same pass:
     `uniqueItems` is what every pydantic `set[T]` emits, and refusing a bound a real
     source writes cost the whole tool rather than the bound."""
-    from histos.schema import validate
+    from histos.policy.schema import validate
 
     schema = schema_from_json_schema(
         {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": True}}}

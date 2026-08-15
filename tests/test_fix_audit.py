@@ -36,11 +36,11 @@ from histos import (
     use_principal,
     verify_chain,
 )
-from histos.auditrecord import AuditRecord
 from histos.errors import PolicyError
 from histos.integrations import langchain as lc_adapter
 from histos.integrations.base import guard_callable
-from histos.logpath import tip_path_for
+from histos.trail.auditrecord import AuditRecord
+from histos.trail.logpath import tip_path_for
 
 PII = "INV-jane.doe@example.com"
 
@@ -535,8 +535,8 @@ def test_protect_tools_shares_one_gate(fake_langchain):
 def test_the_gate_submodule_is_reachable_through_the_shadowing_one_liner():
     import histos
 
-    assert histos.gate.Gate is Gate
-    assert callable(histos.gate)
+    assert histos.mediate.gate.Gate is Gate
+    assert callable(histos.mediate.gate)
 
 
 def test_a_rebound_argument_is_named_in_the_trail() -> None:

@@ -60,16 +60,48 @@ from __future__ import annotations
 import sys as _sys
 
 from histos._version import __version__
-from histos.approvals import ApprovalStore, request_fingerprint
-from histos.audit import AuditSink, InMemoryAuditSink, JSONLAuditSink
-from histos.auditrecord import AuditRecord, digest_args
-from histos.bundle import load_bundle, load_bundle_json, load_bundle_yaml, load_policy, merge_contracts
-from histos.bundledump import dump_bundle
-from histos.bundlekeys import ENGINE_FEATURES, SUPPORTED_SCHEMA_VERSIONS
-from histos.bundleparse import parse_json_bundle, parse_yaml_bundle
-from histos.canonical import canonical_fingerprint, canonical_json, canonical_number, normalize_numbers
-from histos.content_rules import ContentRules
-from histos.contracts import (
+from histos.decide.content_rules import ContentRules
+from histos.decide.limits import LimitStore
+from histos.errors import (
+    GateConfirmationRequired,
+    GateDenied,
+    GateError,
+    PolicyError,
+    ResourceNotFound,
+    ToolErrorRedacted,
+)
+from histos.format.bundle import load_bundle, load_bundle_json, load_bundle_yaml, load_policy, merge_contracts
+from histos.format.bundledump import dump_bundle
+from histos.format.bundlekeys import ENGINE_FEATURES, SUPPORTED_SCHEMA_VERSIONS
+from histos.format.bundleparse import parse_json_bundle, parse_yaml_bundle
+from histos.importers import (
+    ToolSource,
+    contracts_from_mcp,
+    contracts_from_openai,
+    contracts_from_openapi,
+    schema_from_json_schema,
+    sources_from_mcp,
+    sources_from_openai,
+    sources_from_openapi,
+)
+from histos.mediate.approvals import ApprovalStore, request_fingerprint
+from histos.mediate.gate import (
+    Gate,
+    ProtectResult,
+    gate,
+    protect,
+)
+
+# From `identity`, not re-exported through `gate`: the two ContextVars behind these are
+# process-wide singletons, and importing them from the module that owns them is what
+# keeps a second copy from ever being plausible.
+from histos.mediate.identity import (
+    reset_principal,
+    set_principal,
+    use_principal,
+)
+from histos.policy.canonical import canonical_fingerprint, canonical_json, canonical_number, normalize_numbers
+from histos.policy.contracts import (
     Binding,
     Constraint,
     ConstraintResult,
@@ -81,79 +113,44 @@ from histos.contracts import (
     Sensitivity,
     ToolContract,
 )
-from histos.errors import (
-    GateConfirmationRequired,
-    GateDenied,
-    GateError,
-    PolicyError,
-    ResourceNotFound,
-    ToolErrorRedacted,
-)
-from histos.gate import (
-    Gate,
-    ProtectResult,
-    gate,
-    protect,
-)
-
-# From `identity`, not re-exported through `gate`: the two ContextVars behind these are
-# process-wide singletons, and importing them from the module that owns them is what
-# keeps a second copy from ever being plausible.
-from histos.identity import (
-    reset_principal,
-    set_principal,
-    use_principal,
-)
-from histos.importers import (
-    ToolSource,
-    contracts_from_mcp,
-    contracts_from_openai,
-    contracts_from_openapi,
-    schema_from_json_schema,
-    sources_from_mcp,
-    sources_from_openai,
-    sources_from_openapi,
-)
-from histos.infer import infer_contract, infer_schema
-from histos.limits import LimitStore
-from histos.lockfile import (
-    DriftReport,
+from histos.policy.schema import Field, Schema
+from histos.provenance.infer import infer_contract, infer_schema
+from histos.provenance.lockdiff import DriftReport, ToolDrift, compare, unverifiable_tools
+from histos.provenance.lockfile import (
     Lock,
     LockEntry,
-    ToolDrift,
     build_lock,
-    compare,
     contract_hash,
     description_hash,
     load_lock,
     lock_path_for,
     parse_lock,
     schema_hash,
-    unverifiable_tools,
 )
 from histos.review import PolicyReview, review_policy
-from histos.schema import Field, Schema
-from histos.verify import verify_chain
+from histos.trail.audit import AuditSink, InMemoryAuditSink, JSONLAuditSink
+from histos.trail.auditrecord import AuditRecord, digest_args
+from histos.trail.verify import verify_chain
 
-# `from histos.gate import gate` rebinds this package's `gate` attribute from the
+# `from histos.mediate.gate import gate` rebinds this package's `gate` attribute from the
 # submodule the import machinery had just installed there to the one-liner of the same
-# name. So `histos.gate.Gate` raised AttributeError after a plain `import histos`,
-# while `from histos.gate import Gate` worked — one name meaning two things depending
+# name. So `histos.mediate.gate.Gate` raised AttributeError after a plain `import histos`,
+# while `from histos.mediate.gate import Gate` worked — one name meaning two things depending
 # on how you reached it, and the failure lands on a reader following the docs. The
 # function keeps the name, since that is the documented API, and the module's public
 # surface is re-attached to it so both spellings resolve to the same objects.
-# `histos.gate.use_principal` is a documented spelling and stays one, even though the
-# three identity names moved to `histos.identity` when `gate.py` was split. The source
+# `histos.mediate.gate.use_principal` is a documented spelling and stays one, even though the
+# three identity names moved to `histos.mediate.identity` when `gate.py` was split. The source
 # module is named per attribute rather than assumed, so the next move is a one-line edit
 # here instead of an AttributeError a reader meets after following the docs.
 for _name, _home in (
-    ("Gate", "histos.gate"),
-    ("ProtectResult", "histos.gate"),
-    ("gate", "histos.gate"),
-    ("protect", "histos.gate"),
-    ("reset_principal", "histos.identity"),
-    ("set_principal", "histos.identity"),
-    ("use_principal", "histos.identity"),
+    ("Gate", "histos.mediate.gate"),
+    ("ProtectResult", "histos.mediate.gate"),
+    ("gate", "histos.mediate.gate"),
+    ("protect", "histos.mediate.gate"),
+    ("reset_principal", "histos.mediate.identity"),
+    ("set_principal", "histos.mediate.identity"),
+    ("use_principal", "histos.mediate.identity"),
 ):
     setattr(gate, _name, getattr(_sys.modules[_home], _name))
 del _name, _home

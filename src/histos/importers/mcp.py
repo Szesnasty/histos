@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from histos.contracts import ToolContract
 from histos.errors import PolicyError
 from histos.importers.json_schema import schema_from_json_schema
 from histos.importers.sources import (
@@ -24,6 +23,7 @@ from histos.importers.sources import (
     project_tools,
     register_source_kind,
 )
+from histos.policy.contracts import ToolContract
 
 # Hashed under their own keys, or not part of the shape at all: `name` is the lock's
 # key, `description` has its own hash so a description-only change is distinguishable.

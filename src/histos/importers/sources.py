@@ -33,8 +33,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
 
-from histos.contracts import Sensitivity, ToolContract
 from histos.errors import PolicyError
+from histos.policy.contracts import Sensitivity, ToolContract
 
 SourceReader = Callable[[Any], list["ToolSource"]]
 
@@ -62,7 +62,7 @@ class _SourceKinds(Set[str]):
     A registry rather than a literal set, because the alternative made importing
     from anything the library did not ship — Anthropic tool definitions, a Pydantic
     model, an internal tool registry — impossible rather than merely unimplemented.
-    A host could always build a :class:`~histos.contracts.ToolContract`, but not a
+    A host could always build a :class:`~histos.policy.contracts.ToolContract`, but not a
     :class:`ToolSource`, so its tools could never enter a lock file and `histos
     drift` reported them forever as "unverifiable from here" with no way to close
     the gap short of forking.

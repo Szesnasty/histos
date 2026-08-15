@@ -285,7 +285,7 @@ def test_an_element_bound_on_an_untyped_field_is_still_refused_or_enforced():
     """`any` was exempted wholesale so a bound could not be shown dead. Array keywords on
     an untyped field are dead all the same — nothing consults them."""
     from histos.errors import PolicyError
-    from histos.schema import validate
+    from histos.policy.schema import validate
 
     field = None
     try:
@@ -298,7 +298,7 @@ def test_an_element_bound_on_an_untyped_field_is_still_refused_or_enforced():
 @pytest.mark.xfail(strict=True, reason="P1 round-5: a nullable element union drops every element bound")
 def test_a_nullable_element_union_keeps_the_bounds_beside_it():
     from histos import schema_from_json_schema
-    from histos.schema import validate
+    from histos.policy.schema import validate
 
     field = schema_from_json_schema(
         {

@@ -4,7 +4,7 @@ Two-layer design (author direction, 2026-08-08): a tool's **shape** — name,
 arguments, types, required, enums, return shape — is standard and importable
 (JSON Schema / OpenAPI / MCP / Python signatures). The **authorization policy** —
 roles, permissions, resource constraints, limits, confirmation, sensitivity,
-canaries — is Histos' own language (see :mod:`histos.bundle`).
+canaries — is Histos' own language (see :mod:`histos.format.bundle`).
 
 JSON Schema is the common denominator: OpenAPI and MCP both carry JSON Schema for
 their arguments, so :func:`schema_from_json_schema` is the shared bridge and the

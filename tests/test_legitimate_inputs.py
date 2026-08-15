@@ -48,7 +48,7 @@ from histos import (
     contracts_from_openapi,
     use_principal,
 )
-from histos.detectors import scan_string
+from histos.decide.detectors import scan_string
 
 CORPUS = pathlib.Path(__file__).resolve().parent / "corpus"
 

@@ -10,7 +10,7 @@ the line already printed, ``U+202E`` renders ``export_contacts`` as ``stcatnoc_t
 inside an innocent sentence, a zero-width joiner hides a word boundary.
 
 This module exists so there is one answer for every printing path rather than one per
-report. It used to live in :mod:`histos.lockfile`, where the drift diff was the only
+report. It used to live in :mod:`histos.provenance.lockfile`, where the drift diff was the only
 caller — so the drift report was hardened and every other command printed the same
 attacker-authored names raw.
 """

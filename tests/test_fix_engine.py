@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 import pytest
 
-import histos.engine as engine_mod
+import histos.decide.engine as engine_mod
 from histos import (
     Constraint,
     Field,
@@ -27,10 +27,10 @@ from histos import (
     ToolContract,
     use_principal,
 )
-from histos.contracts import Effect, GateRequest
-from histos.engine import Engine
+from histos.decide.engine import Engine
+from histos.decide.limits import LimitStore
 from histos.errors import ToolErrorRedacted
-from histos.limits import LimitStore
+from histos.policy.contracts import Effect, GateRequest
 
 CANARY = "CANARY-7f3a-SECRET"
 ZERO_WIDTH = "​"
@@ -76,7 +76,7 @@ def _post(engine: Engine, result: object) -> tuple:
 )
 def test_a_mechanically_evaded_canary_is_still_denied_pregate(evasion, label):
     """`find_normalized` exists for exactly these; deleting it left the suite green."""
-    from histos import canary
+    from histos.decide import canary
 
     assert canary.find(evasion, {CANARY}) == [], f"{label} should not match verbatim"
     assert canary.find_normalized(evasion, {CANARY}) == [CANARY], label
@@ -89,7 +89,7 @@ def test_a_mechanically_evaded_canary_is_still_denied_pregate(evasion, label):
 
 def test_normalization_does_not_deny_text_that_merely_shares_a_prefix():
     """The transform strips separators and casefolds — aggressive enough to need a floor."""
-    from histos import canary
+    from histos.decide import canary
 
     for benign in ("the canary sang", "CANARY-7f3a", "canary secret", "7f3a-SECRET"):
         assert canary.find_normalized(benign, {CANARY}) == [], benign

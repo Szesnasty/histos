@@ -6,7 +6,7 @@ Two families:
   the policy). Raised eagerly, at wrap time, because the trust model
   says the developer is cooperating and wants to know immediately.
 * ``GateDenied`` / ``GateConfirmationRequired`` — a *runtime* decision. The gate
-  refused (or paused) a call. These carry the :class:`~histos.contracts.GateDecision`
+  refused (or paused) a call. These carry the :class:`~histos.policy.contracts.GateDecision`
   so the caller can inspect exactly which rule fired.
 """
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from histos.contracts import GateDecision, GateRequest
+    from histos.policy.contracts import GateDecision, GateRequest
 
 
 class GateError(Exception):
@@ -90,7 +90,7 @@ class GateConfirmationRequired(GateError):
 
     @property
     def fingerprint(self) -> str | None:
-        """The :func:`~histos.approvals.request_fingerprint` to pass to ``grant()``.
+        """The :func:`~histos.mediate.approvals.request_fingerprint` to pass to ``grant()``.
 
         ``None`` only when the exception was constructed without a request, which the
         gate never does — a host building one by hand gets ``None`` rather than a
@@ -98,7 +98,7 @@ class GateConfirmationRequired(GateError):
         """
         if self.request is None:
             return None
-        from histos.approvals import fingerprint_of  # local: approvals imports contracts
+        from histos.mediate.approvals import fingerprint_of  # local: approvals imports contracts
 
         return fingerprint_of(self.request)
 

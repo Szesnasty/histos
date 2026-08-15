@@ -23,16 +23,17 @@ from pathlib import Path
 from typing import Any
 
 from histos._version import __version__
-from histos.bundle import load_policy
-from histos.bundledump import dump_bundle
-from histos.contracts import GateRequest, Policy, Principal
 from histos.display import safe_text
 from histos.errors import PolicyError
-from histos.gate import Gate
+from histos.format.bundle import load_policy
+from histos.format.bundledump import dump_bundle
 from histos.importers import KINDS, ToolSource, reader_for
-from histos.lockfile import build_lock, compare, contract_hash, load_lock, lock_path_for, unverifiable_tools
+from histos.mediate.gate import Gate
+from histos.policy.contracts import GateRequest, Policy, Principal
+from histos.provenance.lockdiff import compare, unverifiable_tools
+from histos.provenance.lockfile import build_lock, contract_hash, load_lock, lock_path_for
 from histos.review import review_policy
-from histos.verify import verify_chain
+from histos.trail.verify import verify_chain
 
 
 def _read_sources(path: str, kind: str) -> list[ToolSource]:
