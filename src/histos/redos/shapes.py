@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from re import _constants as _re_const  # noqa: PLC2701 — see the module docstring
-from re import _parser as _re_parser  # noqa: PLC2701
+# The private modules on purpose: the alternative is a second regex parser, and a
+# screen that disagrees with the engine it is protecting is worse than no screen.
+import re._constants as _re_const
+import re._parser as _re_parser
 from typing import Any
 
 from histos.redos.alphabet import (
