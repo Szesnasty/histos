@@ -169,15 +169,26 @@ def canary_split_across_two_fields() -> None:
     )
 
 
-def canary_with_a_zero_width_space() -> None:
-    """Round 2. One invisible character and verbatim matching sees nothing."""
-    smuggled = CANARY[:6] + "​" + CANARY[6:]
-    out, _, _ = _call(_policy(), lambda: {"note": smuggled})
-    normalised = repr(out).replace("​", "")
+def canary_with_an_invisible_character() -> None:
+    """Round 2 found this with a zero-width space. Round 6 asked it as a rule.
+
+    The fix was a set holding that character and four neighbours. All five are Unicode
+    category `Cf` — and so are the 165 the set did not name, including U+00AD SOFT
+    HYPHEN, the bidi overrides, and the tag block U+E0020–U+E007F that mirrors ASCII
+    invisibly. Every one renders as nothing. So this tries all of them.
+    """
+    import unicodedata
+
+    invisible = [chr(cp) for cp in range(0x110000) if unicodedata.category(chr(cp)) == "Cf"]
+    escaped = []
+    for ch in invisible:
+        out, _, _ = _call(_policy(), lambda c=ch: {"note": CANARY[:6] + c + CANARY[6:]})
+        if CANARY in repr(out).replace(ch, ""):
+            escaped.append(f"U+{ord(ch):04X}")
     report(
-        "a canary carrying a zero-width space",
-        CANARY in normalised,
-        f"caller got {out!r}",
+        f"a canary carrying any one of {len(invisible)} invisible characters",
+        bool(escaped),
+        f"{len(escaped)} of {len(invisible)} got through" + (f": {escaped[:5]}" if escaped else ""),
     )
 
 
@@ -632,7 +643,7 @@ ATTACKS = (
             canary_two_suppressions_down,
             canary_through_a_strict_sink,
             canary_split_across_two_fields,
-            canary_with_a_zero_width_space,
+            canary_with_an_invisible_character,
             canary_on_a_leaf_subclass_attribute,
         ),
     ),
