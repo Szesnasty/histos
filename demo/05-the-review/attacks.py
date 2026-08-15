@@ -192,6 +192,36 @@ def canary_with_an_invisible_character() -> None:
     )
 
 
+def a_secret_carrying_an_invisible_character() -> None:
+    """Round 6. The same gap, in the twin control — and this one hard-denies.
+
+    `deny_secret_args` is on by default and refuses a card number in an argument. The
+    canary scan beside it has normalised since round 2; these detectors matched the text
+    as written, so one soft hyphen split the pattern and walked the PAN into the tool.
+    Both directions are shown: the deny, and the redaction on the way out.
+    """
+    pan = "4111 1111 1111 1111"
+    smuggled = pan[:6] + "­" + pan[6:]
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({"note": Field(type="string")}), deny_secret_args=True)},
+        permissions={"r": frozenset({"t"})},
+    )
+    arrived: list[str] = []
+    safe = Gate(policy, audit=InMemoryAuditSink()).wrap(lambda note: arrived.append(note), name="t")
+    with use_principal(Principal(role="r", identity="analyst")), contextlib.suppress(Exception):
+        safe(note=smuggled)
+
+    from histos.decide import detectors  # noqa: PLC0415 — the outbound half of the same control
+
+    out, kinds = detectors.redact_string(f"the card is {smuggled}")
+    fragment = pan[:6] in out or pan[-6:] in out
+    report(
+        "a card number split by one soft hyphen",
+        bool(arrived) or fragment,
+        f"reached the tool: {bool(arrived)}; on the way out it redacted {kinds} and left {out!r}",
+    )
+
+
 def canary_on_a_leaf_subclass_attribute() -> None:
     """Round 6. The sixth shape, and the first where two passes wanting opposite answers
     about the same value was the reason.
@@ -645,6 +675,7 @@ ATTACKS = (
             canary_split_across_two_fields,
             canary_with_an_invisible_character,
             canary_on_a_leaf_subclass_attribute,
+            a_secret_carrying_an_invisible_character,
         ),
     ),
     (
