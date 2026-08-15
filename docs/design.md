@@ -223,7 +223,7 @@ tools:
 ```
 
 ```python
-Gate(policy, escalate=my_semantic_tier)   # (request) -> truthy to let it continue
+Gate(policy, escalate=my_semantic_tier)   # (request) -> exactly True to let it continue
 ```
 
 Two properties carry the whole design, and both are structural rather than advisory:

@@ -9,20 +9,35 @@ import pytest
 
 from histos import (
     ApprovalStore,
+    Binding,
     Constraint,
+    ContentRules,
+    Effect,
     Field,
     Gate,
     GateConfirmationRequired,
+    GateRequest,
     InMemoryAuditSink,
+    JSONLAuditSink,
+    LimitStore,
     Policy,
     PolicyError,
     Principal,
     Schema,
     ToolContract,
+    ToolSource,
+    build_lock,
+    dump_bundle,
     load_bundle,
+    merge_contracts,
     parse_lock,
+    review_policy,
+    schema_hash,
+    sources_from_mcp,
+    sources_from_openai,
     sources_from_openapi,
 )
+from histos.provenance.lockfile import Reviewed
 from histos.trail.verify import verify_chain
 
 
@@ -393,3 +408,491 @@ def test_audit_verifier_handles_invalid_utf8_and_non_file(tmp_path):
     ok, detail = verify_chain(tmp_path)
     assert not ok
     assert "unreadable" in detail
+
+
+@pytest.mark.parametrize("verdict", ["denied", {"approved": False}, 1, [0], None])
+def test_escalation_only_exact_true_can_release_a_call(verdict):
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), requires_escalation=True)},
+        permissions={"operator": {"t"}},
+    )
+    decision = Gate(policy, escalate=lambda _request: verdict).engine.pre(
+        GateRequest("t", {}, Principal(role="operator"))
+    )
+    assert decision.effect is Effect.DENY
+    assert decision.rule == "escalation_error"
+    assert decision.escalate is True
+
+
+def test_false_is_a_real_semantic_refusal_and_true_is_the_only_release():
+    policy = Policy(
+        tools={"t": ToolContract(name="t", args=Schema({}), requires_escalation=True)},
+        permissions={"operator": {"t"}},
+    )
+    request = GateRequest("t", {}, Principal(role="operator"))
+    assert Gate(policy, escalate=lambda _request: False).engine.pre(request).rule == "escalation_denied"
+    assert Gate(policy, escalate=lambda _request: True).engine.pre(request).rule == "escalated"
+
+
+@pytest.mark.parametrize("value", [[], {}])
+def test_unhashable_field_types_are_policy_errors(value):
+    with pytest.raises(PolicyError, match="field type"):
+        Field(type=value)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"enum": "ab"}, "list or tuple"),
+        ({"enum": {"a", "b"}}, "list or tuple"),
+        ({"item_enum": "ab", "type": "array"}, "list or tuple"),
+        ({"enum": ()}, "at least one"),
+        ({"enum": (object(),)}, "cannot be hashed reproducibly"),
+        ({"enum": (b"bytes",)}, "JSON values"),
+        ({"enum": ({1: "value"},)}, "keys must be strings"),
+    ],
+)
+def test_python_enum_literals_are_portable_and_deterministic(kwargs, match):
+    with pytest.raises(PolicyError, match=match):
+        Field(**kwargs)
+
+
+def test_a_cyclic_enum_literal_is_rejected_before_policy_hashing():
+    cycle = []
+    cycle.append(cycle)
+    with pytest.raises(PolicyError, match="reference cycle"):
+        Field(enum=(cycle,))
+
+
+def test_list_and_tuple_enum_literals_cannot_enforce_differently_behind_one_hash():
+    as_list = Field(type="array", enum=([1],))
+    as_tuple = Field(type="array", enum=((1,),))
+    assert as_list.enum == as_tuple.enum == ([1],)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), {1: "value"}, b"bytes"])
+def test_constraint_literals_that_cannot_survive_the_policy_format_are_rejected(value):
+    with pytest.raises(PolicyError):
+        Constraint("status", "eq", value=value)
+
+
+def test_a_cyclic_constraint_literal_is_a_policy_error_not_recursion_error():
+    cycle = []
+    cycle.append(cycle)
+    with pytest.raises(PolicyError, match="reference cycle"):
+        Constraint("status", "eq", value=cycle)
+
+
+def test_list_and_tuple_constraint_literals_enforce_identically_behind_one_hash():
+    def policy(value):
+        return Policy(
+            tools={
+                "t": ToolContract(
+                    "t",
+                    Schema({}),
+                    constraints=(Constraint("tags", "eq", value=value),),
+                )
+            },
+            permissions={"r": {"t"}},
+        )
+
+    left, right = policy(["safe"]), policy(("safe",))
+    assert left.content_hash() == right.content_hash()
+    principal = Principal(role="r")
+    assert left.tools["t"].constraints[0].evaluate({"tags": ["safe"]}, principal).ok
+    assert right.tools["t"].constraints[0].evaluate({"tags": ["safe"]}, principal).ok
+
+
+def test_set_constraint_literal_has_a_stable_portable_round_trip():
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                "t",
+                Schema({}),
+                constraints=(Constraint("status", "in", value={"new", "open"}),),
+            )
+        },
+        permissions={"r": {"t"}},
+    )
+    assert load_bundle(dump_bundle(policy)).content_hash() == policy.content_hash()
+
+
+@pytest.mark.parametrize(
+    ("factory", "match"),
+    [
+        (lambda: Schema([]), "mapping"),
+        (lambda: Schema({1: Field()}), "field name"),
+        (lambda: Schema({"x": {"type": "string"}}), "must be a Field"),
+        (lambda: Constraint(1, "eq", value="x"), "constraint field"),
+        (lambda: Constraint("x", [], value="x"), "constraint op"),
+        (lambda: Binding(1, "tenant"), "binding field"),
+        (lambda: Binding("tenant", []), "principal_attr"),
+        (lambda: ToolContract("", Schema({})), "contract name"),
+        (lambda: ToolContract("t", {}), "args must be a Schema"),
+        (lambda: ToolContract("t", Schema({}), constraints=(object(),)), "Constraint"),
+        (lambda: Policy(tools=[]), "tools must be a mapping"),
+        (
+            lambda: Policy(tools={"t": ToolContract("other", Schema({}))}),
+            "disagrees with its contract name",
+        ),
+        (lambda: Policy(permissions={1: {"t"}}), "role name"),
+        (lambda: Policy(permissions={"r": {1}}), "non-empty tool names"),
+        (lambda: Policy(schema_version="histos.policy/99"), "not supported"),
+        (lambda: Principal(role=1), "principal role"),
+        (lambda: Principal(role="r", identity=1), "principal identity"),
+        (lambda: Principal(role="r", attributes=[]), "attributes must be a mapping"),
+        (lambda: Principal(role="r", attributes={1: "x"}), "attribute name"),
+        (lambda: Principal(role="r", can_view=None), "can_view"),
+        (lambda: Principal(role="r", can_view=[1]), "can_view"),
+    ],
+)
+def test_python_policy_graph_rejects_malformed_nodes_at_construction(factory, match):
+    with pytest.raises(PolicyError, match=match):
+        factory()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"strict": "false"}, "strict"),
+        ({"confirm_suspends": [RuntimeError]}, "confirm_suspends"),
+        ({"confirm_suspends": ("RuntimeError",)}, "confirm_suspends"),
+        ({"audit_key": "secret"}, "audit_key"),
+        ({"audit_key": b""}, "audit_key"),
+        ({"confirm": True}, "confirm must be callable"),
+        ({"resource_resolver": {}}, "resource_resolver must be callable"),
+        ({"escalate": "tier"}, "escalate must be callable"),
+    ],
+)
+def test_gate_configuration_switches_and_callbacks_fail_loud_at_wiring_time(kwargs, match):
+    with pytest.raises(PolicyError, match=match):
+        Gate(_simple_policy(), **kwargs)
+
+
+def test_wrap_and_protect_configuration_values_are_exact():
+    def t():
+        return "ok"
+
+    gate = Gate(_simple_policy())
+    with pytest.raises(PolicyError, match="wrap name"):
+        gate.wrap(t, name="")
+    with pytest.raises(PolicyError, match="is_async"):
+        gate.wrap(t, is_async="false")
+    with pytest.raises(PolicyError, match="fixed_principal"):
+        gate.wrap(t, fixed_principal={})
+    with pytest.raises(PolicyError, match="infer_missing"):
+        gate.protect([t], infer_missing="false")
+
+
+@pytest.mark.parametrize("kind", [[], {}])
+def test_unhashable_lock_source_kind_is_a_policy_error(kind):
+    lock = _valid_v2_lock()
+    lock["tools"]["t"]["source"]["kind"] = kind
+    with pytest.raises(PolicyError, match="source.kind"):
+        parse_lock(lock)
+
+
+def test_tool_source_and_lock_review_evidence_are_snapshots():
+    shape = {"input": {"type": "object", "properties": {"q": {"type": "string"}}}}
+    source = ToolSource(
+        name="t",
+        kind="mcp",
+        description=None,
+        shape=shape,
+        contract=ToolContract(name="t", args=Schema({})),
+    )
+    lock = build_lock([source], policy="security.policy.json", locator="mcp://tools")
+
+    shape["input"]["properties"]["q"]["type"] = "integer"
+    assert source.shape["input"]["properties"]["q"]["type"] == "string"
+    assert lock.tools["t"].reviewed.shape["input"]["properties"]["q"]["type"] == "string"
+    with pytest.raises(TypeError, match="read-only"):
+        lock.tools.clear()
+    with pytest.raises(TypeError, match="read-only"):
+        lock.tools["t"].reviewed.shape["input"]["properties"]["q"]["type"] = "number"
+
+
+def test_reviewed_shape_does_not_alias_the_parsed_lock_document():
+    shape = {"method": "get", "path": "/before"}
+    reviewed = Reviewed(shape=shape)
+    shape["path"] = "/after"
+    assert reviewed.shape == {"method": "get", "path": "/before"}
+
+
+@pytest.mark.parametrize("schema", [None, "string", [], False, 1])
+def test_openapi_present_malformed_parameter_schema_is_rejected(schema):
+    spec = {
+        "paths": {
+            "/search": {
+                "get": {
+                    "operationId": "search",
+                    "parameters": [{"name": "q", "in": "query", "schema": schema}],
+                }
+            }
+        }
+    }
+    with pytest.raises(PolicyError, match="schema of parameter"):
+        sources_from_openapi(spec)
+
+
+@pytest.mark.parametrize("content", [None, "json", [], False, 1, {}])
+def test_openapi_present_malformed_parameter_content_is_rejected(content):
+    spec = {
+        "paths": {
+            "/search": {
+                "get": {
+                    "operationId": "search",
+                    "parameters": [{"name": "q", "in": "query", "content": content}],
+                }
+            }
+        }
+    }
+    with pytest.raises(PolicyError, match="content of parameter"):
+        sources_from_openapi(spec)
+
+
+@pytest.mark.parametrize("name", [None, 1, [], {}])
+def test_openapi_parameter_name_is_a_non_empty_string(name):
+    spec = {
+        "paths": {
+            "/search": {
+                "get": {
+                    "operationId": "search",
+                    "parameters": [{"name": name, "in": "query", "schema": {"type": "string"}}],
+                }
+            }
+        }
+    }
+    with pytest.raises(PolicyError, match="name"):
+        sources_from_openapi(spec)
+
+
+@pytest.mark.parametrize("location", [None, 1, [], {}, "body"])
+def test_openapi_parameter_location_is_a_known_string(location):
+    spec = {
+        "paths": {
+            "/search": {
+                "get": {
+                    "operationId": "search",
+                    "parameters": [{"name": "q", "in": location, "schema": {"type": "string"}}],
+                }
+            }
+        }
+    }
+    with pytest.raises(PolicyError, match="`in` value"):
+        sources_from_openapi(spec)
+
+
+def test_openapi_document_and_path_shapes_fail_with_controlled_diagnostics():
+    with pytest.raises(PolicyError, match="OpenAPI document"):
+        sources_from_openapi([])
+    with pytest.raises(PolicyError, match="path string"):
+        sources_from_openapi({"paths": {1: {"get": {}}}})
+    with pytest.raises(PolicyError, match="path parameters are always required"):
+        sources_from_openapi(
+            {
+                "paths": {
+                    "/items/{item_id}": {
+                        "get": {
+                            "parameters": [
+                                {"name": "item_id", "in": "path", "required": False, "schema": {"type": "string"}}
+                            ]
+                        }
+                    }
+                }
+            }
+        )
+
+
+def test_openapi_request_body_required_is_an_exact_boolean():
+    spec = {
+        "paths": {
+            "/write": {
+                "post": {
+                    "requestBody": {
+                        "required": "false",
+                        "content": {"application/json": {"schema": {"type": "object"}}},
+                    }
+                }
+            }
+        }
+    }
+    with pytest.raises(PolicyError, match="required on requestBody"):
+        sources_from_openapi(spec)
+
+
+@pytest.mark.parametrize("window", [0, -1, True, float("nan"), float("inf"), "60"])
+def test_rate_window_cannot_silently_disable_a_declared_limit(window):
+    with pytest.raises(PolicyError, match="positive finite"):
+        LimitStore(window_seconds=window)
+
+
+def test_injected_clock_must_keep_returning_finite_numbers():
+    now = [1.0]
+    limits = LimitStore(time_fn=lambda: now[0])
+    limits.consume("alice", "t", rate_limit=1, budget=None)
+    now[0] = float("nan")
+    with pytest.raises(PolicyError, match="finite number"):
+        limits.check("alice", "t", rate_limit=1, budget=None)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "100"])
+def test_in_memory_audit_capacity_cannot_discard_every_record_by_configuration(value):
+    with pytest.raises(ValueError, match="positive integer or None"):
+        InMemoryAuditSink(maxlen=value)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"hash_chain": "true"},
+        {"key": b""},
+        {"key": "secret"},
+        {"hash_chain": False, "key": b"secret"},
+        {"mode": True},
+        {"mode": -1},
+        {"mode": 0o10000},
+        {"strict": "false"},
+    ],
+)
+def test_jsonl_audit_security_configuration_is_unambiguous(tmp_path, kwargs):
+    with pytest.raises(ValueError):
+        JSONLAuditSink(tmp_path / "audit.jsonl", **kwargs)
+
+
+@pytest.mark.parametrize("flag", ["check_injection", "check_exfiltration"])
+@pytest.mark.parametrize("value", [None, 0, 1, "false"])
+def test_content_rule_switches_are_exact_booleans(flag, value):
+    with pytest.raises(PolicyError, match=flag):
+        ContentRules(**{flag: value})
+
+
+def test_import_refuses_duplicate_tool_names_instead_of_using_list_order():
+    spec = {
+        "paths": {
+            "/first": {"get": {"operationId": "same"}},
+            "/second": {"post": {"operationId": "same"}},
+        }
+    }
+    with pytest.raises(PolicyError, match="more than once"):
+        sources_from_openapi(spec)
+
+
+def test_duplicate_identity_is_refused_even_when_one_definition_is_unprojectable():
+    source = [
+        {"name": "same", "inputSchema": {"type": "object"}},
+        {"name": "same", "inputSchema": {"type": "object", "properties": {"x": {"maxItems": 2}}}},
+    ]
+    with pytest.raises(PolicyError, match="ambiguous even when one definition cannot be projected"):
+        sources_from_mcp(source)
+
+
+def test_merge_refuses_duplicate_contract_names_instead_of_last_one_winning():
+    policy = Policy(permissions={"r": set()})
+    first = ToolContract("same", Schema({"a": Field()}))
+    second = ToolContract("same", Schema({"b": Field()}))
+    with pytest.raises(PolicyError, match="order-dependent merge"):
+        merge_contracts(policy, [first, second])
+
+
+def test_lock_builder_refuses_duplicate_sources_instead_of_erasing_evidence():
+    source = ToolSource(
+        name="same",
+        kind="mcp",
+        description=None,
+        shape={"input": {"type": "object"}},
+        contract=ToolContract("same", Schema({})),
+    )
+    with pytest.raises(PolicyError, match="duplicate tool name"):
+        build_lock([source, source], policy="security.policy.json", locator="mcp://tools")
+
+
+@pytest.mark.parametrize("field", ["inputSchema", "outputSchema"])
+@pytest.mark.parametrize("value", [None, False, [], "schema"])
+def test_mcp_present_malformed_schemas_are_not_recorded_as_absent(field, value):
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_mcp([{"name": "t", field: value}])
+
+
+@pytest.mark.parametrize("value", [False, [], {}])
+def test_importers_do_not_erase_present_malformed_descriptions(value):
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_mcp([{"name": "t", "description": value}])
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_openai([{"name": "t", "description": value}])
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_openapi({"paths": {"/x": {"get": {"operationId": "t", "description": value}}}})
+
+
+@pytest.mark.parametrize("value", [None, False, [], "schema"])
+def test_openai_present_malformed_parameters_are_not_recorded_as_absent(value):
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_openai([{"name": "t", "parameters": value}])
+
+
+@pytest.mark.parametrize("value", [None, False, [], "function"])
+def test_openai_present_malformed_function_wrapper_is_refused(value):
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_openai([{"type": "function", "function": value}])
+
+
+@pytest.mark.parametrize("value", [None, "", False, 0, [], {}])
+def test_openapi_present_invalid_operation_id_is_not_silently_replaced(value):
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_openapi({"paths": {"/x": {"get": {"operationId": value}}}})
+
+
+def test_openai_non_projected_source_fields_move_the_shape_hash():
+    base = {
+        "type": "function",
+        "function": {"name": "t", "parameters": {"type": "object"}, "strict": True},
+    }
+    changed = {
+        "type": "function",
+        "function": {"name": "t", "parameters": {"type": "object"}, "strict": False},
+    }
+    assert schema_hash(sources_from_openai([base])[0].shape) != schema_hash(sources_from_openai([changed])[0].shape)
+
+
+def test_approval_clock_cannot_disable_expiry_by_becoming_invalid_or_moving_backwards():
+    clock = [10.0]
+    store = ApprovalStore(None, clock=lambda: clock[0])
+    store.grant("fingerprint")
+    clock[0] = float("nan")
+    with pytest.raises(PolicyError, match="finite number"):
+        store.grant("another")
+
+    clock[0] = 9.0
+    with pytest.raises(PolicyError, match="moved backwards"):
+        store.grant("another")
+
+
+def test_review_includes_a_role_declared_only_as_an_inheritance_child():
+    policy = Policy(
+        tools={"t": ToolContract("t", Schema({}), returns=Schema({}))},
+        permissions={"parent": {"t"}},
+        role_inherits={"child": "parent"},
+    )
+    review = review_policy(policy)
+    assert review.roles_discovered == 2
+    assert review.callable_by["t"] == ["child", "parent"]
+    assert review.unreachable == []
+
+
+def test_openapi_explicit_empty_servers_does_not_fall_back_to_a_parent_endpoint():
+    inherited = {
+        "servers": [{"url": "https://parent.example"}],
+        "paths": {"/x": {"get": {"operationId": "t"}}},
+    }
+    explicit = {
+        "servers": [{"url": "https://parent.example"}],
+        "paths": {"/x": {"get": {"operationId": "t", "servers": []}}},
+    }
+    assert sources_from_openapi(inherited)[0].shape["servers"] == [{"url": "https://parent.example"}]
+    assert sources_from_openapi(explicit)[0].shape["servers"] == []
+
+
+@pytest.mark.parametrize("servers", [None, False, {}, "https://example", [None], [{"url": ""}]])
+def test_openapi_present_malformed_server_configuration_is_refused(servers):
+    with pytest.raises(PolicyError, match="no tool"):
+        sources_from_openapi({"paths": {"/x": {"get": {"operationId": "t", "servers": servers}}}})

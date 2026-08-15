@@ -122,6 +122,21 @@ class Gate:
         output_budget: int = _DEFAULT_OUTPUT_BUDGET,
         strict: bool = False,
     ) -> None:
+        if not isinstance(strict, bool):
+            raise PolicyError(f"strict must be true or false, got {strict!r}")
+        if not isinstance(confirm_suspends, tuple) or any(
+            not isinstance(exc, type) or not issubclass(exc, BaseException) for exc in confirm_suspends
+        ):
+            raise PolicyError("confirm_suspends must be a tuple of exception classes")
+        if audit_key is not None and (not isinstance(audit_key, bytes) or not audit_key):
+            raise PolicyError("audit_key must be non-empty bytes when supplied")
+        for callback_name, callback in (
+            ("confirm", confirm),
+            ("resource_resolver", resource_resolver),
+            ("escalate", escalate),
+        ):
+            if callback is not None and not callable(callback):
+                raise PolicyError(f"{callback_name} must be callable or None, got {type(callback).__name__}")
         # Coverage must distinguish a wrapper made by this Gate from one made by a
         # different, possibly more permissive Gate. A name stamp alone cannot answer
         # that question; this opaque identity travels only onto wrappers we produce.
@@ -370,8 +385,10 @@ class Gate:
 
         ``is_async`` overrides detection for the cases the gate refuses to guess.
         """
-        tool_name = name or getattr(tool, "__name__", None)
-        if not tool_name:
+        if name is not None and (not isinstance(name, str) or not name):
+            raise PolicyError(f"wrap name must be a non-empty string, got {name!r}")
+        tool_name = getattr(tool, "__name__", None) if name is None else name
+        if not isinstance(tool_name, str) or not tool_name:
             raise PolicyError("cannot determine tool name; pass name=...")
         # `protect()` refuses a lambda and points the caller here — and `"<lambda>"` is a
         # perfectly truthy string, so the very call its message recommends accepted one
@@ -416,6 +433,8 @@ class Gate:
             )
 
         bound = _resolve_fixed_principal(fixed_principal, principal)
+        if is_async is not None and not isinstance(is_async, bool):
+            raise PolicyError(f"is_async must be true, false or None, got {is_async!r}")
         run_async = is_async if is_async is not None else _detect_async(tool, tool_name)
 
         # Gate-scoped, not call-scoped. `protect()` refuses two same-named tools by

@@ -1,7 +1,7 @@
 {
   "$comment": "The machine-readable definition of the Histos conformance corpus: which cases exist, what each corpus asserts, and — the part prose kept getting wrong — what 'passes the corpus' is allowed to mean. A second implementation reads this file; conformance/README.md is for people. The case list and the per-fixture sha256 are regenerated from the directory and verified by the reference engine's own suite (tests/test_conformance.py), so this manifest cannot drift into certifying a corpus that no longer exists.",
   "manifest_version": "1",
-  "corpus_version": "0.5.0",
+  "corpus_version": "0.6.0",
   "status": "draft",
   "schema_version": "histos.policy/0.1",
   "artifacts": {
@@ -357,7 +357,7 @@
         {
           "case": "openai-function-projects-like-mcp",
           "file": "projection/openai-function-projects-like-mcp.json",
-          "sha256": "c4327c1fa493a0a4eb1fb3254451d89c3399309ee9790c897b4e9f4ce731d060"
+          "sha256": "9c71dde1daf7241f4efe30a82603f16688570e6a5b0d9e5cc5fc3ee37c7efd39"
         },
         {
           "case": "unprojected-keywords-do-not-move-the-contract-hash",

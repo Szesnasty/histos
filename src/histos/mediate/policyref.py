@@ -99,6 +99,8 @@ def _resolve_fixed_principal(fixed_principal: Principal | None, principal: Princ
     Nothing is published yet, so there is no compatibility to keep. It raises.
     """
     if principal is None:
+        if fixed_principal is not None and not isinstance(fixed_principal, Principal):
+            raise PolicyError(f"fixed_principal must be a Principal or None, got {type(fixed_principal).__name__}")
         return fixed_principal
     raise PolicyError(
         "`principal=` is gone. It bound ONE identity for the lifetime of the wrapper while reading like "

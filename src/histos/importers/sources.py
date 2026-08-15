@@ -34,7 +34,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from histos.errors import PolicyError
+from histos.policy.canonical import canonical_json
 from histos.policy.contracts import Sensitivity, ToolContract
+from histos.policy.frozen import _snapshot_value
 
 SourceReader = Callable[[Any], list["ToolSource"]]
 
@@ -138,9 +140,42 @@ class ToolSource:
     contract: ToolContract
 
     def __post_init__(self) -> None:
-        if self.kind not in KINDS:
+        if not isinstance(self.kind, str) or self.kind not in KINDS:
             raise ValueError(f"unknown source kind {self.kind!r} — expected one of {', '.join(sorted(KINDS))}")
         _reject_unusable_name(self.name)
+        if self.description is not None and not isinstance(self.description, str):
+            raise PolicyError(
+                f"tool source {self.name!r} description must be a string or None, "
+                f"got {type(self.description).__name__}",
+                code="invalid_import",
+            )
+        if not isinstance(self.shape, dict):
+            raise PolicyError(
+                f"tool source {self.name!r} shape must be an object, got {type(self.shape).__name__}",
+                code="invalid_import",
+            )
+        if not isinstance(self.contract, ToolContract):
+            raise PolicyError(
+                f"tool source {self.name!r} contract must be a ToolContract, got {type(self.contract).__name__}",
+                code="invalid_import",
+            )
+        if self.contract.name != self.name:
+            raise PolicyError(
+                f"tool source name {self.name!r} disagrees with its contract name {self.contract.name!r}",
+                code="invalid_import",
+            )
+        try:
+            canonical_json(self.shape, numbers_as_text=True)
+        except (TypeError, ValueError) as exc:
+            raise PolicyError(
+                f"tool source {self.name!r} shape cannot be hashed reproducibly: {exc}",
+                code="invalid_import",
+            ) from exc
+        # Source documents are untrusted and callers commonly keep the parsed dict. A
+        # ToolSource is the reviewed snapshot: if it aliases that dict, editing the source
+        # after import rewrites the evidence later placed in a lock while the hashes keep
+        # describing the pre-edit value.
+        object.__setattr__(self, "shape", _snapshot_value(self.shape))
 
 
 # A tool name is a policy key, a dict key in a YAML document, a column in every report
@@ -248,12 +283,43 @@ def project_tools[Entry](
     """
     kept: list[ToolSource] = []
     skipped: list[SkippedTool] = []
+    seen: set[str] = set()
+    declared_seen: set[str] = set()
     for entry in entries:
+        declared_name = name_of(entry)
+        # `<unnamed>` is a diagnostic sentinel, not an identity. Several malformed
+        # nameless entries should each be skipped and reported, not collide with one
+        # another before projection has explained what is wrong.
+        if declared_name != "<unnamed>" and declared_name in declared_seen:
+            raise PolicyError(
+                f"{kind} source declares tool name {declared_name!r} more than once; "
+                "duplicate identities are ambiguous even when one definition cannot be projected",
+                code="invalid_import",
+            )
+        if declared_name != "<unnamed>":
+            declared_seen.add(declared_name)
         try:
-            kept.append(read_one(entry))
+            source = read_one(entry)
         except PolicyError as exc:
-            name = name_of(entry)
-            skipped.append(SkippedTool(name=name, kind=kind, reason=f"{kind} tool {name!r} was not imported: {exc}"))
+            skipped.append(
+                SkippedTool(
+                    name=declared_name,
+                    kind=kind,
+                    reason=f"{kind} tool {declared_name!r} was not imported: {exc}",
+                )
+            )
+            continue
+        # A list can carry the same logical key twice even though the policy and lock
+        # maps cannot. Letting the latter definition win made review depend on ordering
+        # chosen by the untrusted source and erased the conflicting evidence.
+        if source.name in seen:
+            raise PolicyError(
+                f"{kind} source declares tool name {source.name!r} more than once; "
+                "tool names must be unique before they can become policy keys",
+                code="invalid_import",
+            )
+        seen.add(source.name)
+        kept.append(source)
 
     if entries and not kept:
         raise PolicyError(

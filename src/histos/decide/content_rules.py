@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from histos.decide import patterns
+from histos.errors import PolicyError
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,12 @@ class ContentRules:
 
     check_injection: bool = True
     check_exfiltration: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("check_injection", "check_exfiltration"):
+            value = getattr(self, name)
+            if not isinstance(value, bool):
+                raise PolicyError(f"{name} must be true or false, got {value!r}")
 
     def scan(self, text: str) -> tuple[str, str] | None:
         """Return ``(rule, matched_pattern)`` for the first hit, or ``None``."""

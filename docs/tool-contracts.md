@@ -43,10 +43,11 @@ Three things, and only the first is what people mean when they complain.
 2. **Re-importing would clobber hand-written policy.** The valuable half of a policy —
    roles, `resource.owns`, `bind`, `confirmation`, `output` — cannot be inferred from
    any schema and is added by a human afterwards. A naive regeneration destroys it.
-3. **The description never enters Histos at all.** `contracts_from_mcp` reads `name`
-   and `inputSchema` and discards the rest. A description is where a tool-poisoning
-   payload hides, so *"the contract did not change"* is not the same claim as *"the
-   tool definition did not change"*.
+3. **The description does not enter the enforcement contract.** Import records it and
+   every other source field as provenance, while `contracts_from_mcp` projects only the
+   enforceable shape. A description is where a tool-poisoning payload hides, so *"the
+   contract did not change"* is not the same claim as *"the tool definition did not
+   change"*.
 
 ## The principle
 
@@ -272,7 +273,7 @@ repository:
    — **done**;
 2. **conformance** — a projection corpus: source schema → expected contract →
    expected `contract_sha256`, which any implementation must reproduce — **done**,
-   nine cases, corpus `0.2.0`;
+   the versioned corpus named in `conformance/manifest.json`;
 3. lock file written by `import` — **done**;
 4. `histos drift` reading it, with the three-hash report and a non-zero exit —
    **done**;

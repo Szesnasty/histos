@@ -21,9 +21,12 @@ the whole subtree when one leaf refused.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
+
+from histos.errors import PolicyError
 
 
 class ReadOnlyDict(dict):  # type: ignore[type-arg]
@@ -410,6 +413,15 @@ class Principal:
     can_view: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.role, str) or not self.role:
+            raise PolicyError(f"principal role must be a non-empty string, got {self.role!r}")
+        if self.identity is not None and not isinstance(self.identity, str):
+            raise PolicyError(f"principal identity must be a string or None, got {type(self.identity).__name__}")
+        if not isinstance(self.attributes, Mapping):
+            raise PolicyError(f"principal attributes must be a mapping, got {type(self.attributes).__name__}")
+        for name in self.attributes:
+            if not isinstance(name, str) or not name:
+                raise PolicyError(f"a principal attribute name must be a non-empty string, got {name!r}")
         # `frozen=True` froze the *binding* and nothing else: the dict it points at
         # stayed writable, so the trust anchor of the whole library could be edited
         # after the gate had been built from it. Take a snapshot behind a read-only
@@ -432,9 +444,20 @@ class Principal:
         # is `{'p','i'}`, which matches nothing and silently turns a grant into a denial —
         # the coercion that was added to accept a list quietly broke the shortest spelling.
         if isinstance(self.can_view, str):
-            object.__setattr__(self, "can_view", frozenset({self.can_view}))
-        elif not isinstance(self.can_view, frozenset):
-            object.__setattr__(self, "can_view", frozenset(self.can_view))
+            can_view = frozenset({self.can_view})
+        elif isinstance(self.can_view, list | tuple | set | frozenset):
+            try:
+                can_view = frozenset(self.can_view)
+            except TypeError as exc:
+                raise PolicyError("principal can_view must contain sensitivity-class strings") from exc
+        else:
+            raise PolicyError(
+                f"principal can_view must be a string or a collection of strings, got {type(self.can_view).__name__}"
+            )
+        if any(not isinstance(value, str) or not value for value in can_view):
+            raise PolicyError("principal can_view must contain non-empty sensitivity-class strings")
+        if can_view is not self.can_view:
+            object.__setattr__(self, "can_view", can_view)
 
     def __hash__(self) -> int:
         # The generated hash covered `attributes`, which is a mapping and unhashable,

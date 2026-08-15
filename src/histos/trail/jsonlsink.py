@@ -96,6 +96,16 @@ class JSONLAuditSink:
         mode: int = 0o600,
         strict: bool = False,
     ) -> None:
+        if not isinstance(hash_chain, bool):
+            raise ValueError(f"hash_chain must be true or false, got {hash_chain!r}")
+        if key is not None and (not isinstance(key, bytes) or not key):
+            raise ValueError("key must be non-empty bytes when supplied")
+        if key is not None and not hash_chain:
+            raise ValueError("key has no effect when hash_chain is false")
+        if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o7777:
+            raise ValueError(f"mode must be an integer permission mask from 0o0000 to 0o7777, got {mode!r}")
+        if not isinstance(strict, bool):
+            raise ValueError(f"strict must be true or false, got {strict!r}")
         self.path = Path(path)
         self.tip_path = tip_path_for(self.path)
         self.hash_chain = hash_chain

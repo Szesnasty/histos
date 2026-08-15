@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from histos.errors import PolicyError
+from histos.policy.canonical import canonical_json
 from histos.policy.frozen import detach_mapping, detach_sequence
 from histos.redos import reject_catastrophic_backtracking
 
@@ -42,6 +44,48 @@ _TYPE_CHECKS: dict[str, type | tuple[type, ...]] = {
     "object": dict,
     "any": object,
 }
+
+
+def _portable_value(value: Any, where: str) -> Any:
+    """Return the JSON spelling a policy literal is hashed and enforced as."""
+    try:
+        canonical_json(value, numbers_as_text=True)
+    except (TypeError, ValueError) as exc:
+        raise PolicyError(f"{where} cannot be hashed reproducibly: {exc}", code="invalid_field") from exc
+
+    def walk(node: Any) -> Any:
+        if node is None or isinstance(node, str | bool | int):
+            return node
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                raise PolicyError(f"{where} contains a non-finite number {node!r}", code="invalid_field")
+            return node
+        if isinstance(node, list | tuple):
+            # JSON has one sequence type and the policy hash deliberately gives Python
+            # lists and tuples one spelling. Enforcement must do the same: otherwise
+            # `enum=([1],)` and `enum=((1,),)` share a hash while accepting opposite
+            # Python values.
+            return [walk(item) for item in node]
+        if isinstance(node, dict):
+            out: dict[str, Any] = {}
+            for key, item in node.items():
+                if not isinstance(key, str):
+                    raise PolicyError(
+                        f"{where} contains an object key {key!r}; policy object keys must be strings",
+                        code="invalid_field",
+                    )
+                out[key] = walk(item)
+            return out
+        # `canonical_json` can represent bytes and sets for call fingerprints, but a
+        # policy bundle cannot. Accepting them here makes an in-memory policy impossible
+        # to dump and, for a set used as the outer enum, makes its hash process-order
+        # dependent once it is converted to a tuple.
+        raise PolicyError(
+            f"{where} contains {type(node).__name__}; enum literals must be JSON values",
+            code="invalid_field",
+        )
+
+    return walk(value)
 
 
 # Which declared types actually consult each keyword. `any` is exempt from all of it,
@@ -170,7 +214,15 @@ class Field:
         for name in ("enum", "item_enum"):
             declared = getattr(self, name)
             if declared is not None:
-                object.__setattr__(self, name, detach_sequence(declared))
+                if not isinstance(declared, list | tuple):
+                    raise PolicyError(
+                        f"{name} must be a list or tuple of portable values, got {type(declared).__name__}",
+                        code="invalid_field",
+                    )
+                if not declared:
+                    raise PolicyError(f"{name} must contain at least one allowed value", code="invalid_field")
+                portable = tuple(_portable_value(value, f"{name}[{index}]") for index, value in enumerate(declared))
+                object.__setattr__(self, name, detach_sequence(portable))
         for name in ("required", "nullable", "unique_items"):
             declared = getattr(self, name)
             if not isinstance(declared, bool):
@@ -179,9 +231,9 @@ class Field:
         # problem in the policy, and a host that wraps `load_policy` in the
         # documented `except PolicyError: fail_closed()` must catch it rather than
         # take an unhandled ValueError on a typo.
-        if self.type not in _TYPE_CHECKS:
+        if not isinstance(self.type, str) or self.type not in _TYPE_CHECKS:
             raise PolicyError(f"unknown field type: {self.type!r}", code="invalid_field")
-        if self.item_type is not None and self.item_type not in _TYPE_CHECKS:
+        if self.item_type is not None and (not isinstance(self.item_type, str) or self.item_type not in _TYPE_CHECKS):
             raise PolicyError(f"unknown array item_type: {self.item_type!r}", code="invalid_field")
         if self.sensitive not in (None, "pii", "secret"):
             raise PolicyError(f"sensitive must be None|'pii'|'secret', got {self.sensitive!r}", code="invalid_field")
@@ -307,6 +359,19 @@ class Schema:
     def __post_init__(self) -> None:
         if not isinstance(self.allow_extra, bool):
             raise PolicyError(f"allow_extra must be true or false, got {self.allow_extra!r}", code="invalid_field")
+        if not isinstance(self.fields, Mapping):
+            raise PolicyError(
+                f"schema fields must be a mapping of field names to Field values, got {type(self.fields).__name__}",
+                code="invalid_field",
+            )
+        for name, spec in self.fields.items():
+            if not isinstance(name, str) or not name:
+                raise PolicyError(f"a schema field name must be a non-empty string, got {name!r}", code="invalid_field")
+            if not isinstance(spec, Field):
+                raise PolicyError(
+                    f"schema field {name!r} must be a Field value, got {type(spec).__name__}",
+                    code="invalid_field",
+                )
         # One level, which is enough: the values are `Field`s that detach their own
         # collections. What this stops is the *map* growing — an argument appearing in a
         # schema that was validated without it. See `detach_mapping`.

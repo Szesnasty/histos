@@ -37,11 +37,13 @@ officer never saw. The hash in force at grant is recorded and compared at consum
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from histos.errors import PolicyError
 from histos.policy.canonical import canonical_json
 from histos.policy.contracts import GateRequest, Policy, Principal
 
@@ -115,7 +117,12 @@ class ApprovalStore:
 
     def __init__(self, policy: Policy | None, *, clock: Callable[[], float] = time.monotonic) -> None:
         # Monotonic, not wall-clock: an NTP step backwards must not extend a window.
+        if policy is not None and not isinstance(policy, Policy):
+            raise PolicyError(f"approval policy must be a Policy or None, got {type(policy).__name__}")
+        if not callable(clock):
+            raise PolicyError(f"approval clock must be callable, got {type(clock).__name__}")
         self._clock = clock
+        self._last_clock: float | None = None
         self._policy = policy
         self._approved: dict[str, _Grant] = {}
         self._lock = threading.Lock()
@@ -145,11 +152,13 @@ class ApprovalStore:
         """
         if isinstance(approved, str):
             with self._lock:
-                self._approved[approved] = _Grant(self._clock(), self._policy_hash(), None, False)
+                self._approved[approved] = _Grant(self._time(), self._policy_hash(), None, False)
             return
+        if not isinstance(approved, GateRequest):
+            raise PolicyError(f"approved must be a GateRequest or fingerprint string, got {type(approved).__name__}")
         with self._lock:
             self._approved[fingerprint_of(approved)] = _Grant(
-                self._clock(),
+                self._time(),
                 approved.policy_hash or self._policy_hash(),
                 approved.confirmation_expires_in,
                 True,
@@ -161,8 +170,12 @@ class ApprovalStore:
         Pins `confirmation.expires_in` as it stands now. Superseded by passing the
         request itself, which pins the ruleset as well and is the spelling to reach for.
         """
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise PolicyError("approval fingerprint must be a non-empty string")
+        if not isinstance(tool_name, str) or not tool_name:
+            raise PolicyError("approval tool_name must be a non-empty string")
         with self._lock:
-            self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), self._window(tool_name), True)
+            self._approved[fingerprint] = _Grant(self._time(), self._policy_hash(), self._window(tool_name), True)
 
     def _policy_hash(self) -> str:
         """The ruleset this store was handed, or "" when it was handed none.
@@ -205,7 +218,21 @@ class ApprovalStore:
             # Dropped either way: an approval that timed out is spent, not retryable.
             # Leaving it in the store would make "expired" mean "expired until the
             # agent asks again", which is not an expiry.
-            return window is None or self._clock() - entry.at <= window
+            return window is None or self._time() - entry.at <= window
+
+    def _time(self) -> float:
+        """Read the monotonic clock without allowing expiry to move backwards."""
+        value = self._clock()
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            raise PolicyError(f"approval clock must return a finite number, got {value!r}")
+        now = float(value)
+        if self._last_clock is not None and now < self._last_clock:
+            raise PolicyError(
+                f"approval clock moved backwards from {self._last_clock!r} to {now!r}; "
+                "a non-monotonic clock can extend an approval past its expiry"
+            )
+        self._last_clock = now
+        return now
 
     def as_confirm(self):
         """Return the callback to pass as ``Gate(confirm=...)``."""

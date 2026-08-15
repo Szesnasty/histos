@@ -44,10 +44,21 @@ def source_from_mcp(tool: dict[str, Any]) -> ToolSource:
     input_schema = tool.get("inputSchema")
     output_schema = tool.get("outputSchema")
     description = tool.get("description")
+    for field, value in (("inputSchema", input_schema), ("outputSchema", output_schema)):
+        if field in tool and not isinstance(value, dict):
+            raise PolicyError(
+                f"MCP tool {name!r} has {field}={value!r}; {field} must be a schema object",
+                code="invalid_import",
+            )
+    if "description" in tool and description is not None and not isinstance(description, str):
+        raise PolicyError(
+            f"MCP tool {name!r} description must be a string or null, got {type(description).__name__}",
+            code="invalid_import",
+        )
     return ToolSource(
         name=name,
         kind="mcp",
-        description=description if isinstance(description, str) else None,
+        description=description,
         # Normative shape for `mcp`: the two schemas under their own keys, plus
         # everything else the server sent under `rest`. `name` is the lock's own key
         # and `description` is hashed separately, so neither belongs here.

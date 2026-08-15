@@ -51,6 +51,7 @@ from histos.errors import PolicyError
 from histos.importers.sources import KINDS, ToolSource
 from histos.policy.canonical import canonical_json
 from histos.policy.contracts import ToolContract
+from histos.policy.frozen import _snapshot_value, detach_mapping
 
 LOCK_VERSION = 2
 
@@ -160,6 +161,12 @@ class Reviewed:
             raise PolicyError("reviewed elided must be a tuple containing only 'shape' and 'description'")
         if len(set(self.elided)) != len(self.elided):
             raise PolicyError("reviewed elided must not repeat a recorded part")
+        if self.shape is not None:
+            try:
+                canonical_json(self.shape, numbers_as_text=True)
+            except (TypeError, ValueError) as exc:
+                raise PolicyError(f"reviewed shape cannot be hashed reproducibly: {exc}") from exc
+            object.__setattr__(self, "shape", _snapshot_value(self.shape))
 
     @classmethod
     def of(cls, source: ToolSource) -> Reviewed:
@@ -272,6 +279,10 @@ class Lock:
                 raise PolicyError(f"lock entry {name!r} must be a LockEntry, got {type(entry).__name__}")
             if self.version == LOCK_VERSION and entry.reviewed is None:
                 raise PolicyError(f"lock entry {name!r} needs reviewed evidence in a version-{LOCK_VERSION} lock")
+        # A lock is evidence, not a builder. Mutating this map after hashes were checked
+        # can remove the one tool whose drift should fail CI; detach it just like Policy
+        # detaches its authorization maps.
+        object.__setattr__(self, "tools", detach_mapping(self.tools))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -286,7 +297,17 @@ class Lock:
 
 def build_lock(sources: list[ToolSource], *, policy: str, locator: str) -> Lock:
     """Record the sources an import just read."""
-    return Lock(policy=policy, tools={s.name: LockEntry.of(s, locator) for s in sources})
+    tools: dict[str, LockEntry] = {}
+    for source in sources:
+        if not isinstance(source, ToolSource):
+            raise PolicyError(f"lock sources must be ToolSource values, got {type(source).__name__}")
+        if source.name in tools:
+            raise PolicyError(
+                f"cannot build a lock with duplicate tool name {source.name!r}; "
+                "one mapping entry cannot preserve both reviewed sources"
+            )
+        tools[source.name] = LockEntry.of(source, locator)
+    return Lock(policy=policy, tools=tools)
 
 
 def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -> None:
@@ -354,7 +375,7 @@ def parse_lock(data: dict[str, Any]) -> Lock:
         if not isinstance(source, dict):
             raise PolicyError(f"`source` for tool {name!r} must be an object, got {type(source).__name__}")
         _reject_unknown(f"`source` for tool {name!r}", source, _SOURCE_KEYS)
-        kind = _required(f"source for tool {name!r}", source, "kind")
+        kind = _string(f"source.kind for tool {name!r}", _required(f"source for tool {name!r}", source, "kind"))
         if kind not in KINDS:
             raise PolicyError(
                 f"tool {name!r} in the lock names source kind {kind!r}, which this engine does not read. "
@@ -363,7 +384,7 @@ def parse_lock(data: dict[str, Any]) -> Lock:
         if version == LOCK_VERSION and "reviewed" not in node:
             raise PolicyError(f"tool {name!r} in a version-{LOCK_VERSION} lock is missing required key 'reviewed'")
         entries[name] = LockEntry(
-            kind=str(kind),
+            kind=kind,
             locator=_string(f"source.locator for tool {name!r}", source.get("locator", "")),
             schema_sha256=_digest_string(
                 f"schema_sha256 for tool {name!r}", _required(f"tool {name!r} in the lock", node, "schema_sha256")

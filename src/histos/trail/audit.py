@@ -57,6 +57,8 @@ class InMemoryAuditSink:
     """
 
     def __init__(self, maxlen: int | None = _DEFAULT_MAX_ENTRIES) -> None:
+        if maxlen is not None and (isinstance(maxlen, bool) or not isinstance(maxlen, int) or maxlen < 1):
+            raise ValueError(f"maxlen must be a positive integer or None, got {maxlen!r}")
         self.entries: deque[dict[str, Any]] = deque(maxlen=maxlen)
         self.dropped = 0
         self._lock = threading.Lock()

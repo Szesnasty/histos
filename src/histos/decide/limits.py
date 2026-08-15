@@ -21,10 +21,13 @@ The clock is injectable so limit behaviour is deterministic under test.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
+
+from histos.errors import PolicyError
 
 
 class LimitStore:
@@ -36,7 +39,20 @@ class LimitStore:
     """
 
     def __init__(self, *, window_seconds: float = 60.0, time_fn: Callable[[], float] = time.monotonic) -> None:
-        self._window = window_seconds
+        # A negative or NaN window makes every recorded call immediately fall outside
+        # the window (`at >= cutoff` is always false for NaN), silently disabling a
+        # declared rate limit. Configuration is part of the security boundary, so
+        # refuse it here instead of turning a typo into unlimited calls.
+        if (
+            isinstance(window_seconds, bool)
+            or not isinstance(window_seconds, int | float)
+            or not math.isfinite(window_seconds)
+            or window_seconds <= 0
+        ):
+            raise PolicyError(f"window_seconds must be a positive finite number, got {window_seconds!r}")
+        if not callable(time_fn):
+            raise PolicyError(f"time_fn must be callable, got {type(time_fn).__name__}")
+        self._window = float(window_seconds)
         self._now = time_fn
         self._calls: dict[tuple[str, str], deque[float]] = defaultdict(deque)
         self._budget_used: dict[tuple[str, str], int] = defaultdict(int)
@@ -105,7 +121,7 @@ class LimitStore:
         that decides on its own when to forget is a limiter you cannot reason about.
         """
         with self._lock:
-            cutoff = self._now() - self._window
+            cutoff = self._time() - self._window
             stale = [key for key, window in self._calls.items() if not window or window[-1] < cutoff]
             for key in stale:
                 del self._calls[key]
@@ -127,10 +143,11 @@ class LimitStore:
         # nothing reads.
         if rate_limit is not None:
             window = self._calls[key]
-            window.append(self._now())
+            now = self._time()
+            window.append(now)
             # Prune where the state is already being written, so the deque for one key
             # cannot outgrow its window even if `prune()` is never called.
-            cutoff = self._now() - self._window
+            cutoff = now - self._window
             while window and window[0] < cutoff:
                 window.popleft()
         if budget is not None:
@@ -145,5 +162,17 @@ class LimitStore:
         window = self._calls.get(key)
         if not window:
             return 0
-        cutoff = self._now() - self._window
+        cutoff = self._time() - self._window
         return sum(1 for at in window if at >= cutoff)
+
+    def _time(self) -> float:
+        """Read a usable clock value or fail closed through the engine.
+
+        An injected clock is useful for tests and distributed time adapters, but it is
+        still host code. Returning NaN after construction otherwise disables the same
+        comparison the constructor protects above.
+        """
+        value = self._now()
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            raise PolicyError(f"time_fn must return a finite number, got {value!r}")
+        return float(value)

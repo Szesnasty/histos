@@ -91,6 +91,8 @@ def protect_tools(
     different questions: ``coverage`` says what is enforced now, ``review`` says what
     a human still owes the policy.
     """
+    if not isinstance(infer_missing, bool):
+        raise PolicyError(f"infer_missing must be true or false, got {infer_missing!r}")
     bound = _resolve_fixed_principal(fixed_principal, principal)
     result = ProtectResult()
     # The review describes the policy the HUMAN wrote, so it is read off a snapshot
@@ -108,7 +110,7 @@ def protect_tools(
     tools: dict[str, ToolContract] = dict(gate.policy.tools)
     for tool in tool_objects:
         tool_name = getattr(tool, "__name__", None)
-        if not tool_name:
+        if not isinstance(tool_name, str) or not tool_name:
             raise PolicyError("cannot determine a tool name in protect(); wrap it individually with name=")
         # The name is the policy key, so two tools answering to one name is not a
         # collision to resolve — it is two different callables enforcing one
