@@ -91,17 +91,29 @@ def _repeat_cap(av: tuple[Any, ...]) -> int:
     return min(int(high), _MAX_PATTERN_INPUT)
 
 
-def _neighbour_clash(neighbours: list[_Neighbour], candidate: _Neighbour) -> str | None:
-    """Whether adding ``candidate`` makes the ambiguous run cost more than we allow."""
+def _neighbour_clash(neighbours: list[_Neighbour], candidate: _Neighbour, spent: list[int]) -> str | None:
+    """Whether this run, *plus everything already charged*, costs more than we allow."""
     clashing = [n for n in neighbours if _clashes(n, candidate)]
     if not clashing:
+        # A repeat that clashes with nothing starts a fresh run, so the previous run's
+        # charge is settled and the next one is charged from scratch. This is the only
+        # place a run genuinely ends: tying the reset to `neighbours.clear()` looked
+        # equivalent and is not, because two of those clears fire *within* a run and
+        # made a three-repeat run pay for its own two-repeat prefix as well.
+        spent[1] = 1
         return None
     splits = candidate[3]
     for n in clashing:
         splits *= n[3]
         if splits > _MAX_AMBIGUOUS_SPLITS:
             break
-    if splits <= _MAX_AMBIGUOUS_SPLITS:
+    # Charged against the whole pattern. Scoring each run on its own admits any number of
+    # them: k quadratic runs over k disjoint alphabets are k separate 262 144s, all under
+    # the bound, and the engine explores every earlier run's surviving splits again under
+    # every split of a later one.
+    spent[0] = min(spent[0] // max(spent[1], 1) * splits, _MAX_AMBIGUOUS_SPLITS * 4)
+    spent[1] = splits
+    if spent[0] <= _MAX_AMBIGUOUS_SPLITS:
         return None
     _, edges, _, _ = candidate
     if edges is not None and any(e is not None for _, e, _, _ in clashing):
@@ -123,6 +135,7 @@ def _backtracking_risk(
     at_tail: bool,
     neighbours: list[_Neighbour] | None = None,
     held: list[_Edges | None] | None = None,
+    spent: list[int] | None = None,
 ) -> str | None:
     """Describe the first runaway-backtracking shape in a parsed pattern, if any.
 
@@ -143,6 +156,20 @@ def _backtracking_risk(
     # that the comma before it was already spoken for.
     if held is None:
         held = [None]
+    # The split budget is spent by the *pattern*, not by each run of it. `_neighbour_clash`
+    # scored one clash-run at a time, and two repeats over disjoint classes do not clash —
+    # so eight independent quadratic runs over eight disjoint alphabets were each scored at
+    # 512x512 and each waved through, while the engine's real work is their product. The
+    # 194-character pattern that shape produces was refused before the product rule went in
+    # and admitted after it, then ran until it was killed. A one-element box, threaded like
+    # `held`, so a group stays transparent to it.
+    # `[charged so far, what the current run last cost]`. The second slot is what makes
+    # the arithmetic right: each clash within one run recomputes that run's *whole*
+    # product, so charging them all would multiply a run's partial answers together and
+    # refuse `^[a-z]{1,64}[a-z]{1,64}[a-z]{1,64}$` — 262 144 splits, measured at 1.4 ms.
+    # The run's previous charge is divided out and replaced.
+    if spent is None:
+        spent = [1, 1]
     items = list(seq)
     # the last item that can occupy a character: an anchor after it is not "after" it in
     # any sense that matters, so `[a-z]+.*$` has `.*` in tail position just like `[a-z]+.*`.
@@ -215,7 +242,7 @@ def _backtracking_risk(
                 else None
             )
             if neighbour is not None and not pinned:
-                clash = _neighbour_clash(neighbours, neighbour)
+                clash = _neighbour_clash(neighbours, neighbour, spent)
                 if clash is not None:
                     return clash
             # A repeat that must consume separates what is on either side of it. So does
@@ -249,7 +276,7 @@ def _backtracking_risk(
             # them they account for semver, slugs, comma lists, hostnames, IPv6, ISO-8601
             # durations and Windows paths — every one measured under a millisecond.
             ambiguous = variable_repeat and _unbounded(av) and not _anchored_body(av[2]) and not _terminated_body(av[2])
-            risk = _backtracking_risk(av[2], in_repeat=in_repeat or ambiguous, at_tail=False)
+            risk = _backtracking_risk(av[2], in_repeat=in_repeat or ambiguous, at_tail=False, spent=spent)
         elif op is _re_const.BRANCH:
             if in_repeat:
                 return "an alternation inside a repeat, e.g. `(a|ab)*` — use a character class"
@@ -260,7 +287,9 @@ def _backtracking_risk(
             # into a fresh one, so `([a-z]+)[a-z0-9]+` — the same quadratic pattern as
             # `[a-z]+[a-z0-9]+`, with one pair of parentheses — was invisible to the shape
             # screen and left to the timing probe, which decided it by wall clock.
-            risk = _backtracking_risk(av[3], in_repeat=in_repeat, at_tail=tail, neighbours=neighbours, held=held)
+            risk = _backtracking_risk(
+                av[3], in_repeat=in_repeat, at_tail=tail, neighbours=neighbours, held=held, spent=spent
+            )
         elif op in (_re_const.ASSERT, _re_const.ASSERT_NOT):
             # A lookaround runs its own match, so it starts a fresh analysis. It consumes
             # nothing, so it does not separate the repeats on either side of it either.

@@ -197,6 +197,14 @@ def _record_fields(value: Any) -> dict[str, Any] | None:
     """
     if isinstance(value, (type, enum.Enum)):
         return None
+    # A leaf is a leaf even when it carries attributes. `class Money(str)` with a
+    # `currency` on it has a non-empty `__dict__`, so the check below read it as a
+    # record and shredded `Money("12.30")` into `{"currency": "EUR"}` — the value the
+    # caller asked for, replaced by its decoration. Anything the scanners can already
+    # read end to end is a value; only the fields hanging off it would be undeclared,
+    # and dropping the value to reach them is not a trade worth making.
+    if isinstance(value, _INSPECTABLE_LEAF):
+        return None
     if dataclasses.is_dataclass(value):
         return {f.name: getattr(value, f.name) for f in dataclasses.fields(value) if hasattr(value, f.name)}
     names = getattr(value, "_fields", None)
@@ -273,7 +281,16 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], 
                 projected = go(value)
                 changed = changed or projected is not value
                 kept_fields[name] = projected
-            return kept_fields if changed else o
+            # Always a mapping, never the original object. Returning the record
+            # unchanged when nothing had to be dropped read as a courtesy — the caller
+            # keeps its type — and was a hole: the passes that run *after* projection
+            # walk mappings and sequences, so a record handed back intact sailed past
+            # the canary scan and the secret detectors with `redactions: []`. A planted
+            # token inside a fully declared field egressed, and the audit line said the
+            # output was clean. Projection is opt-in and it is a transforming control;
+            # a caller who switched it on is asking for a filtered mapping, and one
+            # every later pass can read is the only kind worth handing back.
+            return kept_fields
         # A value the projector cannot enter — a slots-only object, or a C type keeping
         # its state where no Python attribute shows it. It is returned as it came, and
         # it is *named*, so the audit record can tell "there was nothing undeclared to

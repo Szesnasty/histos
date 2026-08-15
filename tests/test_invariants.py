@@ -171,7 +171,6 @@ def test_deriving_a_principal_from_a_frozen_one_does_not_raise():
     Principal(role="r", identity="i", attributes=who.attributes)
 
 
-@pytest.mark.xfail(strict=True, reason="P0 round-5: a record return skips the canary and secret walks")
 def test_a_canary_inside_a_record_return_never_egresses():
     """`project_output` enters records now; the passes after it still expect a mapping."""
 
@@ -202,7 +201,6 @@ def test_an_undeclared_field_in_a_records_instance_dict_is_dropped():
     assert "leak" not in repr(out)
 
 
-@pytest.mark.xfail(strict=True, reason="P0 round-5: a str/int subclass carrying an attribute is shredded")
 def test_a_value_subclass_is_returned_as_a_value():
     class Money(str):
         def __init__(self, *_a) -> None:
@@ -215,7 +213,6 @@ def test_a_value_subclass_is_returned_as_a_value():
     assert out == {"ok": "12.30"}, f"a str subclass came back as {out!r}"
 
 
-@pytest.mark.xfail(strict=True, reason="P0 round-5: rm -rf on the log directory voids the erasure memory")
 def test_recreating_the_log_directory_does_not_forget_the_erasure(tmp_path):
     import shutil
 
