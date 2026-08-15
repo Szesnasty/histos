@@ -6,6 +6,22 @@ import pytest
 
 from histos import Constraint, Field, Policy, Schema, Sensitivity, ToolContract
 
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """`--snapshot-update` rewrites the decision snapshot in test_characterisation.py.
+
+    Deliberately explicit rather than an environment variable: regenerating that file is
+    a claim that every decision which moved was meant to, and it should be something a
+    person types.
+    """
+    parser.addoption(
+        "--snapshot-update",
+        action="store_true",
+        default=False,
+        help="rewrite tests/corpus/decisions.snapshot.json from current behaviour",
+    )
+
+
 # A fixed HMAC key so audit digests are deterministic across a test run.
 STABLE_KEY = b"histos-test-key-0123456789abcd"
 

@@ -230,6 +230,13 @@ def _freeze(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
         return ReadOnlyDict({k: _freeze(v, seen) for k, v in value.items()})
     if type(value) is list:
         return ReadOnlyList([_freeze(v, seen) for v in value])
+    if isinstance(value, (ReadOnlyDict, ReadOnlyList)):
+        # Already frozen, and writing to it is what it exists to refuse. This branch was
+        # missing and the one below caught it instead, so freezing a structure that had
+        # already been frozen — which is exactly what deriving a `Principal` from
+        # another one's attributes does — raised out of `__post_init__`. A class whose
+        # whole purpose is refusing writes, written to by the function that made it.
+        return value
     if isinstance(value, dict):
         # A subclass: keep the type, freeze what is inside it. It stays editable itself,
         # which is the price of not destroying a `Counter`.
