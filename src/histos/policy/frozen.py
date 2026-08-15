@@ -20,6 +20,7 @@ the whole subtree when one leaf refused.
 
 from __future__ import annotations
 
+import contextlib
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -177,6 +178,70 @@ class ReadOnlyList(list):  # type: ignore[type-arg]
         return list(self)
 
 
+class ReadOnlySet(set):  # type: ignore[type-arg]
+    """The third one. `_freeze` swapped `dict` and `list` and left `set` writable.
+
+    A set-valued principal attribute is ordinary — `{"scopes": {"read", "write"}}` is how
+    a token's claims arrive — and `in`, `<=` and `&` are exactly what a `Constraint`
+    compares against, so `who.attributes["scopes"].add("admin")` flips an authorization
+    verdict on an already-bound identity. Same reasoning as `ReadOnlyList`, and a `set`
+    subclass for the same reason: it still compares equal to a set.
+    """
+
+    __slots__ = ()
+
+    def _readonly(self, *_a: Any, **_k: Any) -> Any:
+        raise TypeError(
+            "this set is read-only: it belongs to a Principal that has already been bound, and "
+            "editing it would change what a later call is authorized against. Build a new Principal."
+        )
+
+    def add(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def discard(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def remove(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def pop(self, *_a: Any, **_k: Any) -> Any:
+        self._readonly()
+
+    def clear(self) -> None:
+        self._readonly()
+
+    def update(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def difference_update(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def intersection_update(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def symmetric_difference_update(self, *_a: Any, **_k: Any) -> None:
+        self._readonly()
+
+    def __ior__(self, _other: Any) -> Any:  # type: ignore[misc]
+        self._readonly()
+
+    def __iand__(self, _other: Any) -> Any:  # type: ignore[misc]
+        self._readonly()
+
+    def __isub__(self, _other: Any) -> Any:  # type: ignore[misc]
+        self._readonly()
+
+    def __ixor__(self, _other: Any) -> Any:  # type: ignore[misc]
+        self._readonly()
+
+    def __reduce__(self) -> Any:
+        return (self.__class__, (set(self),))
+
+    def copy(self) -> set[Any]:
+        return set(self)
+
+
 def _freeze(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
     """Make an already-copied structure read-only, keeping every subclass it carries.
 
@@ -192,7 +257,9 @@ def _freeze(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
         return ReadOnlyDict({k: _freeze(v, seen) for k, v in value.items()})
     if type(value) is list:
         return ReadOnlyList([_freeze(v, seen) for v in value])
-    if isinstance(value, (ReadOnlyDict, ReadOnlyList)):
+    if type(value) is set:
+        return ReadOnlySet(_freeze(v, seen) for v in value)
+    if isinstance(value, (ReadOnlyDict, ReadOnlyList, ReadOnlySet)):
         # Already frozen, and writing to it is what it exists to refuse. This branch was
         # missing and the one below caught it instead, so freezing a structure that had
         # already been frozen — which is exactly what deriving a `Principal` from
@@ -224,6 +291,8 @@ def _thaw(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
         return {k: _thaw(v, seen) for k, v in value.items()}
     if isinstance(value, ReadOnlyList):
         return [_thaw(v, seen) for v in value]
+    if isinstance(value, ReadOnlySet):
+        return {_thaw(v, seen) for v in value}
     if isinstance(value, dict):
         for key, item in list(value.items()):
             value[key] = _thaw(item, seen)
@@ -299,6 +368,13 @@ def _snapshot_value(value: Any, *, readonly: bool = True, _seen: frozenset[int] 
         try:
             return type(value)(items)
         except (TypeError, ValueError):
+            # A *copy*, not the caller's object. `type(value)(items)` raises for every
+            # NamedTuple — its constructor takes fields positionally rather than one
+            # iterable — so the arm that was meant to degrade gracefully handed the
+            # snapshot's caller their own live container back, which is the aliasing the
+            # snapshot exists to prevent.
+            with contextlib.suppress(TypeError, ValueError):
+                return ReadOnlyList(items) if readonly else list(items)
             # The degradation arm used to re-call the expression that had just raised
             # whenever `type(value)` was one of the base types, so the TypeError came
             # straight back out of `__post_init__`. It fires when an element's own

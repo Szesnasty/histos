@@ -210,6 +210,7 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         ftype = "any"
 
     items: dict[str, Any] = {}
+    null_only_items = False
     item_type: str | None = None
     raw_items = prop.get("items")
     if raw_items is not None:
@@ -242,13 +243,29 @@ def _field(prop: Any, *, required: bool, documents: tuple[dict[str, Any], ...], 
         # against `_TYPE_CHECKS` but never `item_type` — so the sentinel survived into
         # the contract, `_check_scalar` did `_TYPE_CHECKS.get(spec.item_type, object)`,
         # and a source saying "an array of nulls" accepted an element of every type.
-        item_type = None if raw_item_type == _NULL_ONLY or item_nullable else raw_item_type
+        if raw_item_type == _NULL_ONLY:
+            # "an array of nulls" is a real, if odd, thing to declare, and converting the
+            # sentinel to `None` said nothing at all — `_check_scalar` then admitted an
+            # element of every type, which is the opposite of what the source wrote. An
+            # element enum of exactly `(None,)` is how this Field model spells it.
+            item_type, null_only_items = None, True
+        else:
+            item_type = None if item_nullable else raw_item_type
 
     _, pattern = _bound(prop, items, "pattern")
     # An element enum and an element pattern now live in separate fields and are both
     # enforced, so a document may write either or both — the intersection is what the
     # engine applies, which is what the source says.
-    item_enum = _element_enum(items["enum"], item_type=item_type or "any", where=where) if "enum" in items else None
+    if "enum" in items:
+        item_enum = _element_enum(items["enum"], item_type=item_type or "any", where=where)
+    elif null_only_items:
+        # "an array of nulls" is a real, if odd, thing to declare, and converting the
+        # sentinel to `None` said nothing at all — `_check_scalar` then admitted an
+        # element of every type, which is the opposite of what the source wrote. An
+        # element enum of exactly `(None,)` is how this Field model spells it.
+        item_enum = (None,)
+    else:
+        item_enum = None
 
     # Read on the element schema as well as the property. Every other element-level
     # keyword reaches `Field` through `_bound`; this one did not, so an array of PII

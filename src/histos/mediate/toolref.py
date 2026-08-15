@@ -56,7 +56,16 @@ def _same_tool(a: Any, b: Any) -> bool:
         return a.__self__ is b.__self__ and a.__func__ is b.__func__
     if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
         # A partial's key: its target compared as a tool, its bound arguments by value.
-        return _same_tool(a[0], b[0]) and a[1:] == b[1:]
+        # The value comparison is guarded, because a bound argument may be a numpy array,
+        # a DataFrame or a tensor, whose `__eq__` returns an array rather than a bool —
+        # `bool()` on which raises, out of `Gate.wrap`, where a *decision* was owed. An
+        # argument the gate cannot compare is not evidence that two tools are the same.
+        if not _same_tool(a[0], b[0]):
+            return False
+        try:
+            return bool(a[1:] == b[1:])
+        except Exception:  # noqa: BLE001 — an uncomparable argument means "not the same"
+            return False
     return False
 
 

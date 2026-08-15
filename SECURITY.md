@@ -417,8 +417,11 @@ the gate validated the inner structure; validate it in the tool, or keep argumen
 `returns` is dropped, so an undeclared field — where a secret hides, out of reach of
 name-based redaction — never egresses. It walks mappings and sequences, and it also
 enters the shapes that publish their field names: **dataclasses, NamedTuples, and any
-object keeping its state in an instance `__dict__`** (which covers Pydantic v1 and v2
-models and every ordinary class). A record it had to drop a field from comes back as a
+object keeping its state in an instance `__dict__`** (which covers every ordinary class,
+and Pydantic v1 and v2 models *insofar as the projector is reached at all* — a model that
+does not match its declared return schema is refused by `strict_returns` before projection
+runs, so the coverage claim here is about the shape, not a promise that a model return
+always arrives). A record it had to drop a field from comes back as a
 mapping, because a record minus a required field cannot be rebuilt as itself; one that
 needed no drop keeps its type.
 

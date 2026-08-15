@@ -135,6 +135,32 @@ def _is_json_media_type(media_type: str) -> bool:
     return base == "application/json" or base.endswith("+json")
 
 
+def _schema_names_fields(spec: dict[str, Any], schema: Any, where: str, depth: int = 0) -> bool:
+    """Whether this schema, or anything it composes with, declares named properties.
+
+    `allOf: [{$ref: '#/components/schemas/Form'}]` is the ordinary way a hand-written or
+    generated spec extends a shared model, and looking only at the top level read it as
+    "declares nothing" — so a composed form body went back to being dropped in silence,
+    which is the whole finding this function was written for.
+    """
+    if not isinstance(schema, dict) or depth > 4:
+        return False
+    if schema.get("properties"):
+        return True
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        branches = schema.get(keyword)
+        if not isinstance(branches, list):
+            continue
+        for branch in branches:
+            try:
+                resolved = _deref(spec, branch, where=where)
+            except PolicyError:
+                return True  # a branch that cannot even be resolved is not a byte stream
+            if _schema_names_fields(spec, resolved, where, depth + 1):
+                return True
+    return False
+
+
 def _declares_fields(spec: dict[str, Any], content: Any, name: str) -> bool:
     """Whether a non-JSON request body declares named fields the projection would lose.
 
@@ -159,7 +185,7 @@ def _declares_fields(spec: dict[str, Any], content: Any, name: str) -> bool:
         # there is nothing for the projection to lose and refusing it costs the operation
         # its query parameters for no gain. The docstring above always said "declares
         # named fields"; the extra arm contradicted it.
-        if isinstance(schema, dict) and schema.get("properties"):
+        if _schema_names_fields(spec, schema, f"requestBody {media_type} of {name!r}"):
             return True
     return False
 
@@ -223,7 +249,7 @@ def _source_from_operation(
                 if schema is None:
                     raise _malformed(
                         f"parameter {pname!r} of {name!r}",
-                        sorted(content),
+                        sorted(map(str, content)),
                         "a `content` block this projection can read (application/json)",
                     )
             else:

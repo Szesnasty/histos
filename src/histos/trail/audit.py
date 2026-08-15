@@ -61,6 +61,18 @@ class InMemoryAuditSink:
         self.dropped = 0
         self._lock = threading.Lock()
 
+    @property
+    def failed(self) -> int:
+        """The same question `JSONLAuditSink.failed` answers: records this sink lost.
+
+        A bounded window drops its oldest record when it is full, which is a gap in the
+        trail exactly as a failed write is — and `Gate.audit_failures` is documented as
+        counting them "whatever the sink was". It read an attribute named `failed`, which
+        only the file sink had, so the default sink's losses were invisible to the one
+        counter a host is told to alarm on.
+        """
+        return self.dropped
+
     def record(self, entry: dict[str, Any]) -> None:
         with self._lock:
             if self.entries.maxlen is not None and len(self.entries) == self.entries.maxlen:

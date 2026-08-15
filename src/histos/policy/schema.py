@@ -218,6 +218,41 @@ class Field:
                     f"{low} {lo} is greater than {high} {hi}, so no value can ever satisfy this field",
                     code="invalid_field",
                 )
+        # An array is granted the string and numeric keywords because its *elements* are
+        # checked with the same two helpers — but only when `item_type` says which. On
+        # `Field(type="array", max_length=8)` with no element type declared, nothing ever
+        # reads `max_length`, which is the same dead bound the table above refuses on a
+        # scalar. The untyped element path dispatches on the element, so a string bound
+        # is live there; a *numeric* one on an array of strings is not.
+        if self.type == "array" and self.item_type is not None:
+            for attr, needs in (
+                ("max_length", ("string", "any")),
+                ("min_length", ("string", "any")),
+                ("pattern", ("string", "any")),
+                ("minimum", ("integer", "number", "any")),
+                ("maximum", ("integer", "number", "any")),
+                ("exclusive_minimum", ("integer", "number", "any")),
+                ("exclusive_maximum", ("integer", "number", "any")),
+                ("multiple_of", ("integer", "number", "any")),
+            ):
+                if getattr(self, attr) is not None and self.item_type not in needs:
+                    raise PolicyError(
+                        f"{attr} bounds each element of an array, and this one declares "
+                        f"item_type={self.item_type!r} — it would read as a bound and enforce nothing",
+                        code="invalid_field",
+                    )
+        # A bound on one side and its strict twin on the other are a pair too. `minimum=10`
+        # with `exclusive_maximum=10` admits nothing, and neither loop above compares them.
+        for low, high, admits_equal in (
+            ("minimum", "exclusive_maximum", False),
+            ("exclusive_minimum", "maximum", False),
+        ):
+            lo, hi = getattr(self, low), getattr(self, high)
+            if lo is not None and hi is not None and (lo > hi or (lo == hi and not admits_equal)):
+                raise PolicyError(
+                    f"{low} {lo} and {high} {hi} leave no value that satisfies this field",
+                    code="invalid_field",
+                )
         # The exclusive pair is unsatisfiable when equal too: nothing is both strictly
         # above and strictly below the same number.
         if (

@@ -126,11 +126,18 @@ def _post_exception(engine, req: GateRequest, exc: BaseException, *, mutate: boo
     # `from None`, a service wrapping the repository — was inspected by neither.
     detached: list[str] = []
     scan_canaries = bool(contract is not None and contract.scan_output_for_canary and engine.policy.canaries)
+    # One budget across every branch, not one budget each. `_MAX_EXCEPTION_NODES`'
+    # comment says the real limiter on work is the character budget the walk carries,
+    # which was true while exactly one branch was scanned. Handing each holder the full
+    # budget again multiplies it by the number of suppressions a tool chooses to write,
+    # and a tool chooses that freely.
+    remaining = engine._output_budget
     for holder in _hidden_branches(exc) if will_read else []:
         branch = holder.__context__
         if branch is None:  # pragma: no cover - `_hidden_branches` only yields holders
             continue
-        hidden, hidden_incomplete = _exception_text(branch, engine._output_budget)
+        hidden, hidden_incomplete = _exception_text(branch, max(remaining, 0))
+        remaining -= len(hidden)
         # Both tiers, like every other canary site in this library. Verbatim-only
         # matching is what this module's own docstring calls the cheapest exit in
         # the library, and the hidden branch had exactly that. Gated on the
@@ -213,7 +220,9 @@ def _will_read_output(engine, contract: ToolContract, req: GateRequest) -> bool:
             and (
                 contract.strict_returns
                 or contract.project_output
-                or (req.principal is not None and sensitive_fields(contract.returns, allowed=req.principal.can_view))
+                or (
+                    sensitive_fields(contract.returns, allowed=req.principal.can_view if req.principal else frozenset())
+                )
             )
         )
     )
