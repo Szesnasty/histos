@@ -1024,3 +1024,74 @@ def test_every_enforced_field_survives_the_document(holder):
 
     assert not uncovered, f"{holder} has fields this test says nothing about: {uncovered}"
     assert not lost, f"{holder} fields that do not survive being written to a document: {lost}"
+
+
+# The shapes the output scanners can and cannot see into, pinned. SECURITY.md states this
+# matrix in two places and drifted from it in both, across two rounds, in the *safe*
+# direction — it claimed a dataclass field was unreachable for two passes after the scan
+# started reading one. An understatement in a security document still misleads: it has an
+# operator distrust a control that works, or buy a mitigation they already own. So the
+# matrix lives here, where it fails when it stops being true.
+_REACHED_BY_THE_SCANNERS = {
+    "dataclass field": True,
+    "NamedTuple field": True,
+    "instance __dict__": True,  # Pydantic v1 and v2, and every ordinary class
+    "attribute on a str subclass": True,
+    "__slots__ only": False,  # cannot be told from a stdlib value type's internals
+    "@property": False,  # arbitrary user code; running it inside a check is the thing not to do
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_REACHED_BY_THE_SCANNERS))
+def test_the_documented_reach_of_the_output_scan_is_the_real_one(shape):
+    """If this fails, the fix includes SECURITY.md — in whichever direction it moved.
+
+    "Detection reaches exactly as far as redaction does" is a claim a reader acts on, and
+    the two passages stating it are listed in the docstring of this module's sibling
+    check. Widening the reach without widening the document is the failure this catches;
+    so is narrowing it.
+    """
+    import collections
+
+    @dataclasses.dataclass
+    class Row:
+        hidden: str
+
+    class InDict:
+        def __init__(self, value):
+            self.hidden = value
+
+    class Money(str):
+        def __new__(cls, amount, hidden):
+            obj = super().__new__(cls, amount)
+            obj.hidden = hidden
+            return obj
+
+    class Slotted:
+        __slots__ = ("hidden",)
+
+        def __init__(self, value):
+            self.hidden = value
+
+    class Computed:
+        @property
+        def hidden(self):
+            return CANARY
+
+    make = {
+        "dataclass field": lambda: Row(CANARY),
+        "NamedTuple field": lambda: collections.namedtuple("Nt", "hidden")(CANARY),
+        "instance __dict__": lambda: InDict(CANARY),
+        "attribute on a str subclass": lambda: Money("12.30", CANARY),
+        "__slots__ only": lambda: Slotted(CANARY),
+        "@property": Computed,
+    }[shape]
+
+    out, _exc, sink = _run(_policy(), make)
+    escaped = getattr(out, "hidden", None) == CANARY
+    reached = not escaped
+    assert reached == _REACHED_BY_THE_SCANNERS[shape], (
+        f"the scan {'now reaches' if reached else 'no longer reaches'} {shape!r}; "
+        f"update this table and the two passages in SECURITY.md that state it, "
+        f"then this test again — trail said redactions={sink.entries[-1]['redactions']}"
+    )
