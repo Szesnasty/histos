@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,7 @@ MAX_RECORDED_DESCRIPTION_CHARS = 4_096
 # A rendered diff is for a human to read once. Bounds keep a source that ships a
 # 10,000-line schema from burying the one line that matters.
 _MAX_DIFF_LINES = 40
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _difflib() -> Any:
@@ -147,6 +149,18 @@ class Reviewed:
     description: str | None = None
     elided: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if self.shape is not None and not isinstance(self.shape, dict):
+            raise PolicyError(f"reviewed shape must be an object or None, got {type(self.shape).__name__}")
+        if self.description is not None and not isinstance(self.description, str):
+            raise PolicyError(f"reviewed description must be a string or None, got {type(self.description).__name__}")
+        if not isinstance(self.elided, tuple) or any(
+            not isinstance(part, str) or part not in {"shape", "description"} for part in self.elided
+        ):
+            raise PolicyError("reviewed elided must be a tuple containing only 'shape' and 'description'")
+        if len(set(self.elided)) != len(self.elided):
+            raise PolicyError("reviewed elided must not repeat a recorded part")
+
     @classmethod
     def of(cls, source: ToolSource) -> Reviewed:
         elided: list[str] = []
@@ -191,6 +205,20 @@ class LockEntry:
     contract_sha256: str
     reviewed: Reviewed | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or self.kind not in KINDS:
+            raise PolicyError(f"lock entry source kind {self.kind!r} is not supported")
+        if not isinstance(self.locator, str):
+            raise PolicyError(f"lock entry locator must be a string, got {type(self.locator).__name__}")
+        for name in ("schema_sha256", "description_sha256", "contract_sha256"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+                raise PolicyError(f"lock entry {name} must be sha256: followed by 64 lowercase hexadecimal characters")
+        if self.reviewed is not None and not isinstance(self.reviewed, Reviewed):
+            raise PolicyError(
+                f"lock entry reviewed must be a Reviewed value or None, got {type(self.reviewed).__name__}"
+            )
+
     @classmethod
     def of(cls, source: ToolSource, locator: str) -> LockEntry:
         return cls(
@@ -226,6 +254,25 @@ class Lock:
     tools: dict[str, LockEntry]
     version: int = LOCK_VERSION
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.version, bool)
+            or not isinstance(self.version, int)
+            or self.version not in READABLE_LOCK_VERSIONS
+        ):
+            raise PolicyError(f"tool lock version {self.version!r} is not supported")
+        if not isinstance(self.policy, str):
+            raise PolicyError(f"tool lock policy must be a string, got {type(self.policy).__name__}")
+        if not isinstance(self.tools, dict):
+            raise PolicyError(f"tool lock tools must be an object, got {type(self.tools).__name__}")
+        for name, entry in self.tools.items():
+            if not isinstance(name, str) or not name:
+                raise PolicyError(f"a lock entry name must be a non-empty string, got {name!r}")
+            if not isinstance(entry, LockEntry):
+                raise PolicyError(f"lock entry {name!r} must be a LockEntry, got {type(entry).__name__}")
+            if self.version == LOCK_VERSION and entry.reviewed is None:
+                raise PolicyError(f"lock entry {name!r} needs reviewed evidence in a version-{LOCK_VERSION} lock")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "lock_version": self.version,
@@ -243,15 +290,34 @@ def build_lock(sources: list[ToolSource], *, policy: str, locator: str) -> Lock:
 
 
 def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -> None:
-    unknown = sorted(k for k in data if k not in allowed)
+    unknown = sorted((k for k in data if k not in allowed), key=lambda item: (type(item).__name__, repr(item)))
     if unknown:
         raise PolicyError(
             f"unknown key {unknown[0]!r} in {where} of the tool lock"
-            + (f" (also: {', '.join(unknown[1:])})" if len(unknown) > 1 else "")
+            + (f" (also: {', '.join(repr(item) for item in unknown[1:])})" if len(unknown) > 1 else "")
             + " — refusing to load. Understood here: "
             + ", ".join(sorted(allowed))
             + "."
         )
+
+
+def _required(where: str, data: dict[str, Any], key: str) -> Any:
+    if key not in data:
+        raise PolicyError(f"{where} is missing required key {key!r}")
+    return data[key]
+
+
+def _string(where: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise PolicyError(f"{where} must be a string, got {type(value).__name__}")
+    return value
+
+
+def _digest_string(where: str, value: Any) -> str:
+    value = _string(where, value)
+    if not _DIGEST.fullmatch(value):
+        raise PolicyError(f"{where} must be sha256: followed by 64 lowercase hexadecimal characters")
+    return value
 
 
 def parse_lock(data: dict[str, Any]) -> Lock:
@@ -275,7 +341,7 @@ def parse_lock(data: dict[str, Any]) -> Lock:
     # newer one mislabelled. Either way its version does not describe its contents.
     entry_keys = _ENTRY_KEYS_V1 if version == 1 else _ENTRY_KEYS
 
-    tools_node = data.get("tools") or {}
+    tools_node = _required("the top level of the tool lock", data, "tools")
     if not isinstance(tools_node, dict):
         raise PolicyError(f"`tools` in a tool lock must be an object, got {type(tools_node).__name__}")
 
@@ -284,26 +350,37 @@ def parse_lock(data: dict[str, Any]) -> Lock:
         if not isinstance(node, dict):
             raise PolicyError(f"tool {name!r} in the lock must be an object, got {type(node).__name__}")
         _reject_unknown(f"tool {name!r}", node, entry_keys)
-        source = node.get("source") or {}
+        source = _required(f"tool {name!r} in the lock", node, "source")
         if not isinstance(source, dict):
             raise PolicyError(f"`source` for tool {name!r} must be an object, got {type(source).__name__}")
         _reject_unknown(f"`source` for tool {name!r}", source, _SOURCE_KEYS)
-        kind = source.get("kind")
+        kind = _required(f"source for tool {name!r}", source, "kind")
         if kind not in KINDS:
             raise PolicyError(
                 f"tool {name!r} in the lock names source kind {kind!r}, which this engine does not read. "
                 f"Understood here: {', '.join(sorted(KINDS))}."
             )
+        if version == LOCK_VERSION and "reviewed" not in node:
+            raise PolicyError(f"tool {name!r} in a version-{LOCK_VERSION} lock is missing required key 'reviewed'")
         entries[name] = LockEntry(
             kind=str(kind),
-            locator=source.get("locator") or "",
-            schema_sha256=node.get("schema_sha256") or "",
-            description_sha256=node.get("description_sha256") or "",
-            contract_sha256=node.get("contract_sha256") or "",
+            locator=_string(f"source.locator for tool {name!r}", source.get("locator", "")),
+            schema_sha256=_digest_string(
+                f"schema_sha256 for tool {name!r}", _required(f"tool {name!r} in the lock", node, "schema_sha256")
+            ),
+            description_sha256=_digest_string(
+                f"description_sha256 for tool {name!r}",
+                _required(f"tool {name!r} in the lock", node, "description_sha256"),
+            ),
+            contract_sha256=_digest_string(
+                f"contract_sha256 for tool {name!r}",
+                _required(f"tool {name!r} in the lock", node, "contract_sha256"),
+            ),
             reviewed=_reviewed_from_node(name, node.get("reviewed")) if "reviewed" in node else None,
         )
 
-    return Lock(policy=data.get("policy") or "", tools=entries, version=int(version))
+    policy = _string("policy in the tool lock", data.get("policy", ""))
+    return Lock(policy=policy, tools=entries, version=int(version))
 
 
 def _reviewed_from_node(name: str, node: Any) -> Reviewed:
@@ -320,12 +397,16 @@ def _reviewed_from_node(name: str, node: Any) -> Reviewed:
     if description is not None and not isinstance(description, str):
         raise PolicyError(f"`description` in {where} must be a string, got {type(description).__name__}")
 
-    elided = node.get("elided") or []
-    if not isinstance(elided, list) or any(part not in _REVIEWED_KEYS - {"elided"} for part in elided):
+    elided = node.get("elided", [])
+    if not isinstance(elided, list) or any(
+        not isinstance(part, str) or part not in _REVIEWED_KEYS - {"elided"} for part in elided
+    ):
         raise PolicyError(
             f"`elided` in {where} must be a list naming recorded parts "
             f"({', '.join(sorted(_REVIEWED_KEYS - {'elided'}))})"
         )
+    if len(set(elided)) != len(elided):
+        raise PolicyError(f"`elided` in {where} must not repeat a recorded part")
     # An absent `shape` key with nothing in `elided` would read as "the source had no
     # shape", which no importer can produce. Treat it as elided rather than as a
     # baseline: reporting hash-only is honest, inventing an empty shape is not.

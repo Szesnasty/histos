@@ -1199,22 +1199,15 @@ def test_a_deep_chain_is_not_dropped_when_nothing_was_going_to_read_it():
     assert "layer 29" in str(caught.value)
 
 
-def test_a_confirmation_window_without_required_survives_the_round_trip():
-    """`_tool_from_dict` reads the two halves independently, so this is a legal bundle —
-    and `dump_bundle` only wrote the block when `required` was true, so it came back
-    without its window and hashed differently."""
-    from histos import dump_bundle
-
+def test_a_confirmation_block_must_state_whether_it_is_required():
+    """An expiry-only block must not silently turn confirmation off."""
     bundle = {
         "version": "histos.policy/0.1",
         "tools": {"t": {"args": {}, "confirmation": {"expires_in": 300}}},
         "roles": {"ok": {"allow": ["t"]}},
     }
-    policy = load_bundle(bundle)
-    assert policy.tools["t"].confirmation_expires_in == 300
-    back = load_bundle(dump_bundle(policy))
-    assert back.tools["t"].confirmation_expires_in == 300
-    assert back.content_hash() == policy.content_hash()
+    with pytest.raises(PolicyError, match="required key 'required'"):
+        load_bundle(bundle)
 
 
 def test_a_source_authored_property_name_cannot_rewrite_the_drift_report():

@@ -41,6 +41,24 @@ from histos.mediate.toolref import _adopt_metadata
 from histos.policy.contracts import Effect, GateDecision, GateRequest, Principal
 
 
+def _record_pre_cancelled(gate, tool_name, call_args, active, started, rebound) -> None:
+    """Record a host cancellation before PRE produced its first decision."""
+    gate._recorder.record(
+        tool_name,
+        call_args,
+        GateDecision(
+            Effect.DENY,
+            "pre_cancelled",
+            f"{tool_name!r} was cancelled while awaiting a pre-gate host callback",
+        ),
+        "pre",
+        started,
+        active,
+        False,
+        rebound,
+    )
+
+
 def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal | None) -> Callable[..., Any]:
     binder = _positional_binder(tool)
 
@@ -108,8 +126,20 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
         exec_args = checked_args if _callctx.enforce_for(gate) else {**exec_source, **supplied}
         call_args = checked_args
 
-        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=engine.policy_hash)
-        pre = engine.pre(req)
+        contract = engine.policy.contract_for(tool_name)
+        req = GateRequest(
+            tool_name,
+            call_args,
+            active,
+            phase="pre",
+            policy_hash=engine.policy_hash,
+            confirmation_expires_in=None if contract is None else contract.confirmation_expires_in,
+        )
+        try:
+            pre = engine.pre(req)
+        except asyncio.CancelledError:
+            _record_pre_cancelled(gate, tool_name, call_args, active, started, rebound)
+            raise
 
         # Human/operator confirmation resolved via a host callback (never a tool
         # the agent can call) — an injected agent cannot self-approve.
@@ -120,6 +150,26 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
             # policy had already decided needed a human. Fail closed and record it.
             try:
                 outcome = gate._confirm(for_callback(req))
+            except asyncio.CancelledError:
+                # A synchronous host may use the same cancellation signal as its
+                # async runner. It is a BaseException on supported Python versions,
+                # so the generic callback guard does not catch it. Record the parked
+                # call, preserve shutdown semantics, and never run the tool.
+                gate._recorder.record(
+                    tool_name,
+                    call_args,
+                    GateDecision(
+                        Effect.REQUIRE_CONFIRMATION,
+                        "confirm_cancelled",
+                        f"{tool_name!r} was cancelled while awaiting an out-of-band approval",
+                    ),
+                    "pre",
+                    started,
+                    active,
+                    False,
+                    rebound,
+                )
+                raise
             except UndetachableArgument as exc:
                 pre = exc.as_decision()
                 outcome = None
@@ -223,7 +273,7 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
         finally:
             _callctx.close_context(token)
 
-    _adopt_metadata(wrapped, tool, tool_name)
+    _adopt_metadata(wrapped, tool, tool_name, gate._mediation_token)
     return wrapped
 
 
@@ -288,8 +338,20 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
         exec_args = checked_args if _callctx.enforce_for(gate) else {**exec_source, **supplied}
         call_args = checked_args
 
-        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=engine.policy_hash)
-        pre = await engine.apre(req)
+        contract = engine.policy.contract_for(tool_name)
+        req = GateRequest(
+            tool_name,
+            call_args,
+            active,
+            phase="pre",
+            policy_hash=engine.policy_hash,
+            confirmation_expires_in=None if contract is None else contract.confirmation_expires_in,
+        )
+        try:
+            pre = await engine.apre(req)
+        except asyncio.CancelledError:
+            _record_pre_cancelled(gate, tool_name, call_args, active, started, rebound)
+            raise
 
         if pre.effect is Effect.REQUIRE_CONFIRMATION and gate._confirm is not None:
             try:
@@ -413,7 +475,7 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
         finally:
             _callctx.close_context(token)
 
-    _adopt_metadata(wrapped, tool, tool_name)
+    _adopt_metadata(wrapped, tool, tool_name, gate._mediation_token)
     return wrapped
 
 

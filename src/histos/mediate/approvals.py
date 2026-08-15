@@ -9,11 +9,11 @@ the agent controls) lets an injected agent self-approve a destructive action.
 
 * the gate raises ``GateConfirmationRequired`` on an unconfirmed high-risk call;
 * a **trusted host** — never the agent — calls :meth:`grant` out-of-band with
-  ``exc.fingerprint``, e.g. after a human clicks approve;
+  ``exc.request``, e.g. after a human clicks approve;
 * the agent retries the **same** call and the gate consumes the approval.
 
-Take the fingerprint off the exception, not from the arguments you sent. A ``bind``
-overwrites its fields with the principal's trusted attribute *before* the request is
+Take the request off the exception, not a fingerprint rebuilt from the arguments you
+sent. A ``bind`` overwrites its fields with the principal's trusted attribute *before* the request is
 fingerprinted, so for any tool that has one, the arguments the host passed and the
 arguments the approval covers are different — and a fingerprint built from the former
 matches nothing, which shows up as a call that pauses forever with a grant sitting in
@@ -53,6 +53,9 @@ class _Grant:
     at: float
     policy_hash: str
     window: float | None
+    # ``None`` is a real, pinned "no expiry" for a GateRequest. Only the legacy
+    # fingerprint form has no window information and may consult the store's policy.
+    window_pinned: bool
 
 
 def request_fingerprint(tool_name: str, args: dict, principal: Principal) -> str:
@@ -98,7 +101,9 @@ class ApprovalStore:
     does both, so the window is enforced here. Hand this the same ``Policy`` the gate
     runs on and a grant for a tool declaring ``expires_in: 900`` stops being usable 900
     seconds after it was granted, which is what an operator writing a 15-minute window
-    on a production deploy has always been told they were getting.
+    on a production deploy has always been told they were getting. Prefer granting the
+    paused request: it carries that window from the exact Gate snapshot that produced
+    it, even if the store itself predates a policy hot reload.
 
     The policy is required, and the default that made it optional is gone. A store
     built without one cannot see ``confirmation.expires_in`` at all, so a fifteen-minute
@@ -140,13 +145,14 @@ class ApprovalStore:
         """
         if isinstance(approved, str):
             with self._lock:
-                self._approved[approved] = _Grant(self._clock(), self._policy_hash(), None)
+                self._approved[approved] = _Grant(self._clock(), self._policy_hash(), None, False)
             return
         with self._lock:
             self._approved[fingerprint_of(approved)] = _Grant(
                 self._clock(),
                 approved.policy_hash or self._policy_hash(),
-                self._window(approved.tool_name),
+                approved.confirmation_expires_in,
+                True,
             )
 
     def grant_for(self, fingerprint: str, tool_name: str) -> None:
@@ -156,7 +162,7 @@ class ApprovalStore:
         request itself, which pins the ruleset as well and is the spelling to reach for.
         """
         with self._lock:
-            self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), self._window(tool_name))
+            self._approved[fingerprint] = _Grant(self._clock(), self._policy_hash(), self._window(tool_name), True)
 
     def _policy_hash(self) -> str:
         """The ruleset this store was handed, or "" when it was handed none.
@@ -195,7 +201,7 @@ class ApprovalStore:
                 return False
             # The window pinned at grant, or — for a plain `grant()`, which cannot know
             # which contract to read — whatever the store's policy says now.
-            window = entry.window if entry.window is not None else self._window(request.tool_name)
+            window = entry.window if entry.window_pinned else self._window(request.tool_name)
             # Dropped either way: an approval that timed out is spent, not retryable.
             # Leaving it in the store would make "expired" mean "expired until the
             # agent asks again", which is not an expiry.

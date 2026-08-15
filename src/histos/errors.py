@@ -90,11 +90,13 @@ class GateConfirmationRequired(GateError):
 
     @property
     def fingerprint(self) -> str | None:
-        """The :func:`~histos.mediate.approvals.request_fingerprint` to pass to ``grant()``.
+        """Compatibility fingerprint for stores that cannot retain ``request``.
 
         ``None`` only when the exception was constructed without a request, which the
         gate never does — a host building one by hand gets ``None`` rather than a
-        fingerprint that would authorise the wrong call.
+        fingerprint that would authorise the wrong call. Prefer
+        ``store.grant(exc.request)``: the request also pins the exact policy hash and
+        confirmation window that the approver reviewed.
         """
         if self.request is None:
             return None

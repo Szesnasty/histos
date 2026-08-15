@@ -79,7 +79,9 @@ write to the store.
 approval no longer survives a policy change: the ruleset in force is recorded at grant
 and compared at consume, so a deploy between the click and the call refuses it rather
 than spending it. `confirmation.expires_in` is enforced too — by the store, which has
-the clock the engine deliberately does not.
+the clock the engine deliberately does not. Passing the paused `GateRequest` pins both
+values from the exact snapshot that requested approval, so a store may safely survive a
+Gate hot reload; the fingerprint-only compatibility form cannot carry that evidence.
 
 **The cost that remains:** no nonce and no approver identity in the tuple, and the
 store is in-process, so an approval cannot be carried between processes and the record

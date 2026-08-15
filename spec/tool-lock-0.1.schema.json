@@ -1,15 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://histos.dev/spec/tool-lock-0.1.schema.json",
-  "title": "Histos Tool Lock 1",
+  "title": "Histos Tool Lock 1–2",
   "$comment": "Provenance for the imported half of a policy. The policy itself stays a self-contained, hashed artifact and never references a contract it does not contain; this file records where the imported shapes came from and what they looked like when a human last reviewed them. Nothing here affects a decision, so nothing here is part of the policy's content_hash. The hash definitions below are NORMATIVE: a second implementation that computes them differently will report drift the reference engine does not, which is worse than reporting none.",
   "type": "object",
   "required": ["lock_version", "tools"],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "lock_version": { "const": 1 } }
+      },
+      "then": {
+        "properties": {
+          "tools": {
+            "additionalProperties": { "$ref": "#/$defs/entryV1" }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "tools": {
+            "additionalProperties": { "$ref": "#/$defs/entryV2" }
+          }
+        }
+      }
+    }
+  ],
   "properties": {
     "lock_version": {
-      "description": "1. An implementation that does not recognise the value refuses the file rather than reading what it can.",
-      "const": 1
+      "description": "Format version. Version 2 adds the reviewed source copy; an implementation that does not recognise the value refuses the file rather than reading what it can.",
+      "enum": [1, 2]
     },
     "policy": {
       "description": "File name of the policy these entries belong to. Informational: the pairing is by location on disk, not by this string.",
@@ -17,15 +38,13 @@
     },
     "tools": {
       "description": "One entry per tool that came from an importable source. A policy tool absent here is not verified by a drift check, and a drift report must say so rather than imply coverage it does not have.",
-      "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/entry" }
+      "type": "object"
     }
   },
   "$defs": {
-    "entry": {
+    "entryBase": {
       "type": "object",
       "required": ["source", "schema_sha256", "description_sha256", "contract_sha256"],
-      "additionalProperties": false,
       "properties": {
         "source": { "$ref": "#/$defs/source" },
         "schema_sha256": {
@@ -39,6 +58,50 @@
         "contract_sha256": {
           "description": "NORMATIVE. 'sha256:' + SHA-256 over canonical_json({\"args\": <schema fingerprint>, \"returns\": <schema fingerprint>}) of the projected contract. Answers: did the change reach the part that is enforced? Excludes access, resource constraints, bindings, confirmation, limits and output rules — those are written by a human and adding one is not tool drift.",
           "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "entryV1": {
+      "allOf": [
+        { "$ref": "#/$defs/entryBase" }
+      ],
+      "unevaluatedProperties": false
+    },
+    "entryV2": {
+      "allOf": [
+        { "$ref": "#/$defs/entryBase" },
+        {
+          "required": ["reviewed"],
+          "properties": {
+            "reviewed": {
+              "description": "The source shape and description a human actually reviewed. Required in version 2 so drift can explain what changed rather than only naming a moved hash.",
+              "$ref": "#/$defs/reviewed"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "reviewed": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shape": {
+          "description": "The source shape that was reviewed, or null when the source itself declared no shape. Omitted only when shape appears in elided.",
+          "oneOf": [
+            { "$ref": "#/$defs/shape" },
+            { "type": "null" }
+          ]
+        },
+        "description": {
+          "description": "The source description that was reviewed, including null when it was absent. Omitted only when description appears in elided.",
+          "type": ["string", "null"]
+        },
+        "elided": {
+          "description": "Reviewed parts deliberately omitted because they exceeded the lock's bounded evidence size.",
+          "type": "array",
+          "items": { "enum": ["shape", "description"] },
+          "uniqueItems": true
         }
       }
     },
@@ -62,6 +125,7 @@
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "shape": {
+      "type": "object",
       "$comment": "NORMATIVE per-kind layout that `schema_sha256` is computed over. The tool name is the lock's own key and the description is hashed separately, so neither appears here. Keys are always present, with null where the source has nothing, so an addition later is visible as drift rather than as a differently-shaped object.\n\nmcp     -> {\"input\": inputSchema|null, \"output\": outputSchema|null}\nopenai  -> {\"input\": parameters|null, \"output\": null}\nopenapi -> {\"method\": string, \"path\": string, \"parameters\": [...], \"requestBody\": schema|null, \"responses\": schema|null}\n\nFor `openapi` the fragments are the DEREFERENCED ones the projection actually read: hashing the operation as written would miss a #/components/schemas target changing underneath an unchanged $ref."
     }
   }

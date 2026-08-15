@@ -1698,7 +1698,7 @@ def test_an_approval_still_works_after_the_ruleset_is_swapped():
 
 
 def test_a_cancelled_confirmation_still_leaves_a_record():
-    """"Every decision is recorded" has to survive the await being cancelled.
+    """ "Every decision is recorded" has to survive the await being cancelled.
 
     The engine had already decided REQUIRE_CONFIRMATION and the wrapper was waiting on
     the host's callback. A cancelled task raises `asyncio.CancelledError`, which is not

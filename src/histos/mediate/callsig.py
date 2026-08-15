@@ -151,8 +151,8 @@ def _invoke(tool: Callable[..., Any], binder: Any, named: dict[str, Any]) -> Any
     return call(tool, named) if call is not None else tool(**named)
 
 
-def _gate_stamp(tool: Any) -> str | None:
-    """The tool name this object is gated under, or None if any way in is not gated.
+def _gate_mark(tool: Any) -> tuple[object, str] | None:
+    """The Gate identity and tool name, or None if any invocation path disagrees.
 
     ``func`` and ``coroutine`` are not alternative spellings of one callable: on a
     LangChain ``StructuredTool`` they are the sync and async implementations, reached
@@ -165,12 +165,26 @@ def _gate_stamp(tool: Any) -> str | None:
     handles = [getattr(tool, attr, None) for attr in _TOOL_CALLABLE_ATTRS]
     handles = [h for h in handles if callable(h)]
     if handles:
-        stamps = {getattr(h, "__gate_name__", None) for h in handles}
-        if len(stamps) == 1 and isinstance(next(iter(stamps)), str):
-            return str(next(iter(stamps)))
+        marks = [(getattr(h, "__histos_gate_token__", None), getattr(h, "__gate_name__", None)) for h in handles]
+        token, name = marks[0]
+        if token is not None and isinstance(name, str) and all(t is token and n == name for t, n in marks[1:]):
+            return token, name
         return None
+    token = getattr(tool, "__histos_gate_token__", None)
     stamp = getattr(tool, "__gate_name__", None)
-    return stamp if isinstance(stamp, str) else None
+    return (token, stamp) if token is not None and isinstance(stamp, str) else None
+
+
+def _gate_stamp(tool: Any) -> str | None:
+    """The tool name this object is gated under, or None if any way in is not gated."""
+    mark = _gate_mark(tool)
+    return None if mark is None else mark[1]
+
+
+def _gate_token(tool: Any) -> object | None:
+    """The Gate identity this object's complete invocation surface agrees on."""
+    mark = _gate_mark(tool)
+    return None if mark is None else mark[0]
 
 
 def _any_gate_stamp(tool: Any) -> str | None:

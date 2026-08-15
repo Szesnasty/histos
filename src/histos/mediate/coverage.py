@@ -20,7 +20,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from histos.errors import PolicyError
-from histos.mediate.callsig import _exposed_name, _gate_stamp
+from histos.mediate.callsig import _exposed_name, _gate_mark
 
 
 def declared_but_unwrapped(gate: Any) -> set[str]:
@@ -33,10 +33,10 @@ def _mediates(gate: Any, tool: Any, exposed_name: str) -> bool:
 
     Two questions, because neither answers the whole thing:
 
-    * **identity** — is this object one *this* Gate produced? Exact, and the only
-      form that separates "gated" from "gated by the strict gate CI is asserting
-      against" when a process builds more than one.
-    * **the stamp** — every wrapper carries ``__gate_name__``, and an adapter that
+    * **identity** — does every callable handle carry this Gate's opaque mediation
+      token? This separates "gated" from "gated by the strict gate CI is asserting
+      against" when a process builds more than one, and survives a safe adapter layer.
+    * **the name stamp** — every wrapper carries ``__gate_name__``, and an adapter that
       re-wraps one (``guard_callable``) copies it onto the object it hands the
       framework. Identity cannot see through that extra layer; the stamp can. The
       exposed name has to match it: a tool published as ``wire_transfer`` whose
@@ -45,9 +45,8 @@ def _mediates(gate: Any, tool: Any, exposed_name: str) -> bool:
     A tool that answers neither is reported ungated. That direction is deliberate:
     a false alarm costs a CI run, a false all-clear costs the whole gate.
     """
-    if any(ref() is tool for ref in gate._wrappers):
-        return True
-    return _gate_stamp(tool) == exposed_name
+    mark = _gate_mark(tool)
+    return mark is not None and mark[0] is gate._mediation_token and mark[1] == exposed_name
 
 
 def ungated_tools(gate: Any, tools: Iterable[Any]) -> list[str]:

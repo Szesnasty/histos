@@ -64,7 +64,14 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
     only resists accident, not a motivated writer (pass a key for real
     tamper-evidence).
     """
-    p = Path(path)
+    try:
+        return _verify_chain(Path(path), key)
+    except (OSError, UnicodeDecodeError) as exc:
+        return False, f"audit file is unreadable ({exc})"
+
+
+def _verify_chain(p: Path, key: bytes | None) -> tuple[bool, str]:
+    """Implementation separated so every filesystem/decoding failure has one boundary."""
     if not p.exists():
         return False, f"audit file not found: {p}"
 
@@ -79,6 +86,8 @@ def verify_chain(path: str | Path, *, key: bytes | None = None) -> tuple[bool, s
                 rec = json.loads(stripped)
             except ValueError as exc:
                 return False, f"line {lineno}: not valid JSON ({exc})"
+            if not isinstance(rec, dict):
+                return False, f"line {lineno}: record is {type(rec).__name__}, expected an object"
             if "hash" not in rec:
                 return False, f"line {lineno}: record is not hash-chained (no `hash`)"
             stored = rec.pop("hash")

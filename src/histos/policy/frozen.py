@@ -344,7 +344,7 @@ def _snapshot_value(value: Any, *, readonly: bool = True, _seen: frozenset[int] 
             return value
         try:
             copied = deepcopy(value)
-        except Exception:  # noqa: BLE001 — fall back to the element-by-element walk
+        except Exception:  # noqa: BLE001  # nosec B110
             pass
         else:
             # Only when it really copied. `deepcopy` is allowed to return the argument

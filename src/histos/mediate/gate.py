@@ -122,6 +122,10 @@ class Gate:
         output_budget: int = _DEFAULT_OUTPUT_BUDGET,
         strict: bool = False,
     ) -> None:
+        # Coverage must distinguish a wrapper made by this Gate from one made by a
+        # different, possibly more permissive Gate. A name stamp alone cannot answer
+        # that question; this opaque identity travels only onto wrappers we produce.
+        self._mediation_token = object()
         # The recorder is built first, before anything that can push into it. The
         # `policy` setter re-stamps the hash the recorder writes on every row, and it
         # runs two lines below — so constructing the recorder after it was an
