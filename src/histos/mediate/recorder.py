@@ -40,6 +40,14 @@ class DecisionRecorder:
         # made to — so the gap in the trail was legible only as a RuntimeWarning, which
         # is not something a monitor reads.
         self.failures = 0
+        # Where the sink's own counter stood when this recorder was built, and the most
+        # this recorder has seen it move. Read against a baseline rather than diffed
+        # around each write: `failed` is shared by every thread using the sink and by
+        # every Gate sharing it — the documented "two Gates in one process" shape — so a
+        # delta attributed every other thread's loss to whichever emit was in flight, and
+        # the count came out several times high under load.
+        self._absorbed_base: int | None = None
+        self._absorbed = 0
         # Set by the Gate whenever its ruleset is swapped, so a record can never name a
         # hash that did not decide it.
         self.policy_hash = ""
@@ -96,16 +104,31 @@ class DecisionRecorder:
         # its own write errors, so the gate saw a clean return and could not count the
         # loss. That is the ordinary configuration, and it was the one where a host had
         # nothing to alarm on but a RuntimeWarning.
-        before = getattr(self.audit, "failed", None)
+        before = self._absorbed_count()
+        if self._absorbed_base is None and before is not None:
+            self._absorbed_base = before
         try:
             self.audit.record(record.to_dict())
         except Exception as exc:  # noqa: BLE001 — only `strict` may decide a call's fate
             self._sink_failed(exc, phase, executed)
         else:
-            after = getattr(self.audit, "failed", None)
-            if isinstance(before, int) and isinstance(after, int) and after > before:
-                with self._lock:
-                    self.failures += after - before
+            after = self._absorbed_count()
+            if after is not None and self._absorbed_base is not None:
+                self._absorbed = max(self._absorbed, after - self._absorbed_base)
+
+    def _absorbed_count(self) -> int | None:
+        """The sink's own count of records it swallowed, read so it cannot decide a call.
+
+        `getattr(obj, name, default)` only swallows `AttributeError`, and both reads sat
+        outside the `try` that exists so a sink never decides a call's fate. A `failed`
+        implemented as a property — a gauge read off the collector, which is the obvious
+        way to implement the counter the gate asks for — handed whatever it raised
+        straight out of `_emit`, past a total sink whose `record()` could not raise at all.
+        """
+        with contextlib.suppress(Exception):
+            count = getattr(self.audit, "failed", None)
+            return count if isinstance(count, int) else None
+        return None
 
     def _sink_failed(self, exc: Exception, phase: str, executed: bool) -> None:
         """One rule for a sink that raised: only ``strict`` makes it fatal.
@@ -149,7 +172,12 @@ class DecisionRecorder:
             f"({phase} phase): {type(exc).__name__}: {exc}. This record is lost and {note}. "
             "Read Gate.audit_failures for the count, or give the sink strict=True to raise instead."
         )
-        if getattr(self.audit, "strict", False):
+        # Exactly `True`. A generic attribute answerer — an RPC or manager proxy, a
+        # `__getattr__`-forwarding wrapper, a bare `unittest.mock.Mock` — returns a
+        # truthy object for every name, so "evidence outranks availability" was an
+        # opt-in nobody had to write and a mock sink silently made every audit failure
+        # fatal. The shipped sink stores a bool; anything else is not opting in.
+        if getattr(self.audit, "strict", False) is True:
             # Detached and suppressed, both. `record()` is called from inside the
             # wrapper's `except` handler, so CPython had already stamped `__context__`
             # on the sink's exception at the moment the sink raised — and that context

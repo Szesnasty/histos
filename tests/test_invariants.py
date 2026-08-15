@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import typing
+import warnings
 
 import pytest
 
@@ -38,6 +39,7 @@ from histos import (
     use_principal,
     verify_chain,
 )
+from histos.errors import PolicyError
 
 CANARY = "CANARY-7f3a-SECRET"
 
@@ -336,3 +338,154 @@ def test_a_return_with_shared_references_does_not_hang():
     thread.start()
     thread.join(timeout=5)
     assert done, "the post-gate did not return within five seconds"
+
+
+# ── the fifth pass, P2 and P3 ────────────────────────────────────────────
+
+
+def test_the_third_mutable_container_is_read_only_too():
+    """`_freeze` swapped dict and list and left `set` writable, while `in`, `<=` and `&`
+    are exactly what a Constraint compares — so a set-valued claim could be edited into a
+    different authorization answer after it was bound."""
+    who = Principal(role="r", identity="i", attributes={"scopes": {"read"}})
+    with pytest.raises(TypeError):
+        who.attributes["scopes"].add("admin")
+    assert who.attributes["scopes"] == {"read"}, "a ReadOnlySet still compares as a set"
+
+
+def test_a_sink_whose_counter_raises_cannot_kill_a_call(tmp_path):
+    """Both `failed` reads sat outside the try that exists so a sink never decides a
+    call, and `getattr(obj, name, default)` only swallows AttributeError."""
+
+    class Gauge:
+        @property
+        def failed(self) -> int:
+            raise ConnectionError("the collector is down")
+
+        def record(self, entry: dict) -> None:
+            return None  # total: this sink cannot fail
+
+    safe = Gate(_one_write_tool_for_invariants(), audit=Gauge()).wrap(lambda: "receipt", name="charge")  # noqa: E731
+    with use_principal(Principal(role="teller", identity="t")):
+        assert safe() == "receipt"
+
+
+def test_strict_has_to_be_written_rather_than_merely_answered():
+    """A generic attribute answerer returns something truthy for every name, so
+    "evidence outranks availability" was an opt-in nobody had to write."""
+
+    class Proxy:
+        def __getattr__(self, name: str):  # every attribute answers
+            return object()
+
+        def record(self, entry: dict) -> None:
+            raise ConnectionError("collector unreachable")
+
+    gate_ = Gate(_one_write_tool_for_invariants(), audit=Proxy())
+    safe = gate_.wrap(lambda: "receipt", name="charge")  # noqa: E731
+    with use_principal(Principal(role="teller", identity="t")), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert safe() == "receipt", "a proxy sink silently became fatal"
+
+
+def test_the_default_sinks_losses_reach_the_counter_a_host_alarms_on():
+    """`audit_failures` is documented as counting them whatever the sink was, and read an
+    attribute only the file sink had."""
+    sink = InMemoryAuditSink(2)
+    gate_ = Gate(_one_write_tool_for_invariants(), audit=sink)
+    safe = gate_.wrap(lambda: "receipt", name="charge")  # noqa: E731
+    with use_principal(Principal(role="teller", identity="t")):
+        for _ in range(4):
+            safe()
+    assert sink.dropped and gate_.audit_failures >= sink.dropped
+
+
+def test_an_uncomparable_bound_argument_does_not_crash_a_wrap():
+    """A partial bound to a numpy array or a DataFrame compares to a non-bool, and
+    `bool()` on that raises — out of `Gate.wrap`, where a decision was owed."""
+    import functools
+
+    class Arrayish:
+        def __eq__(self, other):  # noqa: ANN001 — the point is that it is not a bool
+            return Arrayish()
+
+        def __bool__(self):
+            raise ValueError("truth value of an array is ambiguous")
+
+        __hash__ = None  # type: ignore[assignment]
+
+    def send(payload, channel=None):
+        return channel
+
+    gate_ = Gate(_one_write_tool_for_invariants("send"))
+    gate_.wrap(functools.partial(send, Arrayish()), name="send")
+    with pytest.raises(PolicyError):
+        gate_.wrap(functools.partial(send, Arrayish()), name="send")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"type": "array", "item_type": "integer", "max_length": 8},
+        {"type": "array", "item_type": "string", "minimum": 1},
+        {"type": "integer", "minimum": 10, "exclusive_maximum": 10},
+        {"type": "number", "exclusive_minimum": 10.0, "maximum": 5.0},
+    ],
+)
+def test_a_bound_that_no_element_or_value_can_reach_is_refused(kwargs):
+    """An array was granted the string and numeric keywords unconditionally, and the
+    unsatisfiable check never compared an inclusive bound against the strict twin on the
+    other side."""
+    from histos.policy.schema import Field as _Field
+
+    with pytest.raises(PolicyError):
+        _Field(**kwargs)
+
+
+def test_an_array_of_nulls_admits_only_null():
+    """Converting the sentinel to `None` said nothing at all: `_check_scalar` then took
+    `item_type=None` as "no element type declared" and admitted every type."""
+    from histos import schema_from_json_schema
+    from histos.policy.schema import Schema as _Schema
+    from histos.policy.validation import validate
+
+    field = schema_from_json_schema(
+        {"type": "object", "properties": {"xs": {"type": "array", "items": {"type": "null"}}}}
+    ).fields["xs"]
+    schema = _Schema({"xs": field})
+    assert validate(schema, {"xs": ["anything"]}), "an array of nulls accepted a string"
+    assert validate(schema, {"xs": [None]}) == []
+
+
+def test_a_composed_form_body_is_still_refused_rather_than_dropped():
+    """`allOf: [{$ref: ...}]` is the ordinary way a spec extends a shared model, and
+    looking only at the top level read it as declaring nothing."""
+    from histos import sources_from_openapi
+
+    spec = {
+        "openapi": "3.0.0",
+        "paths": {
+            "/x": {
+                "post": {
+                    "operationId": "t",
+                    "requestBody": {
+                        "content": {
+                            "application/x-www-form-urlencoded": {
+                                "schema": {"allOf": [{"$ref": "#/components/schemas/Form"}]}
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "components": {"schemas": {"Form": {"type": "object", "properties": {"amount": {"type": "integer"}}}}},
+    }
+    with pytest.raises(PolicyError):
+        sources_from_openapi(spec)
+
+
+def _one_write_tool_for_invariants(name: str = "charge") -> Policy:
+    return Policy(
+        tools={name: ToolContract(name=name, args=Schema({}), access="write")},
+        permissions={"teller": frozenset({name})},
+    )

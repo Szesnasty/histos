@@ -207,7 +207,7 @@ class Gate:
         The count lives on the recorder; it is read here because a host alarming on a
         gap in the trail should not have to know that.
         """
-        return self._recorder.failures
+        return self._recorder.failures + self._recorder._absorbed
 
     @property
     def enforcement(self) -> str:
