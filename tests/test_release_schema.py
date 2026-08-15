@@ -19,7 +19,9 @@ from pathlib import Path
 import pytest
 
 from histos import Field, PolicyError, Schema, load_policy
-from histos.schema import _MAX_PATTERN_INPUT, _PROBE_BUDGET_S, validate
+from histos.redos.alphabet import _MAX_PATTERN_INPUT
+from histos.redos.probe import _PROBE_BUDGET_S
+from histos.schema import validate
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -262,7 +264,7 @@ def test_the_probe_ends_on_a_character_the_pattern_cannot_swallow():
 # fixed for: on Windows that clock is quantised to the 15.6 ms tick, so a run of 0.19 s
 # reads as 0.203125 — thirteen ticks — and the assertion failed on the quantisation
 # rather than on the code.
-from histos.schema import _cpu_clock as _cpu  # noqa: E402
+from histos.redos.probe import _cpu_clock as _cpu  # noqa: E402
 
 # What one pattern may cost at load. The ladder is gated on what the previous two rungs
 # cost, so a single pass lands near twice the budget; a verdict close enough to the
@@ -526,7 +528,7 @@ def test_the_probe_refuses_a_clock_too_coarse_to_see_its_own_budget():
     costing 4 ms here cost 8.7 seconds there, inside `Field.__post_init__`, once per tool
     in the manifest. A self-bounding probe that cannot see its own budget is not bounded.
     """
-    from histos import schema as schema_module
+    from histos.redos import probe as probe_module
 
     # Measured by spinning, not read from `time.get_clock_info` — which reports the
     # clock's *nominal* resolution and answers 100 ns for `thread_time` on Windows while
@@ -543,32 +545,32 @@ def test_the_probe_refuses_a_clock_too_coarse_to_see_its_own_budget():
     # a hundred, so the selection came out fine-grained on some runs and coarse on
     # others and CI went green and red on the same commit. The step *size* answers it
     # whichever run observes it.
-    assert not any(schema_module._granularity_under(windows_thread_time, _PROBE_BUDGET_S / 50) for _ in range(200))
-    assert schema_module._granularity_under(time.perf_counter, _PROBE_BUDGET_S / 50)
+    assert not any(probe_module._granularity_under(windows_thread_time, _PROBE_BUDGET_S / 50) for _ in range(200))
+    assert probe_module._granularity_under(time.perf_counter, _PROBE_BUDGET_S / 50)
 
     # Whichever clock gets picked, the property is the same one: it can resolve the
     # budget it is enforcing. Asserting `is time.thread_time` was asserting the platform
     # — right on Linux and macOS, wrong on Windows, where falling back is the correct
     # answer and the whole reason this selection exists.
-    chosen = schema_module._probe_clock()
-    assert schema_module._granularity_under(chosen, _PROBE_BUDGET_S / 50)
+    chosen = probe_module._probe_clock()
+    assert probe_module._granularity_under(chosen, _PROBE_BUDGET_S / 50)
     assert chosen in (time.thread_time, time.perf_counter)
 
 
 @pytest.mark.parametrize(("pattern", "degree"), PROBE_TUNED, ids=lambda v: v if isinstance(v, int) else "")
 def test_the_ladder_stays_bounded_under_the_fallback_clock(pattern, degree):
     """The bound has to hold on the clock Windows will actually use."""
-    from histos import schema as schema_module
+    from histos.redos import probe as probe_module
 
-    kept = schema_module._cpu_clock
-    schema_module._cpu_clock = time.perf_counter
+    kept = probe_module._cpu_clock
+    probe_module._cpu_clock = time.perf_counter
     try:
         started = time.perf_counter()
         with pytest.raises(PolicyError):
             Field(type="string", pattern=pattern)
         elapsed = time.perf_counter() - started
     finally:
-        schema_module._cpu_clock = kept
+        probe_module._cpu_clock = kept
     assert elapsed < _PER_PATTERN_BOUND, f"degree {degree} cost {elapsed:.3f}s under perf_counter"
 
 

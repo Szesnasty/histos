@@ -41,7 +41,8 @@ from histos.contracts import Constraint
 from histos.importers import KINDS, field_from_json_schema, reader_for, register_source_kind
 from histos.infer import infer_schema
 from histos.lockfile import build_lock, parse_lock, unverifiable_tools
-from histos.schema import _MAX_PATTERN_INPUT, sensitive_fields, validate
+from histos.redos.alphabet import _MAX_PATTERN_INPUT
+from histos.schema import sensitive_fields, validate
 
 GALLERY = Path(__file__).resolve().parent.parent / "policies"
 
