@@ -15,7 +15,8 @@ from typing import Any
 
 from histos.contracts import GateDecision, Principal
 from histos.errors import GateConfirmationRequired, GateDenied, PolicyError
-from histos.gate import Gate, _adopt_metadata
+from histos.gate import Gate
+from histos.toolref import _adopt_metadata
 
 ON_DENIED = ("message", "raise")
 
