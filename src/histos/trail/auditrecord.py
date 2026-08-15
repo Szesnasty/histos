@@ -43,7 +43,26 @@ def digest_args(args: dict[str, Any], key: bytes) -> str:
     try:
         canonical = canonical_json(args)
     except (TypeError, ValueError):
-        canonical = repr(sorted(args.items(), key=lambda kv: kv[0]))
+        try:
+            canonical = repr(sorted(args.items(), key=lambda kv: kv[0]))
+        except Exception:  # noqa: BLE001 — see below; there is no input this may refuse
+            # The fallback needed a fallback. `repr` walks the very structure the
+            # serializer just refused, so when the refusal was "this nests too deep to
+            # canonicalise" the repr blew the stack immediately after — and a
+            # `RecursionError` out of here is the one thing this function must never do,
+            # because it happens before the sink is reached and the call that provoked it
+            # is the call with no record at all.
+            #
+            # It took Windows to show it. A 4000-deep argument fits the 8 MB thread stack
+            # a Linux or macOS runner gives you and does not fit Windows' 1 MB, so the
+            # local suite was green and one of eleven CI jobs was not. The test that
+            # covers this now goes deep enough to fail on any of them.
+            #
+            # Named limit: names and types only, so two pathological calls whose
+            # arguments share a shape share a digest. That is a real loss of resolution
+            # and it is confined to input the serializer has already refused — against
+            # the alternative, which is no audit record for that call at all.
+            canonical = repr(sorted((name, type(value).__name__) for name, value in args.items()))
     # `surrogatepass`, because a plain `.encode("utf-8")` here is a way to make a
     # decision disappear. The serializer rejects a lone surrogate, but the repr
     # fallback does not: an argument object whose `__repr__` returns one produced a
