@@ -81,11 +81,61 @@ def _callback_args(args: dict[str, Any]) -> dict[str, Any]:
     dict reaches the tool having been checked against nothing. A resolver is ordinary
     application code — an ORM lookup, a cache fill — and normalising an id in passing
     is exactly the sort of thing it does.
+
+    The fallback used to be ``dict(args)``, and a shallow copy is not a copy of
+    anything that matters here: every nested value stays shared, so a callback writing
+    ``req.args["payload"]["amount"] = 999`` reached the live dict through it. Measured
+    end to end — the tool executed with 999 while the audit digest, taken before the
+    callback ran, recorded 1. The trail and the execution disagreeing is the one thing
+    this function exists to prevent, and its own degradation arm produced it.
+
+    So there is no degradation arm. An argument that cannot be detached means no
+    detached view of this call exists, and every caller turns that into a recorded
+    denial naming the argument. That refuses a call the shallow copy would have run —
+    a host passing a DB handle or an ORM row to a tool that also uses ``confirm`` — and
+    the refusal says which argument and what to do about it, which a silently mutated
+    execution never did.
     """
     try:
         return copy.deepcopy(args)
-    except Exception:  # noqa: BLE001 — an uncopyable argument must not fail the call
-        return dict(args)
+    except Exception as exc:  # noqa: BLE001 — reported as a denial, never swallowed
+        raise UndetachableArgument(_first_uncopyable(args), exc) from None
+
+
+class UndetachableArgument(Exception):
+    """No detached view of this call's arguments could be built. Always a denial."""
+
+    def __init__(self, name: str, cause: BaseException) -> None:
+        super().__init__(name)
+        self.name = name
+        self.cause = cause
+
+    def as_decision(self) -> GateDecision:
+        return GateDecision(
+            Effect.DENY,
+            "uncopyable_argument",
+            f"argument {self.name!r} cannot be copied ({type(self.cause).__name__}), so the host callback "
+            "would have to be handed the live arguments — and a callback that edits those changes what the "
+            "tool runs after every check has passed",
+            expected="an argument the gate can snapshot",
+            received=self.name,
+        )
+
+
+def _first_uncopyable(args: dict[str, Any]) -> str:
+    """Which argument refused to copy, so the denial can name it.
+
+    Only ever runs on the failure path, so the second pass costs nothing in the case
+    that matters. A whole-dict copy can also fail for a reason no single value
+    reproduces — a cycle spanning two arguments — and then nothing is named rather
+    than the wrong thing being named.
+    """
+    for name, value in args.items():
+        try:
+            copy.deepcopy(value)
+        except Exception:  # noqa: BLE001 — this one is the answer
+            return name
+    return "<the argument set as a whole>"
 
 
 def for_callback(req: GateRequest) -> GateRequest:

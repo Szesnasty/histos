@@ -42,6 +42,7 @@ from histos import (
 )
 from histos.errors import PolicyError
 from histos.mediate.identity import _current_principal
+from histos.policy.authz import Constraint
 
 CANARY = "CANARY-7f3a-SECRET"
 
@@ -1201,3 +1202,77 @@ def test_an_approval_does_not_survive_the_ruleset_it_was_granted_under():
     with use_principal(alice), contextlib.suppress(Exception):
         safe(amount=100)
     assert not paid, "an approval issued against one ruleset was spent under another"
+
+
+class _Uncopyable:
+    """A DB handle, an ORM row, a lock — anything `deepcopy` refuses."""
+
+    def __deepcopy__(self, memo):
+        raise TypeError("this object cannot be copied")
+
+
+@pytest.mark.parametrize("seam", ["confirm", "escalate", "resolver"])
+def test_a_host_callback_can_never_edit_what_the_tool_runs(seam):
+    """The property `_callback_args` exists for, asked at all three of its seams.
+
+    It handed the callback a `deepcopy`, and `dict(args)` when that failed — a shallow
+    copy, in which every nested value is still the caller's. So a callback writing
+    `req.args["payload"]["amount"] = 999` reached the live dict, and the tool ran with
+    999 while the audit digest, taken before the callback, recorded 1. Execution and
+    trail disagreeing is the failure the function was written to prevent, reachable
+    through its own degradation arm.
+
+    A call whose arguments cannot be detached is refused now, at every seam, naming the
+    argument. The pause for confirmation is refused too: the fingerprint an approval is
+    granted against comes from the request that travels with the pause, so args that
+    cannot be detached cannot be safely approved either.
+    """
+    ran: list[int] = []
+
+    def tool(payload):
+        ran.append(payload["amount"])
+        return "ok"
+
+    def meddle(req):
+        req.args["payload"]["amount"] = 999
+        return True
+
+    contract = ToolContract(
+        name="pay",
+        args=Schema({"payload": Field(type="object")}),
+        requires_confirmation=(seam == "confirm"),
+        requires_escalation=(seam == "escalate"),
+        constraints=(Constraint("owner", "eq", value="alice"),) if seam == "resolver" else (),
+    )
+    policy = Policy(tools={"pay": contract}, permissions={"r": frozenset({"pay"})})
+    wiring = {
+        "confirm": {"confirm": meddle},
+        "escalate": {"escalate": meddle},
+        "resolver": {"resource_resolver": lambda req: meddle(req) and {"owner": "alice"}},
+    }[seam]
+
+    sink = InMemoryAuditSink()
+    safe = Gate(policy, audit=sink, **wiring).wrap(tool, name="pay")
+    with use_principal(Principal(role="r", identity="alice")), contextlib.suppress(Exception):
+        safe(payload={"amount": 1, "handle": _Uncopyable()})
+
+    assert 999 not in ran, f"the {seam} callback edited what the tool ran, after every check had passed"
+    assert sink.entries, "and it did so with nothing in the trail"
+    assert sink.entries[-1]["effect"] == "deny", f"expected a recorded denial, got {sink.entries[-1]['effect']}"
+
+
+def test_an_ordinary_call_through_a_callback_still_runs():
+    """The other direction: only an *undetachable* argument may be refused."""
+    ran: list[int] = []
+    policy = Policy(
+        tools={
+            "pay": ToolContract(name="pay", args=Schema({"payload": Field(type="object")}), requires_confirmation=True)
+        },
+        permissions={"r": frozenset({"pay"})},
+    )
+    safe = Gate(policy, audit=InMemoryAuditSink(), confirm=lambda req: True).wrap(
+        lambda payload: ran.append(payload["amount"]) or "ok", name="pay"
+    )
+    with use_principal(Principal(role="r", identity="alice")):
+        safe(payload={"amount": 1, "note": "ordinary nested data"})
+    assert ran == [1]

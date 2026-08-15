@@ -276,3 +276,29 @@ def test_no_document_links_at_a_ref_that_does_not_exist():
 
     assert not bad_refs, f"links point at a ref that does not exist: {bad_refs}"
     assert not missing_paths, f"links point at paths that are not in the tree: {missing_paths}"
+
+
+def test_the_readme_does_not_announce_a_release_that_has_not_happened():
+    """The third document that claimed 0.1.0 shipped, and the last one found by hand.
+
+    The changelog gate above says a dated entry needs a tag behind it. The README says
+    the same thing in prose — a status table cell — and prose was not covered, so while
+    the changelog was corrected the table went on reading "released, 0.1.0" for another
+    commit. A reviewer found it. Same rule, applied to the same claim wherever it is
+    written: nothing may announce a version that has no tag.
+    """
+    import re
+
+    readme = (CHANGELOG.parent / "README.md").read_text(encoding="utf-8")
+    tags = _git_tags()
+    if tags is None:  # no repository to ask — an sdist
+        return
+    # `(?<!un)` because the honest spelling is *unreleased*, and a pattern that
+    # matched it too failed on the corrected file — the first version of this
+    # check called the fix a violation.
+    announced = re.findall(r"(?<!un)released,?\s+v?(\d+\.\d+\.\d+)", readme, flags=re.I)
+    unbacked = [v for v in announced if f"v{v}" not in tags]
+    assert not unbacked, (
+        f"README announces {unbacked} as released and there is no tag for it. "
+        "Say 'unreleased' until the release workflow cuts one."
+    )

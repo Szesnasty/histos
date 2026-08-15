@@ -428,7 +428,7 @@ implementation detail, and why conformance has a level that covers it.
 | | | status |
 |---|---|---|
 | **Histos Policy Format** | the portable artifact — schema, decision codes, canonicalization | **Draft 0.1, implemented** |
-| **Histos Python** | this repository — the reference engine | **works; released, 0.1.0** |
+| **Histos Python** | this repository — the reference engine | **works; unreleased, 0.1.0 candidate** |
 | **Histos MCP** | policy generation and enforcement at the MCP server boundary | planned |
 | **Histos JS** | a second, conformance-compatible implementation | after the adoption gate |
 | **Histos Control Plane** | fleet coverage, policy lifecycle, approval workflow, audit retention | commercial |
