@@ -21,14 +21,37 @@ from collections.abc import Iterable
 
 DEFAULT_MARK = "[REDACTED-CANARY]"
 
-# A fixed, documented normalization set (Phase 0.1). Zero-width / invisible chars…
-_ZERO_WIDTH = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"}
+# Every Unicode *format* character — category `Cf` — as ranges.
+#
+# This was a set of five zero-width characters, written when a canary escaped through one
+# of them. All five are `Cf`, and so are the hundred and sixty-five the set did not name:
+# U+00AD SOFT HYPHEN, the bidi controls U+202A–U+202E and U+2066–U+2069, and the tag block
+# U+E0020–U+E007F, which mirrors ASCII invisibly and is the standard way an instruction is
+# smuggled past a human reading the text. Every one renders as nothing and every one
+# defeats verbatim matching, so an enumeration of five was the wrong shape for what is a
+# rule: strip the characters that are not there.
+#
+# Written out rather than computed, because deciding it by `unicodedata.category` over
+# 0x110000 codepoints costs about a third of a second at import, and this library's import
+# time is itself a test. The table is 170 entries and `str.translate` does not care: 0.8 ms
+# per megabyte of ASCII, the same as the five-entry version. What makes the trade safe is
+# that the enumeration cannot rot in silence —
+# `test_the_invisible_character_table_still_covers_what_python_knows` regenerates it from
+# the running Python and fails, naming the character, if a Unicode release adds one.
+_FORMAT_RANGES = (
+    (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD), (0x070F, 0x070F),
+    (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x2064), (0x2066, 0x206F), (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD), (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+)  # fmt: skip
+_INVISIBLE = frozenset(chr(cp) for low, high in _FORMAT_RANGES for cp in range(low, high + 1))
 # …and a closed separator set, stripped so a spaced-out token still matches.
 _SEPARATORS = set(" \t\r\n-_.·•|,")
 # One prebuilt deletion table for both sets: str.translate runs in C, while the
 # per-character genexpr it replaces cost ~300 ms per megabyte of arguments and made
 # a schema-valid call with a large array a CPU stall inside a fail-closed gate.
-_STRIP_TABLE = dict.fromkeys(ord(ch) for ch in _ZERO_WIDTH | _SEPARATORS)
+_STRIP_TABLE = dict.fromkeys(ord(ch) for ch in _INVISIBLE | _SEPARATORS)
 
 # Above this, a normalized-only hit stops being located span-by-span (the index map
 # below is a per-character Python loop) and the whole value is dropped instead.
@@ -101,7 +124,7 @@ def _normalized_with_index(text: str) -> tuple[str, list[int]]:
     origin: list[int] = []
     for i, ch in enumerate(text):
         for nch in unicodedata.normalize("NFKC", ch):
-            if nch in _ZERO_WIDTH or nch in _SEPARATORS:
+            if nch in _INVISIBLE or nch in _SEPARATORS:
                 continue
             for folded in nch.casefold():  # casefold can expand (ß → ss)
                 chars.append(folded)

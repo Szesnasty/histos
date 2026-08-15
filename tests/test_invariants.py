@@ -704,3 +704,52 @@ def test_a_contract_is_refused_where_it_is_built_not_where_it_is_hashed(bad):
     """
     with pytest.raises(PolicyError, match="sensitivity"):
         ToolContract(name="t", args=Schema({}), sensitivity=bad)
+
+
+def test_no_single_invisible_character_hides_a_canary():
+    """For *any* Unicode format character, not the five that were listed.
+
+    A canary escaped once through a zero-width space, and the fix was a set holding that
+    character and four of its neighbours. All five are Unicode category `Cf`, and so are
+    the hundred and sixty-five the set did not name: U+00AD SOFT HYPHEN, the bidi
+    overrides U+202A–U+202E, and the tag block U+E0020–U+E007F, which mirrors ASCII
+    invisibly and is the standard way an instruction is smuggled past a human reading the
+    text. Every one of them renders as nothing and defeats verbatim matching.
+
+    An enumeration was the wrong shape for a rule, which is why this asks the rule.
+    """
+    import unicodedata
+
+    from histos.decide.canary import find, find_normalized
+
+    token = "CANARY-7f3a-DO-NOT-LEAK"
+    tokens = frozenset({token})
+    missed = [
+        f"U+{cp:04X} {unicodedata.name(chr(cp), '?')}"
+        for cp in range(0x110000)
+        if unicodedata.category(chr(cp)) == "Cf"
+        and not (
+            find(token[:6] + chr(cp) + token[6:], tokens) or find_normalized(token[:6] + chr(cp) + token[6:], tokens)
+        )
+    ]
+    assert not missed, f"{len(missed)} invisible characters hide a canary, e.g. {missed[:4]}"
+
+
+def test_the_invisible_character_table_still_covers_what_python_knows():
+    """The enumeration cannot rot in silence.
+
+    The table is written out rather than computed, because scanning 0x110000 codepoints
+    at import costs about a third of a second and this library's import time is itself a
+    test. That trade is only safe while something checks it, so this is that something:
+    if a future Unicode release adds a format character, this fails and names it.
+    """
+    import unicodedata
+
+    from histos.decide.canary import _STRIP_TABLE
+
+    unknown = [
+        f"U+{cp:04X} {unicodedata.name(chr(cp), '?')}"
+        for cp in range(0x110000)
+        if unicodedata.category(chr(cp)) == "Cf" and cp not in _STRIP_TABLE
+    ]
+    assert not unknown, f"Unicode {unicodedata.unidata_version} knows format characters the table does not: {unknown}"
