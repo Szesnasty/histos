@@ -65,6 +65,7 @@ from histos.decide.engine import _MAX_OUTPUT_SCAN_CHARS as _DEFAULT_OUTPUT_BUDGE
 from histos.decide.engine import Engine, EscalationTier, ResourceResolver
 from histos.decide.limits import LimitStore
 from histos.errors import PolicyError
+from histos.mediate import callctx
 from histos.mediate import coverage as _coverage
 from histos.mediate import wrappers as _wrappers
 from histos.mediate.binding import apply_bindings
@@ -294,7 +295,9 @@ class Gate:
         Closing the check→consume race matters: two concurrent callers must not both
         pass a ``budget=1``.
         """
-        contract = self.engine.policy.contract_for(tool_name)
+        # The call's ruleset, not the Gate's current one: a swap between PRE and the
+        # point of execution otherwise consumed against limits the call never saw.
+        contract = callctx.engine_for(self).policy.contract_for(tool_name)
         raced = self.limits.try_consume(
             active.identity,
             tool_name,

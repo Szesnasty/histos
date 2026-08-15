@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from histos.mediate import callctx
 from histos.policy.contracts import Effect, GateDecision, Principal
 from histos.policy.frozen import _snapshot_value
 
@@ -44,7 +45,9 @@ def apply_bindings(
 
     The value itself never reaches the record. Only the field name does.
     """
-    contract = gate.engine.policy.contract_for(tool_name)
+    # The ruleset this call started under, not whatever the Gate holds now: bindings
+    # otherwise ran under a policy swapped in after PRE had decided under another.
+    contract = callctx.engine_for(gate).policy.contract_for(tool_name)
     if contract is None or not contract.bindings:
         return None
     # A caller that supplies `overrides` is asking for the rewrites rather than for
