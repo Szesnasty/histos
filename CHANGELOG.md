@@ -8,6 +8,97 @@ between minor versions — every such change is listed here.
 
 ## [Unreleased]
 
+### Fixed — the sixth adversarial pass
+
+The fifth pass rewrote about 430 lines of the engine. This pass attacked those
+lines, and then attacked its own. Eight of the thirteen findings were two shapes
+wearing different clothes — two passes over one value where only one carried a
+guard, and a key or an enumeration doing a job one thing cannot do — so those two
+shapes are now asked as properties over the whole surface on every run rather
+than looked for by hand.
+
+- **A canary on a leaf's attribute reached the caller in the *default*
+  configuration**, with `effect=allow` and an empty `redactions`. The projector
+  must not enter a leaf — reading `class Money(str)`'s attributes shreds
+  `Money("12.30")` into `{"currency": "EUR"}` — and the scanners inherited that
+  refusal although their job is the reverse. The sixth distinct shape a canary
+  has escaped in; an inherited `__slots__` was a seventh, found in the fix for
+  the sixth an hour later.
+- **`deny_secret_args` was bypassed by one invisible character.** It is on by
+  default and refuses a card number, an IBAN or a decodable JWT in an argument.
+  One U+00AD SOFT HYPHEN split every pattern, and all 170 Unicode format
+  characters walked a PAN into the tool. The detectors now read the text twice,
+  and only when something invisible is actually in it.
+- **The canary scan stripped five invisible characters where the rule covers
+  170**, including the tag block `U+E0020`–`U+E007F` that mirrors ASCII
+  invisibly. A test regenerates the table from the running Python and fails,
+  naming the character, if a Unicode release adds one.
+- **Two policies that enforce differently shared one `content_hash`** — the hash
+  an approval binds to, the lockfile pins and drift detection compares.
+  `multiple_of` ran exact modulo only when both sides were `int`; the other path
+  is `isclose(rel_tol=1e-9)`, a window about a billion wide at 1e18.
+- **A cyclic or very deep argument reached the caller as a `RecursionError` with
+  nothing written to the trail** — no execution, but no decision and no record
+  either, which is an absence rather than a denial. `canonical_json` refuses a
+  cycle and refuses nesting past 200, and the audit digest's fallback no longer
+  walks the structure the serializer just refused.
+- **An identity stayed bound after every scope holding it had closed.** `with` is
+  LIFO and cannot cause it; a middleware entering on request-start and exiting on
+  response-end can, with two overlapping requests in one context.
+- **A legal JSON Schema took its whole tool down.** `{"minimum": 1, "maximum":
+  100}` with no `type` is ordinary and is what many MCP servers emit; a guard
+  against dead bounds turned it into a `PolicyError`. Bounds are dispatched on
+  the value now, exactly as the string bounds beside them always were.
+- **A form body naming fields more than four `$ref` levels down was dropped in
+  silence**, which is the failure that walk exists to prevent.
+- **`sensitivity`, `rate_limit`, `budget` and `confirmation_expires_in` are
+  checked where the contract is written**, not where it is hashed or called.
+  `budget: "many"` used to build fine and answer `internal_error` to every call
+  for the life of the process.
+- **`SECURITY.md` described a weaker library than the one that ships.** Two
+  passages said a canary in a dataclass field, a NamedTuple, an instance
+  `__dict__` or an attribute on a `str` subclass is not reached by the output
+  scan. All four are reached. Understating a control is still a document that is
+  wrong.
+
+### Changed — the sixth pass
+
+- **The lock's write key and its erasure memory are keyed apart.** They want
+  opposite things — the memory must survive `rm -rf logs && mkdir logs`, the lock
+  must collapse every spelling of one file — and one key could only ever satisfy
+  one of them, which it did, alternately. A macOS firmlink or a Linux bind mount
+  gave one log two locks and interleaved appends into one hash chain.
+- **`gate.py` is three modules.** Wrapping a whole tool set (`protection.py`) and
+  injecting a trusted argument (`binding.py`) are separate jobs with separate
+  failure modes. Neither imports `Gate`; both take one.
+
+### Fixed — the fifth adversarial pass
+
+- **A projected record is always a mapping.** Handing one back unchanged when
+  nothing had to be dropped let it sail past the canary scan and the secret
+  detectors with `redactions: []`.
+- **`rm -rf logs && mkdir logs` voided the erasure memory**, because the key was
+  the parent directory's inode and a recreated directory is a new one.
+- **The ReDoS split budget is spent by the pattern, not by each run of it.**
+  Eight independent quadratic runs over disjoint alphabets were eight separate
+  scores, all under the bound, while the engine's real work is their product.
+- **A leaf is a leaf even when it carries attributes**, so projection no longer
+  replaces `Money("12.30")` with its decoration.
+- **`strict=True` on an audit sink means exactly `True`.** A `__getattr__`
+  wrapper or a bare `Mock` answered truthy to every name, so "evidence outranks
+  availability" was an opt-in nobody had to write.
+- Plus every P1, P2 and P3 that pass found: the exception-chain walk descending
+  into suppressed contexts, `InMemoryAuditSink.failed`, `$ref` siblings,
+  `+json` media types, and the composed form body.
+
+### Changed — the fifth pass
+
+- **The package is eight subpackages** — `policy`, `decide`, `mediate`, `trail`,
+  `importers`, `provenance`, `format`, `redos` — from 46 flat modules. Every
+  public name keeps its import path.
+- **A characterisation snapshot** of 6 804 decisions is checked into the suite as
+  the tripwire every refactor since has had to leave unmoved.
+
 ### Fixed — the fourth adversarial pass
 
 The third pass rewrote about 1300 lines. This pass attacked those lines
@@ -109,13 +200,20 @@ a compatibility break for anyone, because nothing is on PyPI yet.
 - **A `Principal` attribute holding a cycle no longer raises**, and the snapshot
   keeps `defaultdict`, `Counter`, `OrderedDict` and namedtuples as themselves.
 
-## [0.1.0] - 2026-08-12
+### Changed — the first adversarial pass, before anything is published
 
-### Changed — behaviour, before anything is published
+This block carried a `## [0.1.0] - 2026-08-12` heading, and that release never
+happened. The heading was written to satisfy a packaging gate that required a
+dated entry for the version being built — evidence of a release demanded as the
+precondition for making one — so the only way to pass it was to write the
+evidence first. Three days later the file described a published artifact,
+twenty-one README links pointed at a tag that did not exist, and two adversarial
+passes were missing entirely. The gate asks the other way round now: a dated
+entry must have a tag behind it.
 
-An adversarial pre-release review found these, and each is a change of behaviour
-rather than a bug fix. None of it is a compatibility break for anyone, because
-nothing is on PyPI yet — which is exactly why they land now rather than in 0.2.
+Each item here is a change of behaviour rather than a bug fix. None of it is a
+compatibility break for anyone, because nothing is on PyPI — which is exactly why
+they land now rather than in 0.2.
 
 - **`contract_sha256` and `schema_sha256` move.** `nullable`, `item_enum`,
   `min_items`, `max_items` and `unique_items` are all now part of the hashed argument

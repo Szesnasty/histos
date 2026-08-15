@@ -56,7 +56,7 @@ does, and it holds whether or not anyone noticed the attack.
 
 ## Run it both ways and see for yourself
 
-[`demo/`](https://github.com/Szesnasty/histos/tree/v0.1.0/demo) has five of them — a LangChain clinic receptionist, a LangGraph
+[`demo/`](https://github.com/Szesnasty/histos/tree/main/demo) has five of them — a LangChain clinic receptionist, a LangGraph
 invoice workflow, a **framework-free** on-call triage loop, a real **MCP** server that
 changes under you, and a mediation harness with no model at all. Each agent runs
 **twice**: once as first written, once behind a policy. Same model, same prompt, same
@@ -102,7 +102,7 @@ for an SMS and the poisoned note is a polite service request: there is nothing t
 clever about. So a deterministic bound is worth least against attacks a frontier model
 would have caught anyway, and most against the ones that never look wrong — and nobody
 gets to know in advance which kind arrives next. The protected column is 0 under both
-models. Full per-demo numbers: [`demo/README.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/demo/README.md).
+models. Full per-demo numbers: [`demo/README.md`](https://github.com/Szesnasty/histos/blob/main/demo/README.md).
 
 The headline number survived making the baseline fair, but almost none of the *rows*
 did. Cross-patient reads and the mass cancellation are closed by ordinary session
@@ -136,7 +136,7 @@ Two of the five need no model at all and finish in about a second —
 and one that cannot be closed in CPython, and prints both)
 and `demo/04-mcp-rug-pull` (a vendor changes a tool after you approved it). Full
 write-ups, including the mistakes that cost the most to find, are in
-[`demo/README.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/demo/README.md).
+[`demo/README.md`](https://github.com/Szesnasty/histos/blob/main/demo/README.md).
 
 ## Detection is a different question
 
@@ -171,7 +171,7 @@ it. Adding meaning never weakens the gate, and not having it never opens one.
 - **Rate & budget limits** — per `principal.identity`, per tool. Identity is the
   partition key and nothing else is, so two callers sharing an identity share an
   allowance, and callers with no identity set share one `<anonymous>` bucket —
-  see [`docs/identity.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/identity.md).
+  see [`docs/identity.md`](https://github.com/Szesnasty/histos/blob/main/docs/identity.md).
   The counters are per process; four workers hold four sets of them.
 - **Canary tokens** — a planted secret is caught if an agent tries to send it
   (pre-gate) or a tool leaks it (post-gate), whether it appears verbatim or after a
@@ -230,7 +230,7 @@ with use_principal(Principal(role="viewer")):
     safe_delete(user_id=42)          # raises GateDenied  [rbac]
 ```
 
-Or keep the policy in a file — see [`examples/security.policy.yaml`](https://github.com/Szesnasty/histos/blob/v0.1.0/examples/security.policy.yaml)
+Or keep the policy in a file — see [`examples/security.policy.yaml`](https://github.com/Szesnasty/histos/blob/main/examples/security.policy.yaml)
 for a fully commented one:
 
 ```python
@@ -294,10 +294,10 @@ replacement for authorization in your backend.** If a tool calls a downstream
 system with an admin token, the gate becomes your only line of defense — run
 downstream calls with least privilege and in the user's context anyway.
 
-Where the guarantee stops is written down in full: [`SECURITY.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/SECURITY.md) is
+Where the guarantee stops is written down in full: [`SECURITY.md`](https://github.com/Szesnasty/histos/blob/main/SECURITY.md) is
 the most useful file in this repository. How to bind an identity the gate can trust —
 and the five ways to get it wrong that all compile and run — is
-[`docs/identity.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/identity.md).
+[`docs/identity.md`](https://github.com/Szesnasty/histos/blob/main/docs/identity.md).
 
 ## Modes
 
@@ -396,7 +396,7 @@ and calling it a false alarm is how people learn to ignore the signal.
 `--update` refreshes `args` and `returns` only. Roles, `resource`, `bind`,
 `confirmation`, `output` and limits are the half no schema can supply, and they are
 left exactly as written. Details and the rejected designs:
-[`docs/tool-contracts.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/tool-contracts.md).
+[`docs/tool-contracts.md`](https://github.com/Szesnasty/histos/blob/main/docs/tool-contracts.md).
 
 ## The policy is the product; this package is its reference implementation
 
@@ -404,14 +404,14 @@ The policy is a **portable artifact**, not a config file for this library. The s
 `security.policy.yaml` is meant to hold in Python today and in other runtimes later,
 so the contract is not the API — it is:
 
-- [`spec/`](https://github.com/Szesnasty/histos/tree/v0.1.0/spec) — the [policy format](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/policy-format-draft-0.1.md)
+- [`spec/`](https://github.com/Szesnasty/histos/tree/main/spec) — the [policy format](https://github.com/Szesnasty/histos/blob/main/docs/policy-format-draft-0.1.md)
   (`schema_version: histos.policy/0.1`), the decision vocabulary, canonicalization.
-- [`conformance/`](https://github.com/Szesnasty/histos/tree/v0.1.0/conformance) — language-neutral fixtures defining what *"the same
-  policy behaves the same way"* means, with [`manifest.json`](https://github.com/Szesnasty/histos/blob/v0.1.0/conformance/manifest.json)
+- [`conformance/`](https://github.com/Szesnasty/histos/tree/main/conformance) — language-neutral fixtures defining what *"the same
+  policy behaves the same way"* means, with [`manifest.json`](https://github.com/Szesnasty/histos/blob/main/conformance/manifest.json)
   pinning the case list and what *passing* is allowed to mean. The reference engine runs
   them in its own test suite, so a Python change that breaks the contract fails here and
   now rather than in a future port, much later.
-- [`policies/`](https://github.com/Szesnasty/histos/tree/v0.1.0/policies) — seven worked policies, from one tool to a whole MCP server,
+- [`policies/`](https://github.com/Szesnasty/histos/tree/main/policies) — seven worked policies, from one tool to a whole MCP server,
   each in **YAML and JSON**, each hashing identically across both spellings. Read these
   to learn the format; read the spec to implement it.
 
@@ -435,7 +435,7 @@ implementation detail, and why conformance has a level that covers it.
 
 **Only the first two exist.** The rest are named so the shape is legible, not to
 suggest they ship — the order, and the adoption gate that governs it, are in
-[`docs/roadmap.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/roadmap.md). Nothing past the gate starts until 5–10 external
+[`docs/roadmap.md`](https://github.com/Szesnasty/histos/blob/main/docs/roadmap.md). Nothing past the gate starts until 5–10 external
 teams protect a real agent and are still running it weeks later.
 
 ## Open core, with the line written down
@@ -446,23 +446,23 @@ teams protect a real agent and are still running it weeks later.
 Every deterministic check is Apache-2.0, permanently — including distributed
 enforcement. There is no paid tier that makes a single deployment safer. The exact
 line, why it runs there, and how to decide for a capability that does not exist yet:
-[`docs/open-core-boundary.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/open-core-boundary.md). It is a commitment, not a
+[`docs/open-core-boundary.md`](https://github.com/Szesnasty/histos/blob/main/docs/open-core-boundary.md). It is a commitment, not a
 marketing page — if a release contradicts it, that is a bug in the release.
 
 ## Docs
 
 | | |
 |---|---|
-| [`SECURITY.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/SECURITY.md) | the guarantee, and exactly where it stops |
-| [`docs/identity.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/identity.md) | binding a trusted `Principal`, and the five ways it fails |
-| [`docs/design.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/design.md) | what it decides, and what the guarantee rests on |
-| [`policies/`](https://github.com/Szesnasty/histos/tree/v0.1.0/policies) | seven worked policies, YAML and JSON, with the format explained |
-| [`docs/policy-reference.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/policy-reference.md) | every key, what it does, what it defaults to |
-| [`docs/policy-format-draft-0.1.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/policy-format-draft-0.1.md) | the format, and the six decisions behind it |
-| [`docs/tool-contracts.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/tool-contracts.md) | where tool shapes come from, and how drift is caught |
-| [`conformance/manifest.json`](https://github.com/Szesnasty/histos/blob/v0.1.0/conformance/manifest.json) | the case list, and what "passes the corpus" may mean |
-| [`docs/open-core-boundary.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/open-core-boundary.md) | the open/closed line |
-| [`docs/roadmap.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/docs/roadmap.md) | order, not schedule — and the adoption gate |
-| [`CONTRIBUTING.md`](https://github.com/Szesnasty/histos/blob/v0.1.0/CONTRIBUTING.md) | the bar for a change to a security library |
+| [`SECURITY.md`](https://github.com/Szesnasty/histos/blob/main/SECURITY.md) | the guarantee, and exactly where it stops |
+| [`docs/identity.md`](https://github.com/Szesnasty/histos/blob/main/docs/identity.md) | binding a trusted `Principal`, and the five ways it fails |
+| [`docs/design.md`](https://github.com/Szesnasty/histos/blob/main/docs/design.md) | what it decides, and what the guarantee rests on |
+| [`policies/`](https://github.com/Szesnasty/histos/tree/main/policies) | seven worked policies, YAML and JSON, with the format explained |
+| [`docs/policy-reference.md`](https://github.com/Szesnasty/histos/blob/main/docs/policy-reference.md) | every key, what it does, what it defaults to |
+| [`docs/policy-format-draft-0.1.md`](https://github.com/Szesnasty/histos/blob/main/docs/policy-format-draft-0.1.md) | the format, and the six decisions behind it |
+| [`docs/tool-contracts.md`](https://github.com/Szesnasty/histos/blob/main/docs/tool-contracts.md) | where tool shapes come from, and how drift is caught |
+| [`conformance/manifest.json`](https://github.com/Szesnasty/histos/blob/main/conformance/manifest.json) | the case list, and what "passes the corpus" may mean |
+| [`docs/open-core-boundary.md`](https://github.com/Szesnasty/histos/blob/main/docs/open-core-boundary.md) | the open/closed line |
+| [`docs/roadmap.md`](https://github.com/Szesnasty/histos/blob/main/docs/roadmap.md) | order, not schedule — and the adoption gate |
+| [`CONTRIBUTING.md`](https://github.com/Szesnasty/histos/blob/main/CONTRIBUTING.md) | the bar for a change to a security library |
 
 Requires Python ≥3.12. Apache-2.0.

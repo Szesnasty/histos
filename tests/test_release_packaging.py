@@ -171,19 +171,66 @@ def test_sdist_carries_no_earlier_builds_egg_info(sdist: BuiltSdist):
     assert not stale, f"the sdist carries a previous build's metadata: {stale}"
 
 
-def test_changelog_has_released_the_version_being_built():
+def test_the_changelog_never_claims_a_release_that_did_not_happen():
+    """A dated heading says "this version shipped". Nothing may say that before it did.
+
+    This test used to require a dated heading matching `__version__`, and that is how
+    `## [0.1.0] - 2026-08-12` came to describe a release that never happened: the gate
+    demanded evidence of a release as the precondition for making one, so the only way
+    to satisfy it was to write the evidence first. Three days later the changelog
+    described a published artifact, twenty-one README links pointed at a tag that did
+    not exist, and two adversarial passes were missing from the file whose whole job is
+    saying what changed.
+
+    So it asks the other way round now. A dated entry must have a tag behind it, and the
+    version being built must be described *somewhere* — under its own heading once it
+    ships, under `[Unreleased]` until then. Both states are honest; the one in between
+    is not.
+    """
     changelog = CHANGELOG.read_text(encoding="utf-8")
     headings = re.findall(r"^## \[([^\]]+)\](.*)$", changelog, flags=re.M)
-    versioned = [(name, rest) for name, rest in headings if name != "Unreleased"]
-    assert versioned, "the changelog has no released version"
-    name, rest = versioned[0]
-    assert name == __version__, f"the top changelog entry is {name}, the build is {__version__}"
-    assert re.search(r"\d{4}-\d{2}-\d{2}", rest), f"the {name} heading carries no release date: {rest!r}"
-    assert "unreleased" not in rest.lower()
-    # The changelog is the advisory surface: it lists four fixed vulnerabilities, and
-    # while it said they were unreleased a reader had to guess whether the artifact
-    # they installed contained them.
-    assert "Not yet released to PyPI" not in changelog
+    assert headings, "the changelog has no version headings at all"
+
+    dated = [(name, rest) for name, rest in headings if name != "Unreleased"]
+    for name, rest in dated:
+        assert re.search(r"\d{4}-\d{2}-\d{2}", rest), f"the {name} heading carries no release date: {rest!r}"
+        assert "unreleased" not in rest.lower(), f"{name} is both dated and unreleased"
+
+    tagged = _git_tags()
+    if tagged is not None:
+        unbacked = [name for name, _ in dated if f"v{name}" not in tagged]
+        assert not unbacked, (
+            f"the changelog says {unbacked} shipped and there is no tag for it. "
+            "Either cut the tag or move the entry back under [Unreleased]."
+        )
+
+    described = any(name == __version__ for name, _ in dated) or _unreleased_body(changelog).strip()
+    assert described, f"the build is {__version__} and the changelog says nothing about it"
+
+
+def _git_tags() -> set[str] | None:
+    """The repository's tags, or None when there is no repository to ask (an sdist)."""
+    import subprocess
+
+    try:
+        done = subprocess.run(  # noqa: S603 — a fixed argv, no shell
+            ["git", "tag", "--list"],  # noqa: S607 — git is on PATH wherever this runs
+            capture_output=True,
+            text=True,
+            cwd=CHANGELOG.parent,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return set(done.stdout.split()) if done.returncode == 0 else None
+
+
+def _unreleased_body(changelog: str) -> str:
+    start = changelog.find("## [Unreleased]")
+    if start == -1:
+        return ""
+    end = changelog.find("\n## [", start + 1)
+    return changelog[start + len("## [Unreleased]") : end if end != -1 else len(changelog)]
 
 
 def test_release_workflow_publishes_without_a_long_lived_token():
@@ -197,3 +244,35 @@ def test_release_workflow_publishes_without_a_long_lived_token():
     # push a release nothing links back to a commit.
     assert "PYPI_API_TOKEN" not in workflow
     assert "password:" not in workflow
+
+
+def test_no_document_links_at_a_ref_that_does_not_exist():
+    """Every GitHub link must resolve, and the README is rendered once on PyPI.
+
+    Twenty-six of them pointed at `v0.1.0`, a tag nobody had cut — twenty-one under
+    `blob/` and five under `tree/`. Fixing the first spelling and missing the second is
+    the shape this project keeps finding in its own code, so it is asked here as a rule:
+    any ref that is not `main` must be a tag that exists, and every path behind such a
+    link must be a real file in the tree.
+    """
+    import re
+
+    root = CHANGELOG.parent
+    tags = _git_tags()
+    bad_refs: list[str] = []
+    missing_paths: list[str] = []
+    for document in sorted(root.rglob("*.md")):
+        if any(part in {".venv", "node_modules", ".git"} for part in document.parts):
+            continue
+        for ref, path in re.findall(
+            r"github\.com/Szesnasty/histos/(?:blob|tree|raw)/([A-Za-z0-9._-]+)/([A-Za-z0-9._/-]*)",
+            document.read_text(encoding="utf-8"),
+        ):
+            where = f"{document.relative_to(root)} -> {ref}/{path}"
+            if ref != "main" and tags is not None and ref not in tags:
+                bad_refs.append(where)
+            if path and not (root / path).exists():
+                missing_paths.append(where)
+
+    assert not bad_refs, f"links point at a ref that does not exist: {bad_refs}"
+    assert not missing_paths, f"links point at paths that are not in the tree: {missing_paths}"
