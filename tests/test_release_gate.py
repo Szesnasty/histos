@@ -25,7 +25,7 @@ from histos import (
     ToolContract,
     use_principal,
 )
-from histos.gate import _uninspectable_kind
+from histos.inspection import _uninspectable_kind
 
 CLERK = Principal(identity="u1", role="clerk")
 
