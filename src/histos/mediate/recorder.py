@@ -71,6 +71,11 @@ class DecisionRecorder:
         with self._lock:
             self._seq += 1
             decision_id = self._seq
+
+        # One read of the call's snapshot, bound before the record is built: as three
+        # separate reads inside the argument list it depended on evaluation order,
+        # and a walrus there is bound after the line above it needs it.
+        snapshot = callctx.current()
         record = AuditRecord(
             ts=time.time(),
             decision_id=decision_id,
@@ -88,15 +93,20 @@ class DecisionRecorder:
             expected=decision.expected,
             received=decision.received,
             redactions=list(decision.redactions),
-            enforced=self.enforced,
+            # From the call's snapshot, like the hash and the version above it. Read
+            # live, a mode changed mid-call inverted this field: a call blocked by
+            # enforce recorded `enforced=false`, and one that ran under observe
+            # recorded `enforced=true`. The execution was right both times; the row
+            # said the opposite of it, in the direction that reads as safe.
+            enforced=snapshot.enforce if snapshot else self.enforced,
             executed=executed,
             latency_us=int((time.perf_counter() - started) * 1_000_000),
             # Both halves from one snapshot. They came from two places — the hash from
             # the call, the version from this recorder's live field — so a swap mid-call
             # produced a record pairing one ruleset's hash with another's version, which
             # identifies no ruleset at all.
-            policy_hash=_snapshot.policy_hash if (_snapshot := callctx.current()) else self.policy_hash,
-            policy_version=_snapshot.policy_version if _snapshot else self.policy_version,
+            policy_hash=snapshot.policy_hash if snapshot else self.policy_hash,
+            policy_version=snapshot.policy_version if snapshot else self.policy_version,
             gate_version=__version__,
         )
         # The shipped sinks are total, and `AuditSink` is a Protocol, so a host's own

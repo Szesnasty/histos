@@ -315,8 +315,14 @@ class Gate:
         return GateDecision(Effect.DENY, raced, f"{raced} exceeded for {tool_name!r}{detail}")
 
     def _will_execute(self, decision: GateDecision) -> bool:
-        """Whether the tool body actually runs given this decision and the mode."""
-        return decision.effect is Effect.ALLOW or not self._enforce
+        """Whether the tool body actually runs given this decision and the mode.
+
+        The mode this *call* started under. Read off the Gate, this computed `executed`
+        from whatever the mode had become by record time, so a call blocked in enforce
+        was recorded as having run and one that ran in observe as having been stopped —
+        the row inverted while the execution stayed correct.
+        """
+        return decision.effect is Effect.ALLOW or not callctx.enforce_for(self)
 
     def _confirmed(self, decision: GateDecision, req: GateRequest, outcome: Any) -> GateDecision:
         """Turn a confirm callback's answer into a decision. Only ``True`` approves.
