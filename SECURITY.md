@@ -49,34 +49,21 @@ run, and leave you enforcing nothing.
 
 ## What holds (and on what condition)
 
-### Resource authorization: only `source="resource"` binds to the *resource*
-A constraint compares a **call argument** or a **resolved resource attribute**
-against `principal.attributes` (trusted) or a literal — never an argument against
-itself. The attacker supplies the argument but cannot change what the constraint
-*requires*; they can only make it fail. But **which** thing you compare is
-security-critical:
-
-- `Constraint("tenant_id","eq",principal_attr="tenant_id", source="resource")` makes
-  the `resource_resolver` look the **accessed** resource up in the datastore and
-  compares its *real* owner to the principal. This is genuine resource authorization.
-- `Constraint("tenant_id","eq",principal_attr="tenant_id")` (**`source="call"`**, the
-  default) only checks that the caller-supplied `tenant_id` argument equals the
-  principal's — **self-declaration, not ownership**. It protects nothing when the
-  resource is keyed by a *different* argument: for `read_invoice(invoice_id, tenant_id)`
-  a caller with tenant `acme` can pass `invoice_id=<an invoice owned by evilcorp>,
-  tenant_id="acme"` — RBAC, schema and the `tenant_id=="acme"` check all pass, the tool
-  keys on `invoice_id`, and it is a **cross-tenant read** (confused deputy / IDOR).
-  `review_policy()` flags high-risk tools (write, or high/critical sensitivity) that
-  rely on this `source="call"` form with no `source="resource"` constraint.
+### Resource authorization always binds to the resolved *resource*
+A `Constraint` compares an attribute of the resource returned by the trusted
+`resource_resolver` against `principal.attributes` or a policy literal. The old
+caller-argument form was removed from Policy Format 0.1 because it proved only
+self-declaration and made an IDOR/confused-deputy policy easy to write. For example,
+`Constraint.owns("tenant_id")` fetches the **accessed** record and compares its real
+owner with `principal.attributes["tenant_id"]`; there is no `source="call"` mode.
 
 **It is only real under two conditions — both the developer's responsibility, and
 the library cannot enforce either:**
 1. **Identity is bound out-of-band.** The host sets `Principal` (role *and*
    `attributes`) from workload identity or an authenticated session — **never**
    from a tool argument or model output. The gate is exactly as strong as this.
-2. **Resolvers fetch the real owner, not an argument.** For `source="resource"`
-   constraints, the `resource_resolver` must look the resource up in the
-   datastore and return its *actual* owner. A resolver that echoes an argument
+2. **Resolvers fetch the real owner, not an argument.** The `resource_resolver`
+   must look the resource up in the datastore and return its *actual* owner. A resolver that echoes an argument
    (`lambda t,a: {"tenant_id": a["tenant_id"]}`) re-creates the confused deputy.
 
 **Residual:** row-level authorization is enforced **only where a constraint was
@@ -382,7 +369,7 @@ protocol in [`docs/tech-debt.md`](docs/tech-debt.md) (D4); until then, route
 confirmation-required tools through a single worker or a single-process service.
 
 ### Resource-state TOCTOU (check-time vs execute-time)
-A `source="resource"` constraint reads the resource's state via the resolver **at
+A resource constraint reads the resource's state via the resolver **at
 check time**. Between that check and the tool actually executing, the resource can
 change (a record re-parented to another tenant, a permission revoked). The gate
 cannot close this window — it is not the system of record. **Responsibility

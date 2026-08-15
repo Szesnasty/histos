@@ -56,11 +56,11 @@ ResourceResolver = Callable[[str, dict[str, Any]], dict[str, Any] | Awaitable[di
 
 # The **semantic tier** a host wires behind a policy's ``escalate``: given the request,
 # say whether meaning-level judgement lets it continue. Sync or async, like the
-# resolver, because reaching one is usually a model call. A truthy return is the only
+# resolver, because reaching one is usually a model call. Exactly ``True`` is the only
 # outcome that continues the chain — and continuing is all it can do. There is no
 # verdict here that allows something the deterministic chain refused, which is the
 # property that keeps a probabilistic tier from ever widening a deterministic gate.
-EscalationTier = Callable[[GateRequest], Any]
+EscalationTier = Callable[[GateRequest], bool | Awaitable[bool]]
 
 # "the resource was not fetched yet" — distinct from a resolver that legitimately
 # returned an empty dict.
@@ -414,9 +414,20 @@ class Engine:
 
     @staticmethod
     def _read_verdict(req: GateRequest, verdict: Any) -> GateDecision | None:
-        """Truthy continues the chain; anything else refuses. Shared by both paths."""
-        if verdict:
+        """Exactly ``True`` continues; malformed host answers fail closed and loud."""
+        # This is the semantic-tier twin of confirmation. A queue client returning its
+        # Response object, a model SDK returning ``{"approved": false}``, or a tier
+        # returning the string ``"denied"`` are all truthy. Treating truthiness as
+        # approval silently releases the call in every one of those ordinary integration
+        # mistakes. Only the boolean True is consent; False is a real refusal, and every
+        # other value is a wiring error the operator needs named.
+        if verdict is True:
             return None
+        if verdict is not False:
+            return Engine._tier_error(
+                f"escalate callback for {req.tool_name!r} returned {type(verdict).__name__}, not a bool — "
+                "a semantic verdict must be exactly True or False"
+            )
         return GateDecision(
             Effect.DENY,
             "escalation_denied",

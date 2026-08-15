@@ -10,6 +10,33 @@ between minor versions — every such change is listed here.
 
 ### Fixed — final release audit
 
+- Semantic escalation now accepts exactly the boolean `True`. Truthy response
+  objects, dictionaries and strings such as `"denied"` can no longer release a call;
+  non-boolean verdicts become an `escalation_error` denial.
+- Rate-limit windows and injected clocks must be positive and finite, so NaN or a
+  negative configuration cannot silently turn a declared rate limit off.
+- Import, contract merge and lock generation now refuse duplicate tool names instead
+  of letting untrusted list order choose the reviewed definition and erase its sibling.
+- Audit sink and optional content-rule switches now validate exact booleans and usable
+  capacities/keys at construction time.
+- OpenAI provenance now hashes non-projected source fields (including `strict` and the
+  outer tool container), and MCP/OpenAI/OpenAPI importers distinguish malformed present
+  fields from absent ones. The changed normative source shape is corpus `0.6.0`.
+- Approval and rate-limit clocks now reject non-finite values and backwards movement;
+  OpenAPI server inheritance preserves an explicitly empty nearest-level declaration,
+  and policy review includes roles declared only as inheritance children.
+- Python policy constructors now validate their full object graph (schema entries,
+  contract names/types, bindings, constraints, role/grant maps and metadata) before a
+  malformed value can crash hashing or evaluation. Import and lock parsers likewise
+  turn hostile container types into controlled diagnostics.
+- Imported source snapshots, lock maps and reviewed lock evidence are detached from
+  caller-owned dictionaries after validation. A later edit can no longer rewrite the
+  human-readable baseline while leaving the already-computed hashes unchanged.
+- OpenAPI import now rejects malformed parameter objects, names, locations and
+  present-but-non-object schemas/content; it also validates path parameters and
+  request-body booleans instead of silently weakening their projection.
+- `SECURITY.md` now describes the shipped resource-only constraint language; the
+  removed `source="call"` API is no longer presented as a current default.
 - Policy blocks that are present but malformed (`null`, a list, a scalar, or a
   missing/non-boolean `required`) are now rejected instead of being collapsed to an
   empty block. All security switches are exact booleans in both bundle and Python APIs,

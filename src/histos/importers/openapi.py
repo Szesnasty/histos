@@ -194,6 +194,24 @@ def _declares_fields(spec: dict[str, Any], content: Any, name: str) -> bool:
     return False
 
 
+def _effective_servers(spec: dict[str, Any], item: dict[str, Any], op: dict[str, Any], name: str) -> list[Any] | None:
+    """Return the nearest declared server list, preserving explicit emptiness."""
+    for level, owner in (("operation", op), ("path item", item), ("document", spec)):
+        if "servers" not in owner:
+            continue
+        servers = owner["servers"]
+        if not isinstance(servers, list):
+            raise _malformed(f"the {level} `servers` of {name!r}", servers, "a list of server objects")
+        for index, server in enumerate(servers):
+            if not isinstance(server, dict):
+                raise _malformed(f"{level} server {index} of {name!r}", server, "an object")
+            url = server.get("url")
+            if not isinstance(url, str) or not url:
+                raise _malformed(f"the URL of {level} server {index} of {name!r}", url, "a non-empty string")
+        return servers
+    return None
+
+
 def _source_from_operation(
     spec: dict[str, Any],
     path: str,
@@ -228,8 +246,18 @@ def _source_from_operation(
         for index, raw_param in enumerate(raw_params):
             param = _deref(spec, raw_param, where=f"{source} parameter {index} of {name!r}")
             if not isinstance(param, dict):
-                continue
-            key = (str(param.get("name")), str(param.get("in")))
+                raise _malformed(f"{source} parameter {index} of {name!r}", param, "an object or local $ref")
+            pname = param.get("name")
+            location = param.get("in")
+            if not isinstance(pname, str) or not pname:
+                raise _malformed(f"the name of {source} parameter {index} of {name!r}", pname, "a non-empty string")
+            if not isinstance(location, str) or location not in {"query", "header", "path", "cookie"}:
+                raise _malformed(
+                    f"the `in` value of parameter {pname!r} of {name!r}",
+                    location,
+                    "one of 'query', 'header', 'path', or 'cookie'",
+                )
+            key = (pname, location)
             if key in merged:
                 ordered[ordered.index(merged[key])] = param
             else:
@@ -238,29 +266,52 @@ def _source_from_operation(
     for param in ordered:
         resolved_params.append(param)
         pname = param.get("name")
-        if not pname:
-            continue
-        schema = param.get("schema") if isinstance(param.get("schema"), dict) else None
-        if schema is None:
+        has_schema = "schema" in param
+        has_content = "content" in param
+        if has_schema and has_content:
+            raise _malformed(
+                f"parameter {pname!r} of {name!r}",
+                {key: param[key] for key in ("schema", "content") if key in param},
+                "an object containing at most one of `schema` or `content`",
+            )
+        if has_schema:
+            schema = param["schema"]
+            if not isinstance(schema, dict):
+                raise _malformed(f"the schema of parameter {pname!r} of {name!r}", schema, "a schema object")
+        elif has_content:
             # The `content` form: a parameter whose value is a serialised media type
             # rather than a plain scalar. `schema` is absent and the schema lives one
             # level down. It used to fall through to `{}` — an untyped `any` field
             # carrying none of the bounds the document wrote, which is the silent drop
             # this module refuses everywhere else.
-            content = param.get("content")
-            if isinstance(content, dict) and content:
-                schema = _json_schema_of(spec, content, where=f"parameter {pname!r} of {name!r}")
-                if schema is None:
-                    raise _malformed(
-                        f"parameter {pname!r} of {name!r}",
-                        sorted(map(str, content)),
-                        "a `content` block this projection can read (application/json)",
-                    )
-            else:
-                schema = {}
+            content = param["content"]
+            if not isinstance(content, dict) or not content:
+                raise _malformed(
+                    f"the content of parameter {pname!r} of {name!r}",
+                    content,
+                    "a non-empty mapping of media type to schema",
+                )
+            schema = _json_schema_of(spec, content, where=f"parameter {pname!r} of {name!r}")
+            if schema is None:
+                raise _malformed(
+                    f"parameter {pname!r} of {name!r}",
+                    sorted(map(str, content)),
+                    "a `content` block this projection can read (application/json)",
+                )
+        else:
+            # Kept for the importer's documented best-effort mode: a parameter with no
+            # shape is represented honestly as an untyped field. A *present* malformed
+            # schema/content is different — it reads as a bound and is refused above.
+            schema = {}
         required = param.get("required", False)
         if not isinstance(required, bool):
             raise _malformed(f"required on parameter {pname!r} of {name!r}", required, "a boolean")
+        if param.get("in") == "path" and required is not True:
+            raise _malformed(
+                f"required on path parameter {pname!r} of {name!r}",
+                required,
+                "true (OpenAPI path parameters are always required)",
+            )
         fields[pname] = field_from_json_schema(schema, required=required, root=spec, name=pname)
 
     body_schema = None
@@ -268,6 +319,11 @@ def _source_from_operation(
     if not isinstance(request_body, dict):
         raise _malformed(f"the requestBody of {name!r}", request_body, "an object or local $ref")
     if request_body:
+        body_required = request_body.get("required", False)
+        if not isinstance(body_required, bool):
+            raise _malformed(f"required on requestBody of {name!r}", body_required, "a boolean")
+        if "content" not in request_body:
+            raise _malformed(f"the requestBody of {name!r}", request_body, "an object containing `content`")
         content = request_body.get("content", {})
         body_schema = _json_schema_of(spec, content, where=f"requestBody of {name!r}")
         # The parameter path refuses an unsupported media type loudly, naming the
@@ -325,6 +381,10 @@ def _source_from_operation(
     # /patients/{id}` is a read, and nothing in the spec says whether reading
     # it matters.
     access = "read" if method == "get" else "write"
+    for source_field in ("description", "summary"):
+        value = op.get(source_field)
+        if source_field in op and value is not None and not isinstance(value, str):
+            raise _malformed(f"the {source_field} of {name!r}", value, "a string or null")
     description = op.get("description") or op.get("summary")
     return ToolSource(
         name=name,
@@ -345,7 +405,7 @@ def _source_from_operation(
             # diff than editing each operation, and it was the invisible one: the same
             # host repoint was caught at the operation level and passed drift at the
             # path-item level, exit 0.
-            "servers": op.get("servers") or (item or {}).get("servers") or spec.get("servers") or None,
+            "servers": _effective_servers(spec, item or {}, op, name),
             "parameters": resolved_params,
             "requestBody": body_schema,
             "responses": response_schema,
@@ -362,6 +422,8 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
     the operation as written. Hashing the raw operation would miss a
     ``#/components/schemas`` target changing underneath an unchanged ``$ref``.
     """
+    if not isinstance(spec, dict):
+        raise _malformed("the OpenAPI document", spec, "an object")
     operations: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = []
     paths = spec.get("paths")
     paths = {} if paths is None else paths
@@ -371,19 +433,28 @@ def sources_from_openapi(spec: dict[str, Any]) -> list[ToolSource]:
     if not isinstance(paths, dict):
         raise _malformed("the document's `paths`", paths, "a mapping of path to path item")
     for path, item in paths.items():
+        if not isinstance(path, str):
+            raise _malformed("a key in the document's `paths`", path, "a path string")
         if not isinstance(item, dict):
-            continue
+            raise _malformed(f"path item {path!r}", item, "an object")
         for method in _METHODS:
+            if method not in item:
+                continue
             op = item.get(method)
             if not isinstance(op, dict):
-                continue
-            name = op.get("operationId") or f"{method}_{path.strip('/').replace('/', '_') or 'root'}"
+                raise _malformed(f"operation {method.upper()} {path}", op, "an object")
+            # Missing operationId gets a deterministic fallback. Present-but-empty or
+            # malformed is different: it is a declared identity we cannot preserve and
+            # is refused per tool by ToolSource rather than silently renamed.
+            name = (
+                op["operationId"] if "operationId" in op else f"{method}_{path.strip('/').replace('/', '_') or 'root'}"
+            )
             operations.append((path, method, op, name, item))
 
     return project_tools(
         "openapi",
         operations,
-        lambda entry: entry[3],
+        lambda entry: str(entry[3] or "<unnamed>"),
         lambda entry: _source_from_operation(spec, *entry),
     )
 

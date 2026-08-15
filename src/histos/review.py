@@ -186,7 +186,8 @@ def review_policy(policy: Policy, *, discovered: Iterable[str] = ()) -> PolicyRe
     """
     reachable: set[str] = set()
     callable_by: dict[str, list[str]] = {name: [] for name in policy.tools}
-    for role in policy.permissions:
+    roles = set(policy.permissions) | set(policy.role_inherits)
+    for role in sorted(roles):
         for tool_name in policy.allowed_tools(role):
             reachable.add(tool_name)
             callable_by.setdefault(tool_name, []).append(role)
@@ -257,7 +258,7 @@ def review_policy(policy: Policy, *, discovered: Iterable[str] = ()) -> PolicyRe
 
     return PolicyReview(
         tools_discovered=len(policy.tools) + len(undeclared),
-        roles_discovered=len(policy.permissions),
+        roles_discovered=len(roles),
         destructive=sorted(name for name, t in policy.tools.items() if t.access == "write"),
         unreachable=sorted(name for name in policy.tools if name not in reachable),
         missing_arg_schema=sorted(name for name, t in policy.tools.items() if t.args is None),

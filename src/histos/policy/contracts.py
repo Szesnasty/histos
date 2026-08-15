@@ -43,14 +43,6 @@ from histos.policy.schema import Schema
 
 _UNSET: Any = object()
 
-# The value types a Policy Format 0.1 document can actually carry, plus the Python
-# spellings of them that canonicalize deterministically (a tuple is a list; a set is
-# how anyone writes an `in` membership test in code). Anything else — a Decimal, a
-# datetime, an arbitrary object — used to reach `content_hash` and be flattened by
-# `default=str`, which both collided distinct policies and, for a set, captured
-# PYTHONHASHSEED-dependent iteration order in a hash that approvals bind to.
-_JSON_SCALARS = (str, int, float, bool, type(None))
-
 SCHEMA_VERSION = "histos.policy/0.1"
 
 
@@ -109,11 +101,33 @@ class ToolContract:
     on_output_violation: str = "redact_all"  # "redact_all" | "deny" | "allow"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise PolicyError(f"a tool contract name must be a non-empty string, got {self.name!r}")
+        for name in ("args", "returns"):
+            declared = getattr(self, name)
+            if declared is not None and not isinstance(declared, Schema):
+                raise PolicyError(
+                    f"tool {self.name!r}: {name} must be a Schema or None, got {type(declared).__name__}",
+                    code="invalid_contract",
+                )
         # `rules.clear()` took row-level authorization off a running gate; see
         # `detach_sequence`. Detached before the checks below, so a value that arrives
         # as a list is validated in the form it will be enforced in.
         for name in ("constraints", "bindings"):
-            object.__setattr__(self, name, detach_frozen_sequence(getattr(self, name)))
+            declared = getattr(self, name)
+            if not isinstance(declared, list | tuple):
+                raise PolicyError(
+                    f"tool {self.name!r}: {name} must be a list or tuple, got {type(declared).__name__}",
+                    code="invalid_contract",
+                )
+            expected = Constraint if name == "constraints" else Binding
+            if any(not isinstance(item, expected) for item in declared):
+                bad = next(item for item in declared if not isinstance(item, expected))
+                raise PolicyError(
+                    f"tool {self.name!r}: {name} entries must be {expected.__name__} values, got {type(bad).__name__}",
+                    code="invalid_contract",
+                )
+            object.__setattr__(self, name, detach_frozen_sequence(declared))
         for name in (
             "requires_confirmation",
             "requires_escalation",
@@ -240,11 +254,51 @@ class Policy:
         The file-format path has guarded exactly this typo all along (`bundle._canaries`);
         this is the Python path agreeing with it, minimum length included.
         """
+        for name in ("tools", "permissions", "role_inherits"):
+            declared = getattr(self, name)
+            if not isinstance(declared, Mapping):
+                raise PolicyError(f"policy {name} must be a mapping, got {type(declared).__name__}")
+
+        for name, contract in self.tools.items():
+            if not isinstance(name, str) or not name:
+                raise PolicyError(f"a policy tool name must be a non-empty string, got {name!r}")
+            if not isinstance(contract, ToolContract):
+                raise PolicyError(f"policy tool {name!r} must be a ToolContract, got {type(contract).__name__}")
+            if contract.name != name:
+                raise PolicyError(
+                    f"policy tool key {name!r} disagrees with its contract name {contract.name!r}; "
+                    "the key is the enforced identity and both must match"
+                )
+
+        for role, parent in self.role_inherits.items():
+            if not isinstance(role, str) or not role:
+                raise PolicyError(f"a role name must be a non-empty string, got {role!r}")
+            if not isinstance(parent, str) or not parent:
+                raise PolicyError(f"parent role for {role!r} must be a non-empty string, got {parent!r}")
+
+        for name in ("policy_id", "created_at"):
+            declared = getattr(self, name)
+            if declared is not None and not isinstance(declared, str):
+                raise PolicyError(f"{name} must be a string or None, got {type(declared).__name__}")
+        if not isinstance(self.policy_version, str):
+            raise PolicyError(f"policy_version must be a string, got {type(self.policy_version).__name__}")
+        if self.schema_version != SCHEMA_VERSION:
+            raise PolicyError(
+                f"policy schema_version {self.schema_version!r} is not supported by this engine "
+                f"(supports: {SCHEMA_VERSION!r})"
+            )
+
         canaries = self.canaries
         if isinstance(canaries, str):
             canaries = frozenset({canaries})
         elif not isinstance(canaries, frozenset):
-            canaries = frozenset(canaries)
+            try:
+                canaries = frozenset(canaries)
+            except TypeError as exc:
+                raise PolicyError(
+                    f"canaries must be a string token or a collection of string tokens, got "
+                    f"{type(self.canaries).__name__}"
+                ) from exc
         for token in canaries:
             if not isinstance(token, str):
                 raise PolicyError(f"canary {token!r} is a {type(token).__name__}; canaries are string tokens")
@@ -268,19 +322,27 @@ class Policy:
         coerced: dict[str, frozenset[str]] = {}
         changed = False
         for role, grant in self.permissions.items():
+            if not isinstance(role, str) or not role:
+                raise PolicyError(f"a role name must be a non-empty string, got {role!r}")
             if isinstance(grant, frozenset):
                 coerced[role] = grant
-                continue
-            changed = True
-            if isinstance(grant, str):
-                coerced[role] = frozenset({grant})
-                continue
-            try:
-                coerced[role] = frozenset(grant)
-            except TypeError as exc:
-                raise PolicyError(
-                    f"permissions[{role!r}] is a {type(grant).__name__}; a grant is a tool name or a collection of them"
-                ) from exc
+            else:
+                changed = True
+                if isinstance(grant, str):
+                    coerced[role] = frozenset({grant})
+                else:
+                    try:
+                        coerced[role] = frozenset(grant)
+                    except TypeError as exc:
+                        raise PolicyError(
+                            f"permissions[{role!r}] is a {type(grant).__name__}; "
+                            "a grant is a tool name or a collection of them"
+                        ) from exc
+            for tool_name in coerced[role]:
+                if not isinstance(tool_name, str) or not tool_name:
+                    raise PolicyError(
+                        f"permissions[{role!r}] contains {tool_name!r}; grants must be non-empty tool names"
+                    )
         if changed:
             object.__setattr__(self, "permissions", coerced)
         # Last, after every coercion above, because each of them rebuilds a map and a
@@ -376,9 +438,6 @@ class Policy:
         for role, parent in self.role_inherits.items():
             if parent not in self.permissions and parent not in self.role_inherits:
                 issues.append(f"role {role!r} inherits from unknown role {parent!r}")
-        reachable: set[str] = set()
-        for role in self.permissions:
-            reachable |= self.allowed_tools(role)
         for name, tool in self.tools.items():
             if tool.args is None:
                 issues.append(f"tool {name!r} has no arg schema — cannot validate arguments")
@@ -449,7 +508,8 @@ _REMEDY: dict[str, str] = {
     "pass Gate(escalate=...), or drop `escalate` from the policy; the gate will not "
     "let an unjudged call through",
     "escalation_denied": "the semantic tier refused this call",
-    "escalation_error": "the escalate callback raised, or is async while the tool is sync",
+    "escalation_error": "the escalate callback raised, returned a non-boolean verdict, or is async while the "
+    "tool is sync",
     "output_schema": "the tool output did not match its declared return schema",
     "confirm_suspended": "resume the run and retry once the approval is granted; nothing was decided",
     "unnameable_args": "call the tool with keyword arguments — a policy names its fields, so the gate "

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from histos.errors import PolicyError
+from histos.policy.canonical import canonical_json
 from histos.policy.frozen import Principal, _snapshot_value
 
 _UNSET: Any = object()
@@ -45,28 +46,39 @@ _OPS: dict[str, Callable[[Any, Any], bool]] = {
 }
 
 
-def _reject_unhashable_value(value: Any, where: str) -> None:
-    """Refuse a constraint literal the engine cannot hash reproducibly.
+def _portable_value(value: Any, where: str) -> Any:
+    """Return the JSON spelling a constraint hashes, dumps and enforces as.
 
     A policy whose ``content_hash`` is not reproducible is worse than one that fails
     to load: pinning, approval binding and drift detection all keep reporting green
     while comparing two different rulesets. So the refusal happens here, at the point
     the policy is built, rather than silently at hash time.
     """
+    try:
+        canonical_json(value, numbers_as_text=True)
+    except (TypeError, ValueError) as exc:
+        raise PolicyError(f"{where}: value cannot be hashed reproducibly: {exc}") from exc
+
     if isinstance(value, _JSON_SCALARS):
-        return
-    if isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            _reject_unhashable_value(item, where)
-        return
+        return value
+    if isinstance(value, list | tuple):
+        # The format and the published hash have one array type. Keeping a tuple here
+        # made it enforce differently from a list while both shared one content_hash.
+        return [_portable_value(item, where) for item in value]
+    if isinstance(value, set | frozenset):
+        # A set is the natural Python RHS of an `in` constraint, but the document has no
+        # set type. Canonical order gives it the same portable list in every process.
+        items = [_portable_value(item, where) for item in value]
+        return sorted(items, key=lambda item: canonical_json(item, numbers_as_text=True))
     if isinstance(value, dict):
+        out: dict[str, Any] = {}
         for key, item in value.items():
-            _reject_unhashable_value(key, where)
-            _reject_unhashable_value(item, where)
-        return
+            if not isinstance(key, str):
+                raise PolicyError(f"{where}: object key {key!r} is not a string and cannot be written to JSON")
+            out[key] = _portable_value(item, where)
+        return out
     raise PolicyError(
-        f"{where}: value of type {type(value).__name__!r} cannot be hashed reproducibly; "
-        "a constraint literal must be a JSON value (string, number, boolean, null, array, object)"
+        f"{where}: value of type {type(value).__name__!r} cannot be written as a policy literal; expected a JSON value"
     )
 
 
@@ -134,19 +146,23 @@ class Constraint:
     principal_attr: str | None = None
 
     def __post_init__(self) -> None:
-        if self.op not in _OPS:
+        if not isinstance(self.field, str) or not self.field:
+            raise PolicyError(f"constraint field must be a non-empty string, got {self.field!r}")
+        if not isinstance(self.op, str) or self.op not in _OPS:
             raise PolicyError(f"unknown constraint op {self.op!r}; allowed: {sorted(_OPS)}")
+        if self.principal_attr is not None and (not isinstance(self.principal_attr, str) or not self.principal_attr):
+            raise PolicyError(f"constraint principal_attr must be a non-empty string, got {self.principal_attr!r}")
         has_value = self.value is not _UNSET
         has_attr = self.principal_attr is not None
         if has_value == has_attr:
             raise PolicyError("constraint needs exactly one of value= or principal_attr=")
         if has_value:
-            _reject_unhashable_value(self.value, f"constraint {self.field!r} {self.op}")
+            portable = _portable_value(self.value, f"constraint {self.field!r} {self.op}")
             # A literal may be a list or a dict — `_reject_unhashable_value` allows both
             # — and the caller kept it. `literal.append("evil")` widened an `in`
             # constraint on a gate that was already running. Detached after the check,
             # so what is validated is what is stored.
-            object.__setattr__(self, "value", _snapshot_value(self.value))
+            object.__setattr__(self, "value", _snapshot_value(portable))
 
     @classmethod
     def owns(cls, field: str, principal_attr: str | None = None) -> Constraint:
@@ -225,3 +241,9 @@ class Binding:
 
     field: str
     principal_attr: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.field, str) or not self.field:
+            raise PolicyError(f"binding field must be a non-empty string, got {self.field!r}")
+        if not isinstance(self.principal_attr, str) or not self.principal_attr:
+            raise PolicyError(f"binding principal_attr must be a non-empty string, got {self.principal_attr!r}")

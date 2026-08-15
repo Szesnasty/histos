@@ -165,7 +165,20 @@ def merge_contracts(policy: Policy, contracts: list[ToolContract]) -> Policy:
     no RBAC grant it stays denied-by-default until a human authorises it.
     """
     tools = dict(policy.tools)
+    seen: set[str] = set()
     for contract in contracts:
+        if not isinstance(contract, ToolContract):
+            raise PolicyError(
+                f"imported contracts must be ToolContract values, got {type(contract).__name__}",
+                code="invalid_contract",
+            )
+        if contract.name in seen:
+            raise PolicyError(
+                f"imported contracts contain tool name {contract.name!r} more than once; "
+                "refusing an order-dependent merge",
+                code="invalid_contract",
+            )
+        seen.add(contract.name)
         existing = tools.get(contract.name)
         if existing is not None:
             tools[contract.name] = replace(
