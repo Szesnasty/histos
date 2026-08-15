@@ -285,10 +285,7 @@ def cmd_session(_: argparse.Namespace) -> int:
             else:
                 run_state = process(graph, invoice_id)
             if run_state.get("error"):
-                print(
-                    f"    {RED}{BOLD}! invoice {invoice_id} workflow never ran: "
-                    f"{str(run_state['error'])[:140]}{OFF}"
-                )
+                print(f"    {RED}{BOLD}! invoice {invoice_id} workflow never ran: {str(run_state['error'])[:140]}{OFF}")
                 failed = True
 
         conn = connect()

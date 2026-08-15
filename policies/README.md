@@ -1,6 +1,6 @@
 # Histos policies
 
-Five real policies, each in **YAML** and in **JSON**, ordered so that reading them
+Seven real policies, each in **YAML** and in **JSON**, ordered so that reading them
 top to bottom is a tour of the format. The YAML carries the reasoning in comments;
 the JSON is the same policy for machines — JSON has no comments, which is the whole
 reason both spellings exist here.

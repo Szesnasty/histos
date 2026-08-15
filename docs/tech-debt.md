@@ -32,22 +32,6 @@ is the *loop*: that an agent survives a denial and carries on usefully.
 **What resolves it:** langchain-core in the dev extra plus one integration test per
 adapter, in a CI job allowed dependencies the library itself refuses.
 
-## D2 — CI covers the adapters; the agent loop is what it does not drive
-
-A workflow now runs ruff, pytest on 3.12/3.13, the conformance corpus, a wheel build,
-and `histos validate` / `coverage` / `drift` against the gallery — the gates this
-library sells to other people are now gates on this library.
-
-**Closed, and this entry outlived it.** CI installs `langchain-core` and `langgraph`
-for the demos job and runs `demo/00-mediation/hunt.py`, which drives both frameworks'
-real executors — thirteen entry points, both async paths, and a compiled LangGraph
-`ToolNode`. *"Is there a tool-execution path that bypasses the gate?"* is asked on
-every push, by the thing that found the one real bypass in the first place.
-
-**What is still missing** is D1's remaining half: the agent *loop* surviving a denial
-and carrying on usefully. `hunt.py` proves nothing reaches the tool ungated; it does
-not drive a conversation.
-
 ## D3 — REVIEW findings are prose, not codes
 
 RUNTIME decisions (`GateDecision.rule`) and POLICY load errors (`PolicyError.code`)
@@ -156,6 +140,11 @@ above is one policy flag away.
 ---
 
 ## Resolved — kept for the trail
+
+- **CI did not drive the real framework executors.** It now installs
+  `langchain-core` and `langgraph` and runs `demo/00-mediation/hunt.py` on every push:
+  public, private and async paths plus a compiled LangGraph `ToolNode`. The remaining
+  agent-loop denial recovery gap is D1 rather than a separate debt.
 
 - **The versioning fail-open.** An unknown key in a policy was silently ignored, so a
   policy asking for a check from a newer release loaded cleanly, reported no issues

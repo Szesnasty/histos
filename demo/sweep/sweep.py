@@ -289,9 +289,7 @@ def _useful(demo: str, block: dict) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("out", type=Path, help="JSONL result file (raw transcripts go beside it)")
     parser.add_argument(
         "--preflight",

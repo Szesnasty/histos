@@ -1,6 +1,6 @@
 # Where tool shapes come from, and how drift is caught
 
-**Status: shipped 2026-08-10.** `histos import` writes a lock, `histos drift` fails CI
+**Status: implemented in Histos 0.1.0.** `histos import` writes a lock, `histos drift` fails CI
 on a changed tool definition, and `histos import --update` refreshes the contract
 surface without touching the security semantics. The normative pieces are
 [`spec/tool-lock-0.1.schema.json`](../spec/tool-lock-0.1.schema.json) and
