@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from histos._version import __version__
-from histos.bundle import dump_bundle, load_policy
+from histos.bundle import load_policy
+from histos.bundledump import dump_bundle
 from histos.contracts import GateRequest, Policy, Principal
 from histos.display import safe_text
 from histos.errors import PolicyError

@@ -945,7 +945,7 @@ def test_an_argument_named_like_the_reserved_key_is_refused():
     """The `$` prefix moved the collision by one character rather than removing it:
     nothing reserves `$allow_extra` as a property name, and the flag is written into the
     same map as the fields."""
-    from histos.bundle import dump_bundle
+    from histos.bundledump import dump_bundle
 
     policy = Policy(
         tools={"t": ToolContract(name="t", args=Schema({"$allow_extra": Field(type="string")}))},
