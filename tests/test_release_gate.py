@@ -210,9 +210,18 @@ def test_an_ordinary_raising_tool_is_unchanged() -> None:
 
 
 def test_the_uninspectable_guard_is_wired_into_both_finishers() -> None:
-    """It was written, never called, and nothing noticed for a whole release cycle."""
-    assert "_uninspectable_kind" in Gate._finish.__code__.co_names
-    assert "_uninspectable_kind" in Gate._finish_exception.__code__.co_names
+    """It was written, never called, and nothing noticed for a whole release cycle.
+
+    Asked of the module that owns the two finishers rather than of the class, which is
+    where they lived when this was written. The check is structural on purpose: the
+    behaviour it guards has no observable difference until a tool actually returns a
+    generator, and "the guard exists but nothing calls it" is exactly the state it was
+    found in.
+    """
+    from histos import wrappers
+
+    assert "_uninspectable_kind" in wrappers._finish.__code__.co_names
+    assert "_uninspectable_kind" in wrappers._finish_exception.__code__.co_names
 
 
 def test_uninspectable_kind_names_each_shape() -> None:
