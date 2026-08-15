@@ -84,6 +84,7 @@ from histos.mediate.policyref import (
 from histos.mediate.recorder import DecisionRecorder
 from histos.mediate.toolref import (
     _IdentityRef,
+    _same_tool,
     _wrap_identity,
 )
 from histos.policy.contracts import Effect, GateDecision, GateRequest, Policy, Principal, ToolContract
@@ -492,7 +493,7 @@ class Gate:
         key = (tool_name, run_async)
         previous = self._wrapped_targets.get(key)
         target = _wrap_identity(tool)
-        if previous is not None and previous() is not None and previous() != target:
+        if previous is not None and (held := previous()) is not None and not _same_tool(held, target):
             raise PolicyError(
                 f"two different callables are being gated as {tool_name!r} on this Gate. One contract "
                 "cannot describe two tools: pass name= to say which is which."

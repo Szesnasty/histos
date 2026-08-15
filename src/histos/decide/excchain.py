@@ -72,6 +72,13 @@ def _hidden_branches(exc: BaseException) -> list[BaseException]:
         hidden = current.__context__
         if current.__suppress_context__ and hidden is not None and hidden is not current.__cause__:
             found.append(current)
+            # And walk *into* it. `_next_link` stops at every suppression, which is
+            # right for the text — Python will not display it — and wrong here, because
+            # this walk exists precisely to find what the text walk refused to read. A
+            # repository hiding a driver error with `from None`, under a service that
+            # hides the repository the same way, put the driver's secret two
+            # suppressions down where neither pass ever looked.
+            pending.append(hidden)
         if isinstance(current, BaseExceptionGroup):
             pending.extend(current.exceptions)
         link = _next_link(current)

@@ -150,11 +150,24 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
             if item not in allowed
         )
 
-    if spec.type == "array" and spec.item_type is not None:
-        item_expected = _TYPE_CHECKS.get(spec.item_type, object)
+    if spec.type == "array":
+        item_expected = _TYPE_CHECKS.get(spec.item_type, object) if spec.item_type else object
         numeric_item = spec.item_type in ("integer", "number")
         for i, item in enumerate(value):
             iname = f"{name}[{i}]"
+            if spec.item_type is None:
+                # No declared element type — `list[str | None]` is the ordinary source —
+                # but the bounds beside it are still bounds. They used to be skipped
+                # entirely, so `items: {anyOf: [{type: string, maxLength: 3}, null]}`
+                # carried `max_length=3` into the contract and enforced nothing: a bound
+                # that reads as enforced and is not, which is the one shape this module
+                # refuses everywhere else. Dispatched on the element instead, exactly as
+                # a scalar of unknown type is.
+                if isinstance(item, str):
+                    errors.extend(_check_string_value(iname, spec, item))
+                elif isinstance(item, (int, float)) and not isinstance(item, bool):
+                    errors.extend(_check_number(iname, spec, item))
+                continue
             if numeric_item and isinstance(item, bool):
                 errors.append(f"{iname}: expected {spec.item_type}, got boolean")
             elif spec.item_type != "any" and not isinstance(item, item_expected):

@@ -278,7 +278,14 @@ def _snapshot_value(value: Any, *, readonly: bool = True, _seen: frozenset[int] 
         except Exception:  # noqa: BLE001 — fall back to the element-by-element walk
             pass
         else:
-            return _freeze(copied) if readonly else _thaw(copied)
+            # Only when it really copied. `deepcopy` is allowed to return the argument
+            # itself, and `__deepcopy__ = lambda self, memo: self` is the standard way a
+            # session or a registry says "do not copy me" — which this module's own
+            # docstring invites. `_freeze` and `_thaw` edit a dict subclass in place, so
+            # trusting that result rewrote the caller's live object. Falling through to
+            # the structural walk rebuilds instead.
+            if copied is not value:
+                return _freeze(copied) if readonly else _thaw(copied)
         seen = _seen | {id(value)}
         if isinstance(value, dict):
             rebuilt = {

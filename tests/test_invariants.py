@@ -227,7 +227,6 @@ def test_recreating_the_log_directory_does_not_forget_the_erasure(tmp_path):
     assert not ok, "the log was erased and the replacement verifies clean"
 
 
-@pytest.mark.xfail(strict=True, reason="P1 round-5: a hidden branch under a hidden branch is never scanned")
 def test_a_canary_two_suppressions_deep_never_egresses():
     def nested() -> None:
         try:
@@ -250,7 +249,6 @@ def test_a_canary_two_suppressions_deep_never_egresses():
     assert CANARY not in " ".join(chain), f"reachable through the chain; redactions={sink.entries[-1]['redactions']}"
 
 
-@pytest.mark.xfail(strict=True, reason="P1 round-5: a raising strict sink re-chains the unredacted original")
 def test_a_strict_sink_does_not_put_the_original_exception_back_on_screen(tmp_path):
     import traceback
 
@@ -277,7 +275,6 @@ def test_a_strict_sink_does_not_put_the_original_exception_back_on_screen(tmp_pa
     assert CANARY not in printed
 
 
-@pytest.mark.xfail(strict=True, reason="P1 round-5: type='any' is exempted from every keyword, array ones included")
 def test_an_element_bound_on_an_untyped_field_is_still_refused_or_enforced():
     """`any` was exempted wholesale so a bound could not be shown dead. Array keywords on
     an untyped field are dead all the same — nothing consults them."""
@@ -292,7 +289,6 @@ def test_an_element_bound_on_an_untyped_field_is_still_refused_or_enforced():
     assert validate(Schema({"xs": field}), {"xs": [1, 2, 3]}), "max_items=2 admitted three elements"
 
 
-@pytest.mark.xfail(strict=True, reason="P1 round-5: a nullable element union drops every element bound")
 def test_a_nullable_element_union_keeps_the_bounds_beside_it():
     from histos import schema_from_json_schema
     from histos.policy.schema import validate

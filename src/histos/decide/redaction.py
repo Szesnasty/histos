@@ -243,6 +243,11 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], 
     """
     dropped: list[str] = []
     opaque: list[str] = []
+    # Keyed on `id`, and the value keeps the original alive so the id cannot be recycled
+    # under us. Without it a record whose two fields point at one child re-walks that
+    # child twice, which is 2**depth for a shared graph — 22 tiny objects were enough to
+    # stop the post-gate returning — and a record that reaches itself never terminates.
+    memo: dict[int, Any] = {}
 
     def go(o: Any) -> Any:
         if isinstance(o, dict):
@@ -271,6 +276,9 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], 
         # to remove.
         fields = _record_fields(o)
         if fields is not None:
+            if id(o) in memo:
+                return memo[id(o)][1]
+            memo[id(o)] = (o, o)  # in progress: a cycle resolves to the object itself
             kept_fields: dict[str, Any] = {}
             changed = False
             for name, value in fields.items():
@@ -290,6 +298,7 @@ def _project_output(obj: Any, allowed: frozenset[str]) -> tuple[Any, list[str], 
             # output was clean. Projection is opt-in and it is a transforming control;
             # a caller who switched it on is asking for a filtered mapping, and one
             # every later pass can read is the only kind worth handing back.
+            memo[id(o)] = (o, kept_fields)
             return kept_fields
         # A value the projector cannot enter — a slots-only object, or a C type keeping
         # its state where no Python attribute shows it. It is returned as it came, and
