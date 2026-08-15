@@ -102,10 +102,25 @@ def _check_number(name: str, spec: Field, value: int | float) -> list[str]:
     if spec.exclusive_maximum is not None and value >= spec.exclusive_maximum:
         return [f"{name}: not below exclusive_maximum {spec.exclusive_maximum}"]
     if spec.multiple_of is not None:
-        if isinstance(value, int) and isinstance(spec.multiple_of, int):
-            ok = value % spec.multiple_of == 0
+        # Exact arithmetic whenever both sides are whole numbers, whatever Python type
+        # they arrived as. Keying the exact path on `isinstance(..., int)` made
+        # `multiple_of=3` and `multiple_of=3.0` two different rules: the other path is a
+        # division plus `isclose(rel_tol=1e-9)`, and at 1e18 that tolerance is a window
+        # about a billion wide, so the float spelling admitted what the int spelling
+        # refused. `canonical_number` renders both as `"3"` and hands them one
+        # `content_hash` — deliberately, because `JSON.parse` cannot tell them apart —
+        # so those were two rulesets behind one hash, and a pinned hash, a bound
+        # approval and a drift check all reported green across the difference.
+        #
+        # The float path stays for the case it was written for: a bound that is genuinely
+        # fractional, where exact integer arithmetic has nothing to say.
+        bound = spec.multiple_of
+        if isinstance(bound, float) and bound.is_integer():
+            bound = int(bound)
+        if isinstance(value, int) and isinstance(bound, int):
+            ok = value % bound == 0
         else:
-            q = value / spec.multiple_of
+            q = value / bound
             ok = math.isclose(q, round(q), rel_tol=1e-9, abs_tol=1e-9)
         if not ok:
             return [f"{name}: not a multiple of {spec.multiple_of}"]

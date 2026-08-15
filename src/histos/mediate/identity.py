@@ -220,10 +220,35 @@ class use_principal:  # noqa: N801 — it is spelled and used as a function
         for index in range(len(stack) - 1, -1, -1):
             if stack[index][0] is self:
                 token = stack[index][1]
-                _scope_tokens.set(stack[:index] + stack[index + 1 :])
                 break
         else:
             return  # entered in another Context, which holds its own token and its own reset
+        if index != len(stack) - 1:
+            # Not the innermost open scope, so this is a close out of order. `with` is
+            # LIFO and cannot produce it; a middleware that enters on request-start and
+            # exits on response-end can, with two overlapping requests in one context and
+            # the first to finish closing the outer scope.
+            #
+            # Resetting anyway is the quiet disaster. `ContextVar.reset` restores the
+            # value from before *this* token, which clobbers the inner scope's binding —
+            # and the inner scope's own reset then restores the outer principal, so after
+            # both scopes have closed the outer caller is still bound and everything
+            # after them runs as somebody whose scope has ended. Measured, silently.
+            #
+            # Nothing safe can be salvaged: a `Token` may be reset only once, so the
+            # tokens above this one cannot be replayed. Unbind everything this Context
+            # holds and say so. Every later `__exit__` finds no entry and returns, which
+            # leaves the binding empty rather than wrong — a caller with no principal is
+            # denied, which is the direction to fail in.
+            _scope_tokens.set(())
+            _current_principal.set(None)
+            raise PolicyError(
+                "use_principal() scopes were left out of order: this one is not the innermost still open. "
+                "Restoring its token would rebind the principal of an enclosing scope after both had closed, "
+                "so every identity in this context has been unbound instead and calls will be denied until one "
+                "is set again. Use `with` (which cannot do this), or close the inner scope first."
+            )
+        _scope_tokens.set(stack[:index])
         try:
             _current_principal.reset(token)
         except ValueError as exc:
