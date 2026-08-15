@@ -317,9 +317,7 @@ def _in_demo(demo: str, body: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.parse_args(argv)
     print(f"validating the instrument against {len(CASES)} planted faults and controls\n")
     failures = 0

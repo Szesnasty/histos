@@ -260,8 +260,8 @@ used to do:
 
 **1. The reference engine runs the fixtures as part of its own test suite.** If a
 change to Python breaks the contract, the reference engine's own suite fails that day
-— not the TypeScript port, eighteen months later. *(That suite is not yet automated:
-[known debt D2](tech-debt.md).)*
+— not the TypeScript port, eighteen months later. The suite runs in the reference
+engine's tests and in CI.
 
 **2. The corpus covers canonicalization, not only decisions.** Alongside
 `(policy, principal, call) → expected decision` fixtures there must be

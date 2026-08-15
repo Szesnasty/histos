@@ -60,6 +60,11 @@ Legend: `[x]` shipped · `[ ]` todo · 🚦 a gate not crossed until it passes.
       `spec/json-schema-projection-0.1.md`, pinned by the `projection/` corpus. Design
       and the rejected alternatives: [`tool-contracts.md`](tool-contracts.md).
 - [x] LangChain and LangGraph adapters over a framework-free core
+- [x] **Killer demo** — *Hijacked. Still bounded.* Five applications compare the
+      same task with and without a policy and judge damage from datastore state.
+- [x] **Verify the real chokepoint** in LangChain and LangGraph — the live mediation
+      harness drives public, private and async execution paths plus a compiled
+      LangGraph `ToolNode`; it found a real bypass and now guards the regression.
 - [x] `[project.urls]` — Homepage / Repository / Issues / Changelog, carried into the
       wheel metadata, so PyPI links where the code actually is.
 
@@ -71,9 +76,6 @@ Legend: `[x]` shipped · `[ ]` todo · 🚦 a gate not crossed until it passes.
       released together with the engine that enforces them. Draft, never "standard":
       inheritance, precedence and resource references are unsettled, and a published
       format is far harder to fix than an API.
-- [ ] **Killer demo** — one page, *Hijacked. Still bounded.*
-- [ ] **Verify the real chokepoint** in LangChain / LangGraph. Not "an adapter
-      exists", but: *is there any tool-execution path that bypasses the gate?*
 - [ ] **MCP as one product flow**, never an adapter now and DX later:
       `tools/list` → infer contracts → generate policy → observe → suggest → human
       review → enforce. An MCP server exposing twenty tools makes cold start *worse*,

@@ -8,6 +8,15 @@ between minor versions — every such change is listed here.
 
 ## [Unreleased]
 
+### Changed — release presentation
+
+- The project README is now a 161-line product entry point instead of a 468-line
+  manual: enforcement thesis, measured evidence, install, one working example and
+  the production boundary. It explicitly names the clinic policy's feature cost and
+  keeps model-dependent demo results separate from deterministic controls.
+- `docs/README.md` is the documentation map. The roadmap and known-debt inventory no
+  longer list the shipped demo and live framework mediation harness as unfinished.
+
 ### Fixed — final release audit
 
 - Semantic escalation now accepts exactly the boolean `True`. Truthy response

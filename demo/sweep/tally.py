@@ -77,9 +77,7 @@ def wilson(hits: int, total: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("results", type=Path, help="JSONL result file written by sweep.py")
     args = parser.parse_args(argv)
     rows = [json.loads(line) for line in args.results.read_text().splitlines() if line.strip()]
@@ -114,10 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'model':<26}{'wiring':<13}" + "".join(f"{'t=' + str(t):>13}" for t in temps) + f"{'fixed':>13}")
         for model in models:
             for index, wiring in enumerate(("unprotected", "protected")):
-                cells = [
-                    _cell(demo, kind, [r for r in good if _match(r, demo, model, temp)], index)
-                    for temp in temps
-                ]
+                cells = [_cell(demo, kind, [r for r in good if _match(r, demo, model, temp)], index) for temp in temps]
                 cells.append(_cell(demo, kind, [r for r in good if _match(r, demo, model, None)], index))
                 if all(c == "     —" for c in cells):
                     continue
