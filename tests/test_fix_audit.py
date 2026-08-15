@@ -36,10 +36,11 @@ from histos import (
     use_principal,
     verify_chain,
 )
-from histos.audit import AuditRecord, tip_path_for
+from histos.auditrecord import AuditRecord
 from histos.errors import PolicyError
 from histos.integrations import langchain as lc_adapter
 from histos.integrations.base import guard_callable
+from histos.logpath import tip_path_for
 
 PII = "INV-jane.doe@example.com"
 

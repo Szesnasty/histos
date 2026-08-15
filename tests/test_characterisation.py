@@ -309,7 +309,7 @@ def test_two_sinks_on_one_path_share_one_lock(tmp_path):
     """`_PATH_LOCKS` is a module-level map. Two Gates in one process is the ordinary way
     a host separates a strict tool set from a lenient one, and if a split gives them
     separate maps the appends interleave and the chain is broken forever."""
-    from histos.audit import _path_key
+    from histos.logpath import _path_key
 
     log = tmp_path / "a.jsonl"
     first, second = JSONLAuditSink(log), JSONLAuditSink(log)
@@ -369,7 +369,7 @@ def test_the_scope_token_stack_is_one_object():
 def test_the_case_fold_probe_is_measured_per_directory(tmp_path):
     """`_folds_case` is `lru_cache`d. A split that gives two modules their own cache is
     harmless; one that keys it differently is not, and this pins the key."""
-    from histos.audit import _folds_case
+    from histos.logpath import _folds_case
 
     first = _folds_case(str(tmp_path))
     assert _folds_case(str(tmp_path)) is first

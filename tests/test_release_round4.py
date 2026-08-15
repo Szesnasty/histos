@@ -340,7 +340,7 @@ def test_the_respelling_attack_is_still_caught():
 
 
 def test_only_an_odd_backslash_run_makes_an_escape():
-    from histos.audit import _respelt_ascii
+    from histos.logpath import _respelt_ascii
 
     backslash = chr(92)
     for count, is_escape in ((1, True), (2, False), (3, True), (4, False)):
@@ -350,7 +350,7 @@ def test_only_an_odd_backslash_run_makes_an_escape():
 
 def test_the_erasure_memory_is_keyed_on_a_location_that_survives_the_file(tmp_path):
     """Keying on `st_ino` was the first answer and forgets at the one moment it is for."""
-    from histos.audit import _path_key
+    from histos.logpath import _path_key
 
     log = tmp_path / "x.jsonl"
     log.write_text("{}", encoding="utf-8")
@@ -369,7 +369,7 @@ def test_two_tenants_in_differently_cased_directories_do_not_share_a_key(tmp_pat
     appending verified clean. The fold is measured per directory now, so this holds on
     either kind of volume: distinct directories are never one key.
     """
-    from histos.audit import _path_key
+    from histos.logpath import _path_key
 
     (tmp_path / "Acme").mkdir()
     (tmp_path / "Zeta").mkdir()
@@ -379,7 +379,7 @@ def test_two_tenants_in_differently_cased_directories_do_not_share_a_key(tmp_pat
 def test_two_spellings_of_one_file_still_share_a_key(tmp_path):
     """The property the fold existed for, kept: on a case-insensitive volume one capital
     letter must not hand two sinks two locks and two erasure memories."""
-    from histos.audit import _folds_case, _path_key
+    from histos.logpath import _folds_case, _path_key
 
     if not _folds_case(str(tmp_path)):
         import pytest as _pytest

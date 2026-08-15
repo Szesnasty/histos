@@ -61,14 +61,8 @@ import sys as _sys
 
 from histos._version import __version__
 from histos.approvals import ApprovalStore, request_fingerprint
-from histos.audit import (
-    AuditRecord,
-    AuditSink,
-    InMemoryAuditSink,
-    JSONLAuditSink,
-    digest_args,
-    verify_chain,
-)
+from histos.audit import AuditSink, InMemoryAuditSink, JSONLAuditSink
+from histos.auditrecord import AuditRecord, digest_args
 from histos.bundle import (
     ENGINE_FEATURES,
     SUPPORTED_SCHEMA_VERSIONS,
@@ -147,6 +141,7 @@ from histos.lockfile import (
 )
 from histos.review import PolicyReview, review_policy
 from histos.schema import Field, Schema
+from histos.verify import verify_chain
 
 # `from histos.gate import gate` rebinds this package's `gate` attribute from the
 # submodule the import machinery had just installed there to the one-liner of the same
