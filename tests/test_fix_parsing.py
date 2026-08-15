@@ -35,15 +35,16 @@ from histos import (
     review_policy,
     use_principal,
 )
-from histos.bundle import load_bundle_yaml
-from histos.bundlekeys import _MAX_EXPANDED_NODES, _expanded_size
 from histos.cli import main
-from histos.contracts import Constraint
+from histos.format.bundle import load_bundle_yaml
+from histos.format.bundlekeys import _MAX_EXPANDED_NODES, _expanded_size
 from histos.importers import KINDS, field_from_json_schema, reader_for, register_source_kind
-from histos.infer import infer_schema
-from histos.lockfile import build_lock, parse_lock, unverifiable_tools
+from histos.policy.contracts import Constraint
+from histos.policy.schema import sensitive_fields, validate
+from histos.provenance.infer import infer_schema
+from histos.provenance.lockdiff import unverifiable_tools
+from histos.provenance.lockfile import build_lock, parse_lock
 from histos.redos.alphabet import _MAX_PATTERN_INPUT
-from histos.schema import sensitive_fields, validate
 
 GALLERY = Path(__file__).resolve().parent.parent / "policies"
 
@@ -415,7 +416,7 @@ def test_every_policy_in_the_gallery_round_trips_to_the_same_hash():
 def test_the_pip_install_message_is_what_a_user_without_pyyaml_actually_sees(monkeypatch):
     """`parse_yaml_bundle` had its own bare `import yaml`, which raised first and made
     the curated message in `_strict_yaml_loader` dead code."""
-    import histos.bundleparse as bundle_module
+    import histos.format.bundleparse as bundle_module
 
     monkeypatch.setattr(bundle_module, "_yaml_loader_cache", None)
     monkeypatch.setitem(sys.modules, "yaml", None)  # a None entry makes `import yaml` raise

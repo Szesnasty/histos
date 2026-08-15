@@ -1,6 +1,6 @@
 """Review a policy before enforcing it — the "import → review" step.
 
-Turns a :class:`~histos.contracts.Policy` into an at-a-glance report:
+Turns a :class:`~histos.policy.contracts.Policy` into an at-a-glance report:
 what was discovered, what is destructive, what no role can reach, and what looks
 incomplete or wrong. ``histos review`` prints :meth:`PolicyReview.render`, and a
 host can render the same structure itself. Deterministic and read-only.
@@ -11,9 +11,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from histos.contracts import Policy, Sensitivity, ToolContract
 from histos.display import safe_text
 from histos.importers.sources import UNREVIEWED_SENSITIVITY
+from histos.policy.contracts import Policy, Sensitivity, ToolContract
 
 # Per-tool verdict for the import→review→protect journey.
 READY = "ready"  # ✓ safe to gate as-is

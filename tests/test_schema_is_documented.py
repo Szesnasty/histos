@@ -80,7 +80,7 @@ def test_the_published_field_keys_are_exactly_the_ones_the_loader_accepts():
     bundle that is invalid against the library's own published format, under an
     unchanged `histos.policy/0.1` version string. A second implementation reading the
     spec would have refused a file this one writes."""
-    from histos.bundlekeys import _FIELD_KEYS
+    from histos.format.bundlekeys import _FIELD_KEYS
 
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     published = set(schema["$defs"]["field"]["properties"])

@@ -19,11 +19,11 @@ from histos import (
     Schema,
     ToolContract,
     canonical_json,
-    detectors,
     request_fingerprint,
     use_principal,
     verify_chain,
 )
+from histos.decide import detectors
 from histos.integrations.base import denial_message, guard_callable, protect_functions
 
 PAN = "4111111111111111"  # Luhn-valid test card

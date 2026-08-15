@@ -26,9 +26,9 @@ from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
 
 from histos import Gate, Principal, load_policy
-from histos.approvals import fingerprint_of
-from histos.audit import InMemoryAuditSink
 from histos.integrations.langchain import protect_tools
+from histos.mediate.approvals import fingerprint_of
+from histos.trail.audit import InMemoryAuditSink
 
 POLICY_PATH = Path(__file__).resolve().parent / "security.policy.yaml"
 

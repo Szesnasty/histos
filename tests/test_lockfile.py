@@ -22,8 +22,8 @@ from histos import (
     sources_from_openai,
     unverifiable_tools,
 )
-from histos.canonical import canonical_number
-from histos.lockfile import LOCK_VERSION
+from histos.policy.canonical import canonical_number
+from histos.provenance.lockfile import LOCK_VERSION
 
 REFUND = {
     "name": "make_refund",
@@ -254,7 +254,7 @@ def test_the_committed_demo_lock_matches_what_the_importer_produces_now():
     from pathlib import Path
 
     from histos.importers.mcp import sources_from_mcp
-    from histos.lockfile import contract_hash, description_hash, schema_hash
+    from histos.provenance.lockfile import contract_hash, description_hash, schema_hash
 
     demo = Path(__file__).resolve().parent.parent / "demo" / "04-mcp-rug-pull"
     lock_path = demo / "docuvault.policy.lock.json"

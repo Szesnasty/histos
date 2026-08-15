@@ -98,8 +98,8 @@ def test_the_whole_gate_path_writes_a_readable_line(tmp_path):
 
 def test_verify_chain_still_accepts_a_log_hashed_with_ensure_ascii_false(tmp_path):
     """Written the way `record` used to write it, byte for byte."""
-    from histos.logpath import tip_path_for
-    from histos.verify import _chain_digest, _tip_body
+    from histos.trail.logpath import tip_path_for
+    from histos.trail.verify import _chain_digest, _tip_body
 
     log = tmp_path / "legacy.jsonl"
     payload: dict[str, object] = {"decision_id": 1, "effect": "deny", "tool": "wysyłka", "seq": 1, "prev": ""}
@@ -117,8 +117,8 @@ def test_verify_chain_still_accepts_a_log_hashed_with_ensure_ascii_false(tmp_pat
 
 
 def test_a_legacy_line_that_was_actually_edited_is_still_caught(tmp_path):
-    from histos.logpath import tip_path_for
-    from histos.verify import _chain_digest, _tip_body
+    from histos.trail.logpath import tip_path_for
+    from histos.trail.verify import _chain_digest, _tip_body
 
     log = tmp_path / "legacy.jsonl"
     payload: dict[str, object] = {"decision_id": 1, "effect": "deny", "tool": "wysyłka", "seq": 1, "prev": ""}

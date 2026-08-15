@@ -45,11 +45,11 @@ from histos import (
     use_principal,
     verify_chain,
 )
-from histos.contracts import Effect, GateRequest
-from histos.detectors import scan_string
-from histos.lockfile import schema_hash
-from histos.logpath import tip_path_for
+from histos.decide.detectors import scan_string
+from histos.policy.contracts import Effect, GateRequest
+from histos.provenance.lockfile import schema_hash
 from histos.review import review_policy
+from histos.trail.logpath import tip_path_for
 
 CANARY = "CANARY-7f3a-SECRET"
 
@@ -634,8 +634,8 @@ def test_a_rewrite_that_parses_the_same_but_reads_differently_is_caught(tmp_path
 def _write_legacy_tip(log, key: bytes, count: int, tip: str) -> None:
     """The sidecar the writer of that era produced, so verification reaches the line
     check instead of stopping at a missing tip."""
-    from histos.logpath import tip_path_for
-    from histos.verify import _tip_body
+    from histos.trail.logpath import tip_path_for
+    from histos.trail.verify import _tip_body
 
     body = _tip_body(count, tip)
     mac = hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -953,7 +953,7 @@ def test_the_raise_path_is_budgeted_like_the_return_path():
     """`_exception_text` materialised the whole chain and handed it to the NFKC pass and
     every detector. Tool error text is as attacker-controlled as tool output, so the
     raise path is the same DoS the return budget exists to close."""
-    from histos.excchain import _exception_text
+    from histos.decide.excchain import _exception_text
 
     text, incomplete = _exception_text(ValueError("x" * 5_000_000), 4_194_304)
     assert incomplete
@@ -969,8 +969,8 @@ def test_redaction_growing_the_output_past_the_budget_is_not_scanned_as_a_prefix
     17-character `[REDACTED-CANARY]` — so an output that fitted on the way in can
     exceed the budget after redaction. The second blob discarded its truncation flag,
     leaving the split-token check reading a prefix and reporting clean about the rest."""
-    from histos.engine import Engine
-    from histos.limits import LimitStore
+    from histos.decide.engine import Engine
+    from histos.decide.limits import LimitStore
 
     token = "CANARY-A"
     policy = Policy(
@@ -1220,7 +1220,7 @@ def test_a_confirmation_window_without_required_survives_the_round_trip():
 def test_a_source_authored_property_name_cannot_rewrite_the_drift_report():
     """`_render` sanitised every diff *value* and the path was interpolated raw — and
     the path is built from the source document's own JSON keys."""
-    from histos.lockfile import shape_diff
+    from histos.provenance.lockdiff import shape_diff
 
     lines = shape_diff({"properties": {}}, {"properties": {"x\r\x1b[2KOK — no drift": {"type": "string"}}})
     assert lines and all("\r" not in line and "\x1b" not in line for line in lines), lines

@@ -19,9 +19,9 @@ from pathlib import Path
 import pytest
 
 from histos import Field, PolicyError, Schema, load_policy
+from histos.policy.schema import validate
 from histos.redos.alphabet import _MAX_PATTERN_INPUT
 from histos.redos.probe import _PROBE_BUDGET_S
-from histos.schema import validate
 
 REPO = Path(__file__).resolve().parent.parent
 

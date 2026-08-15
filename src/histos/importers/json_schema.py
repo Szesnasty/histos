@@ -74,7 +74,7 @@ from histos.importers.js_vocab import (
     _refuse_unprojected,
     _sensitivity_marker,
 )
-from histos.schema import Field, Schema
+from histos.policy.schema import Field, Schema
 
 
 def _numeric(keyword: str, value: Any) -> float | None:
@@ -176,7 +176,7 @@ def _bound(prop: dict[str, Any], items: dict[str, Any] | None, keyword: str) -> 
 
     An array's element bounds are enforced from the array field's own spec —
     ``_check_string_value`` / ``_check_number`` run per element in
-    :mod:`histos.schema` — so ``{"type": "array", "items": {"maxLength": 5}}``
+    :mod:`histos.policy.schema` — so ``{"type": "array", "items": {"maxLength": 5}}``
     projects onto ``max_length`` and is enforced there. Only ``items.type`` used to
     be read, which meant an array of ``^[a-z]+$``, five-character scopes imported as
     an array of arbitrary strings. The array's own copy wins if a document writes
@@ -291,7 +291,7 @@ def field_from_json_schema(
     root: dict[str, Any] | None = None,
     name: str | None = None,
 ) -> Field:
-    """Convert one JSON Schema property to a :class:`~histos.schema.Field`.
+    """Convert one JSON Schema property to a :class:`~histos.policy.schema.Field`.
 
     ``root`` is the document the property was read from: a local ``$ref`` is resolved
     against it, and without one a ``$ref`` is refused rather than imported as an

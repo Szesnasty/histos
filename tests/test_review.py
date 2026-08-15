@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from histos import load_bundle, review_policy
-from histos.contracts import Constraint, Policy, Sensitivity, ToolContract
-from histos.schema import Field, Schema
+from histos.policy.contracts import Constraint, Policy, Sensitivity, ToolContract
+from histos.policy.schema import Field, Schema
 
 
 def test_review_reports_discovery_destructive_and_gaps():

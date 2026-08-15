@@ -41,7 +41,7 @@ from histos import (
     ToolContract,
     use_principal,
 )
-from histos.contracts import Binding, Constraint
+from histos.policy.contracts import Binding, Constraint
 
 SNAPSHOT = Path(__file__).resolve().parent / "corpus" / "decisions.snapshot.json"
 CANARY = "CANARY-7f3a-SECRET"
@@ -309,7 +309,7 @@ def test_two_sinks_on_one_path_share_one_lock(tmp_path):
     """`_PATH_LOCKS` is a module-level map. Two Gates in one process is the ordinary way
     a host separates a strict tool set from a lenient one, and if a split gives them
     separate maps the appends interleave and the chain is broken forever."""
-    from histos.logpath import _path_key
+    from histos.trail.logpath import _path_key
 
     log = tmp_path / "a.jsonl"
     first, second = JSONLAuditSink(log), JSONLAuditSink(log)
@@ -339,8 +339,8 @@ def test_the_principal_contextvar_is_one_object():
     """Two copies of `_current_principal` means `use_principal` binds one and the engine
     reads the other — every call unauthenticated, and no test of a single module would
     notice."""
-    from histos.engine import Engine  # the reader
-    from histos.identity import _current_principal  # the writer
+    from histos.decide.engine import Engine  # the reader
+    from histos.mediate.identity import _current_principal  # the writer
 
     who = Principal(role="clerk", identity="alice")
     with use_principal(who):
@@ -357,7 +357,7 @@ def test_the_principal_contextvar_is_one_object():
 
 
 def test_the_scope_token_stack_is_one_object():
-    from histos.identity import _scope_tokens
+    from histos.mediate.identity import _scope_tokens
 
     outer = use_principal(Principal(role="a", identity="1"))
     outer.__enter__()
@@ -369,7 +369,7 @@ def test_the_scope_token_stack_is_one_object():
 def test_the_case_fold_probe_is_measured_per_directory(tmp_path):
     """`_folds_case` is `lru_cache`d. A split that gives two modules their own cache is
     harmless; one that keys it differently is not, and this pins the key."""
-    from histos.logpath import _folds_case
+    from histos.trail.logpath import _folds_case
 
     first = _folds_case(str(tmp_path))
     assert _folds_case(str(tmp_path)) is first

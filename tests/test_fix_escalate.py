@@ -299,7 +299,7 @@ def test_every_escalation_code_the_engine_emits_is_published():
 
 def test_every_escalation_denial_carries_a_remedy():
     """The developer channel has to say what to do; the agent channel never does."""
-    from histos.contracts import _REMEDY
+    from histos.policy.contracts import _REMEDY
 
     for code in ESCALATE_CODES[1:]:
         assert _REMEDY.get(code), f"{code!r} denies with no remedy for the developer"

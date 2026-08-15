@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from histos.bundle import load_policy
-from histos.contracts import Constraint, Policy, ToolContract
-from histos.schema import Field, Schema
+from histos.format.bundle import load_policy
+from histos.policy.contracts import Constraint, Policy, ToolContract
+from histos.policy.schema import Field, Schema
 
 POLICIES = Path(__file__).resolve().parent.parent / "policies"
 
@@ -70,8 +70,8 @@ def test_an_integer_bound_and_its_float_spelling_still_agree():
 # ── determinism ──────────────────────────────────────────────────────────
 
 _HASH_SCRIPT = """
-from histos.contracts import Policy, ToolContract
-from histos.schema import Schema
+from histos.policy.contracts import Policy, ToolContract
+from histos.policy.schema import Schema
 p = Policy(
     tools={"t": ToolContract(name="t", args=Schema({}), access="write")},
     permissions={"r": frozenset({"t"})},
@@ -166,7 +166,7 @@ def test_a_retyped_enum_moves_every_lock_hash():
     Both lock hashes used to be byte-identical, so `histos drift` reported CLEAN and
     exited 0. A drift detector that passes on this is worse than none.
     """
-    from histos.lockfile import contract_hash, schema_hash
+    from histos.provenance.lockfile import contract_hash, schema_hash
 
     honest, crafted = _mcp("integer", [1, 2]), _mcp("string", ["1", "2"])
     assert schema_hash(honest.shape) != schema_hash(crafted.shape)
@@ -175,6 +175,6 @@ def test_a_retyped_enum_moves_every_lock_hash():
 
 def test_an_integer_bound_and_its_float_spelling_do_not_move_a_lock_hash():
     """The deliberate collapse survives the fix: no JSON parser separates 8 from 8.0."""
-    from histos.lockfile import schema_hash
+    from histos.provenance.lockfile import schema_hash
 
     assert schema_hash({"maxLength": 8}) == schema_hash({"maxLength": 8.0})
