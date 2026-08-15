@@ -1,4 +1,4 @@
-"""Every attack five adversarial passes found, run against the shipped library.
+"""Every attack six adversarial passes found, run against the shipped library.
 
 The unit suite pins these one assertion at a time, which is what a suite is for and is
 also why none of it reads like evidence. This runs each attack the way it would actually
@@ -78,7 +78,7 @@ def _call(policy: Policy, tool, audit=None):
             return None, exc, sink
 
 
-# ── the canary: five ways it has escaped ─────────────────────────────────
+# ── the canary: six ways it has escaped ──────────────────────────────────
 
 
 def canary_in_a_projected_record() -> None:
@@ -181,6 +181,33 @@ def canary_with_a_zero_width_space() -> None:
     )
 
 
+def canary_on_a_leaf_subclass_attribute() -> None:
+    """Round 6. The sixth shape, and the first where two passes wanting opposite answers
+    about the same value was the reason.
+
+    `class Money(str)` is ordinary. The projector must not enter one — reading its
+    attributes would shred `Money("12.30")` into `{"currency": "EUR"}`, replacing the
+    value the caller asked for with its decoration — and the scanners inherited that
+    refusal, though their job is the reverse: read every string the caller can reach.
+    A token on such an attribute left through the *default* configuration.
+    """
+
+    class Money(str):
+        def __new__(cls, amount: str, note: str) -> Money:
+            obj = super().__new__(cls, amount)
+            obj.note = note  # type: ignore[attr-defined]
+            return obj
+
+    out, _, sink = _call(_policy(), lambda: {"amount": Money("12.30", CANARY)})
+    carried = getattr(out.get("amount"), "note", "") if isinstance(out, dict) else ""
+    trail = sink.entries[-1]
+    report(
+        "a canary on the attribute of a str subclass",
+        CANARY in carried,
+        f"caller got {out!r}; trail said effect={trail['effect']} redactions={trail['redactions']}",
+    )
+
+
 # ── the trail: can it be made to lie ─────────────────────────────────────
 
 
@@ -203,6 +230,48 @@ def erase_the_log_and_restart() -> None:
         ok,
         f"verify_chain says: {detail}",
     )
+
+
+def two_mount_spellings_of_one_log() -> None:
+    """Round 6. One file, two spellings `realpath` cannot see through, two write locks.
+
+    The fix for the attack above keyed the log on its resolved path so a recreated
+    directory keeps its erasure memory — and that key cannot also collapse aliases,
+    because `realpath` resolves symlinks and stops. A macOS firmlink and a Linux bind
+    mount each hand one log a second name, and two sinks over them serialised on
+    different locks: concurrent appends into one hash chain. Two questions, two keys.
+    """
+    from histos.trail.logpath import _lock_key, _path_key
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    real = root / "real"
+    real.mkdir()
+    (root / "alias").symlink_to(real)
+    # Stand in for the mount: same directory, two spellings, neither a symlink to resolve.
+    with _no_realpath():
+        same_lock = _lock_key(real / "t.jsonl") == _lock_key(root / "alias" / "t.jsonl")
+    before = _path_key(real / "t.jsonl")
+    shutil.rmtree(real)
+    real.mkdir()
+    memory_kept = _path_key(real / "t.jsonl") == before
+    report(
+        "one log reached by two mount spellings",
+        not (same_lock and memory_kept),
+        f"one lock for both spellings: {same_lock}; erasure memory survives a recreated directory: {memory_kept}",
+    )
+
+
+@contextlib.contextmanager
+def _no_realpath():
+    """A filesystem whose aliases `realpath` cannot resolve, which is what a mount is."""
+    import os
+
+    original = os.path.realpath
+    os.path.realpath = lambda p, **_: os.fspath(p)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        os.path.realpath = original  # type: ignore[assignment]
 
 
 def rewrite_a_line_so_it_reads_differently() -> None:
@@ -344,6 +413,31 @@ def an_ordinary_validator_still_imports() -> None:
     )
 
 
+def a_form_body_hidden_behind_six_refs() -> None:
+    """Round 6. The walk that finds named fields gives up past four levels, and giving up
+    was spelled "declares nothing" — which the caller reads as "a byte stream, drop it".
+    Six lines of nested `allOf` and a hostile spec gets the silent drop back."""
+    from histos.importers.openapi import _declares_fields
+
+    depth = 8
+    schemas = {
+        f"L{i}": (
+            {"allOf": [{"$ref": f"#/components/schemas/L{i + 1}"}]}
+            if i + 1 < depth
+            else {"properties": {"iban": {"type": "string"}, "amount": {"type": "string"}}}
+        )
+        for i in range(depth)
+    }
+    spec = {"components": {"schemas": schemas}}
+    content = {"application/x-www-form-urlencoded": {"schema": {"$ref": "#/components/schemas/L0"}}}
+    seen = _declares_fields(spec, content, "pay")
+    report(
+        f"a form body naming fields {depth} levels of $ref down",
+        not seen,
+        f"the body declares iban and amount; the projection {'sees' if seen else 'drops'} them",
+    )
+
+
 def a_sibling_that_downgrades_a_marker() -> None:
     """Round 4. A `$ref` composes by conjunction; sibling-wins let it weaken."""
     document = {
@@ -411,6 +505,35 @@ def a_host_repoint_after_review() -> None:
 
 
 # ── availability: the control refusing honest work ───────────────────────
+
+
+def an_untyped_bound_neither_refuses_nor_pretends() -> None:
+    """Round 6. `{"minimum": 1, "maximum": 100}` with no `type` is legal JSON Schema and
+    what a great many MCP servers emit.
+
+    Both answers to it are failures. Admitting it and enforcing nothing is a bound that
+    reads as enforced — the thing this library refuses everywhere. Refusing it takes the
+    whole tool down over one honest property. The way out is neither: dispatch the bound
+    on the value, exactly as the string bounds beside it always did.
+    """
+    from histos.policy.validation import validate
+
+    doc = {
+        "type": "object",
+        "properties": {"limit": {"minimum": 1, "maximum": 100}, "tags": {"maxItems": 2}},
+    }
+    try:
+        schema = schema_from_json_schema(doc)
+    except PolicyError as exc:
+        report("a numeric bound with no declared type", True, f"the whole tool was refused: {exc}")
+        return
+    over = validate(schema, {"limit": 500, "tags": ["a", "b", "c"]})
+    fine = validate(schema, {"limit": 50, "tags": ["a"]})
+    report(
+        "a numeric bound with no declared type",
+        not over or bool(fine),
+        f"imported; a call over the bound is refused with {over}, one inside it passes: {not fine}",
+    )
 
 
 def an_ordinary_value_survives_projection() -> None:
@@ -510,9 +633,18 @@ ATTACKS = (
             canary_through_a_strict_sink,
             canary_split_across_two_fields,
             canary_with_a_zero_width_space,
+            canary_on_a_leaf_subclass_attribute,
         ),
     ),
-    ("the trail", (erase_the_log_and_restart, rewrite_a_line_so_it_reads_differently, an_honest_log_is_not_accused)),
+    (
+        "the trail",
+        (
+            erase_the_log_and_restart,
+            two_mount_spellings_of_one_log,
+            rewrite_a_line_so_it_reads_differently,
+            an_honest_log_is_not_accused,
+        ),
+    ),
     ("the ruleset", (edit_the_live_ruleset, edit_a_bound_identity)),
     (
         "the importers",
@@ -522,11 +654,13 @@ ATTACKS = (
             a_sibling_that_downgrades_a_marker,
             one_malformed_tool_takes_the_manifest,
             a_host_repoint_after_review,
+            a_form_body_hidden_behind_six_refs,
         ),
     ),
     (
         "availability — the control refusing honest work",
         (
+            an_untyped_bound_neither_refuses_nor_pretends,
             an_ordinary_value_survives_projection,
             a_shared_reference_graph_returns,
             a_denied_call_never_runs_whatever_the_sink_does,
@@ -536,7 +670,7 @@ ATTACKS = (
 
 
 def main() -> int:
-    print(f"\n{BOLD}Every attack five adversarial passes found, against the shipped library{OFF}")
+    print(f"\n{BOLD}Every attack six adversarial passes found, against the shipped library{OFF}")
     print(f"{DIM}`held` means the attack reached nothing. `REACHED` means it did.{OFF}")
     for title, attacks in ATTACKS:
         section(title)

@@ -143,8 +143,14 @@ def _schema_names_fields(spec: dict[str, Any], schema: Any, where: str, depth: i
     "declares nothing" — so a composed form body went back to being dropped in silence,
     which is the whole finding this function was written for.
     """
-    if not isinstance(schema, dict) or depth > 4:
+    if not isinstance(schema, dict):
         return False
+    if depth > 4:
+        # Giving up is not evidence of absence. Returning False here said "declares
+        # nothing", and the caller reads that as "a byte stream, drop it" — the silent
+        # drop this function exists to prevent, reachable on a hostile spec for the cost
+        # of six lines of nested `allOf`.
+        return True
     if schema.get("properties"):
         return True
     for keyword in ("allOf", "anyOf", "oneOf"):

@@ -125,17 +125,50 @@ def _path_key(path: Path) -> str:
     erasing that other log and appending verifies **clean**. An erasure missed, by the
     documented recovery procedure, from an unprivileged neighbouring log.
 
-    So ask the filesystem instead of the platform — but ask it the right question. The
-    identity that matters here is the **location**, not the file: `_PATH_HIGH_WATER`
-    exists precisely to remember that a log used to be here after someone deleted it, so
-    keying on ``st_ino`` would forget the moment the file did, which is the one moment it
-    is for. The location is the parent directory's ``st_dev``/``st_ino`` — which survives
-    the log's deletion — plus the name, folded only when that directory's volume really
-    does fold, measured once per directory by :func:`_folds_case`.
+    So ask the filesystem instead of the platform — but ask it the right question, and
+    note that the two maps do not ask the same one. This key is the **erasure memory's**,
+    and it has to survive `rm -rf logs && mkdir logs`: a recreated directory is a new
+    inode, so anchoring to one orphaned the high-water mark exactly when a deployment
+    wiped a volume, and the replaced log verified clean. The resolved spelling survives
+    that, folded only when the volume really does fold, measured once per directory by
+    :func:`_folds_case`.
+
+    The lock wants the opposite and has :func:`_lock_key` for it.
     """
     resolved = os.path.realpath(path)
     parent = os.path.dirname(resolved) or os.sep
     return resolved.casefold() if _folds_case(parent) else resolved
+
+
+def _lock_key(path: Path) -> str:
+    """Which *file* this is, for the write lock — the other question, and its opposite.
+
+    `_path_key` must be stable when a path is recreated. A lock must do the reverse:
+    collapse every spelling of one file onto one entry. `realpath` resolves symlinks and
+    nothing else, and a macOS firmlink (`/System/Volumes/Data/Users/…`) and a Linux bind
+    mount each give one file a second spelling it cannot see through. Two sinks reaching
+    one log that way took two different locks and interleaved appends into one hash
+    chain, which is the one thing the trail cannot survive — and on Windows, where
+    `flock` is absent, with nothing else serialising them.
+
+    One key answering both questions could only ever satisfy one of them. The parent
+    directory's ``(st_dev, st_ino)`` answers identically through either spelling, and
+    anchoring the *lock* to it costs nothing when a directory is recreated: a sink
+    holding the old lock has a descriptor on the deleted inode and is not writing to the
+    new file at all.
+    """
+    resolved = os.path.realpath(path)
+    parent = os.path.dirname(resolved) or os.sep
+    name = os.path.basename(resolved)
+    if _folds_case(parent):
+        name = name.casefold()
+    try:
+        stat = os.stat(parent)
+    except OSError:
+        # Nothing to anchor to — a log under a directory that does not exist yet. The
+        # spelling is all there is, which is what the other key uses.
+        return _path_key(path)
+    return f"{stat.st_dev}:{stat.st_ino}:{name}"
 
 
 @functools.lru_cache(maxsize=512)

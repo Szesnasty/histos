@@ -43,16 +43,13 @@ _TYPE_CHECKS: dict[str, type | tuple[type, ...]] = {
 }
 
 
-# Which declared types actually consult each keyword. `any` is exempt from all of it:
-# a field with no declared type is the one place a bound cannot be shown to be dead.
-# The keywords that still fire on a field with no declared type. `_check_scalar`
-# dispatches the string bounds on `isinstance(value, str)`, so they are live whatever the
-# declaration says — which is the reason `any` was exempted at all. The five array
-# keywords are read under a literal `if spec.type == "array"` and are stone dead on an
-# untyped field, so blanket-exempting `any` reinstated exactly the silent no-op the guard
-# exists to refuse.
-_LIVE_ON_ANY = frozenset({"max_length", "min_length", "pattern"})
-
+# Which declared types actually consult each keyword. `any` is exempt from all of it,
+# and that exemption is only honest because `_check_scalar` dispatches every one of these
+# on the *value*: a string bound fires on a string, a numeric bound on a number, an
+# element bound on a list. It briefly was not — the numeric and array keywords keyed on
+# the declared type — and narrowing the exemption to match turned the dead bound into a
+# refusal of the whole tool, which is the same failure facing the other way.
+# `{"minimum": 1, "maximum": 100}` with no `type` is legal, ordinary JSON Schema.
 _KEYWORD_APPLIES_TO: dict[str, frozenset[str]] = {
     # `_check_string_value`, reached for a string scalar and for each element of an
     # array whose `item_type` is string.
@@ -190,7 +187,7 @@ class Field:
         # elements are checked with the same two helpers, which is how
         # `item_type="string", max_length=8` bounds each element.
         for attr, applies_to in _KEYWORD_APPLIES_TO.items():
-            if self.type in applies_to or (self.type == "any" and attr in _LIVE_ON_ANY):
+            if self.type in applies_to or self.type == "any":
                 continue
             declared = getattr(self, attr)
             if declared is None or declared is False:

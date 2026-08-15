@@ -172,6 +172,9 @@ def _redact_sensitive(obj: Any, sensitive_names: frozenset[str]) -> tuple[Any, l
 # being able to say whether it carried an undeclared field.
 _PROJECTABLE = (dict, list, tuple, set, frozenset)
 _INSPECTABLE_LEAF = (str, bytes, bytearray, int, float, bool, type(None))
+# The exact builtins, which cannot carry an attribute. Only a subclass can, and telling
+# the two apart by `type()` is what keeps `_leaf_fields` off the hot path.
+_EXACT_LEAF = frozenset(_INSPECTABLE_LEAF)
 
 
 def _record_fields(value: Any) -> dict[str, Any] | None:
@@ -214,6 +217,35 @@ def _record_fields(value: Any) -> dict[str, Any] | None:
     if isinstance(state, dict) and state:
         return {k: v for k, v in state.items() if isinstance(k, str)}
     return None
+
+
+def _leaf_fields(value: Any) -> dict[str, Any] | None:
+    """What hangs *off* a leaf — the half `_record_fields` refuses, for the scanners.
+
+    The refusal above is right for the projector and wrong for everything downstream of
+    it. Projection must not shred `Money("12.30")` into `{"currency": "EUR"}`; the canary
+    scan and the secret detectors have the opposite job, which is to read every string
+    reachable from the output. A token on such an attribute was reachable by the caller
+    and invisible to both — `class Money(str)` with the canary on it left through the
+    *default* configuration with `effect=allow` and `redactions: []`, so the trail called
+    the output clean. The sixth distinct shape a canary has escaped in, and the first
+    where a scan and a projection wanting different answers was the reason.
+
+    An exact builtin is the overwhelmingly common case and has no instance dictionary at
+    all, so it costs one `type()` lookup. Only a *subclass* can carry anything here.
+    """
+    if type(value) in _EXACT_LEAF or not isinstance(value, _INSPECTABLE_LEAF):
+        return None
+    state = getattr(value, "__dict__", None)
+    found = {k: v for k, v in state.items() if isinstance(k, str)} if isinstance(state, dict) else {}
+    # Slots too. A leaf subclass that declares them keeps its attributes off `__dict__`,
+    # and the point here is reachability, not how the class chose to store it. `UUID` and
+    # friends are not leaves, so the reason slots stay opaque in `_record_fields` — that
+    # reading them would project a value into its internals — does not apply.
+    for name in getattr(type(value), "__slots__", ()) or ():
+        if isinstance(name, str) and name not in found and hasattr(value, name):
+            found[name] = getattr(value, name)
+    return found or None
 
 
 def _projectable(value: Any) -> bool:

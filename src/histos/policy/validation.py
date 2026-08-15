@@ -131,10 +131,21 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
 
     if isinstance(value, str):
         errors.extend(_check_string_value(name, spec, value))
-    if spec.type in ("integer", "number"):
+    # Dispatched on the value, exactly like the string bounds on the line above. Keying
+    # on the *declared* type instead is an asymmetry two adjacent lines made invisible,
+    # and it left every numeric bound stone dead on a field with no declared type —
+    # while `{"minimum": 1, "maximum": 100}` with no `type` is legal JSON Schema and what
+    # a great many MCP servers emit. The schema layer then refused such a field outright
+    # rather than admit a dead bound, so one honest property took its whole tool down.
+    # Both halves of that were the same mistake: a bound the source wrote is enforced on
+    # the values it can be enforced on.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         errors.extend(_check_number(name, spec, value))
 
-    if spec.type == "array" and isinstance(value, (list, tuple)):
+    # `any` for the same reason. An untyped field holding a list gets the element bounds
+    # its source declared; one holding anything else is not an array and skips them.
+    sequence = isinstance(value, (list, tuple)) and spec.type in ("array", "any")
+    if sequence:
         if spec.min_items is not None and len(value) < spec.min_items:
             errors.append(f"{name}: has {len(value)} items, fewer than min_items {spec.min_items}")
         if spec.max_items is not None and len(value) > spec.max_items:
@@ -142,7 +153,7 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
         if spec.unique_items:
             errors.extend(_check_unique(name, value))
 
-    if spec.type == "array" and spec.item_enum is not None and isinstance(value, (list, tuple)):
+    if sequence and spec.item_enum is not None:
         allowed = spec.item_enum
         errors.extend(
             f"{name}[{i}]: not one of the allowed values {list(allowed)}"
@@ -150,7 +161,7 @@ def _check_scalar(name: str, spec: Field, value: Any) -> list[str]:
             if item not in allowed
         )
 
-    if spec.type == "array":
+    if sequence:
         item_expected = _TYPE_CHECKS.get(spec.item_type, object) if spec.item_type else object
         numeric_item = spec.item_type in ("integer", "number")
         for i, item in enumerate(value):
