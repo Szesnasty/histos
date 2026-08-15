@@ -182,17 +182,22 @@ chosen over the alternative screen — "an object that says it is iterable is pr
 fine" — because that one cannot tell a `deque` of rows from the wrapper an ORM hands
 back one lazy page at a time, and being wrong in that direction is silent.
 
-**Residual: an opaque object.** Detection reaches exactly as far as redaction does. A
-generator parked on an *attribute* — `Page(rows=<generator>)`, a Pydantic model, any
-custom class that does not advertise itself as iterable — is not seen, for the same
-reason a canary in a dataclass field is not: the post chain does not read attributes,
-and one that did would be executing arbitrary `@property` code inside a security check
-(see [`docs/tech-debt.md`](docs/tech-debt.md) D7). A legacy `__getitem__`-only sequence
-is likewise left alone, because every client object with subscript access defines one.
-An object return is therefore inert to the whole output half of the gate — refusal
-included — which is what `strict_returns=True` plus a declared `returns` shape exists
-to rule out: an object does not match a declared field map, so `on_output_violation`
-handles it instead of the traversal.
+**Residual: an opaque object.** Detection reaches exactly as far as redaction does, and
+both now reach further than this paragraph used to say. The post chain *does* read the
+fields an object publishes by name — a dataclass, a NamedTuple, an instance `__dict__` —
+so a generator parked on `Page(rows=<generator>)` is seen, and so is a canary in a
+dataclass field. Reading `__dict__` runs no user code, which is what makes it safe to do
+inside a security check.
+
+What stays inert is narrower and sharper: state that lives only in `__slots__`, a value
+behind a `@property`, and a C extension type keeping its state where no Python attribute
+shows it. A property is arbitrary user code and running it inside a check is the thing
+this must not do (see [`docs/tech-debt.md`](docs/tech-debt.md) D7); slots cannot be told
+apart from a stdlib value type's internals, so reading them would project a `UUID` into
+`{"int": …, "is_safe": …}`. A legacy `__getitem__`-only sequence is likewise left alone,
+because every client object with subscript access defines one. For those three,
+`strict_returns=True` plus a declared `returns` shape is the answer: an object does not
+match a declared field map, so `on_output_violation` handles it instead of the traversal.
 
 ### Fail-closed
 Any exception inside a check becomes DENY. No principal → DENY. A gated tool with
@@ -310,8 +315,23 @@ whole value is dropped rather than partially redacted. But matching is still
 **mechanical**: base64, paraphrasing or translating the secret **passes**. Two further
 reachability limits:
 - **Opaque objects.** Redaction traverses str/bytes/dict(keys+values)/list/tuple/
-  set/frozenset. A canary inside a dataclass/Pydantic attribute or any custom
-  object's fields is **not** reached.
+  set/frozenset, **and the fields an object publishes by name**: a dataclass, a
+  NamedTuple, anything keeping its state in an instance `__dict__` (which is Pydantic v1
+  and v2 and every ordinary class), and an attribute hung on a `str`/`int`/`bytes`
+  subclass. This paragraph said none of those were reached, and said it for two passes
+  after they were — an understatement in a security document is still a document that is
+  wrong, and it would have an operator distrust a control that works or pay for a
+  mitigation they already have.
+
+  What is genuinely **not** reached, and why: an object whose state lives only in
+  `__slots__`, and a value behind a `@property`. Both are read through the attribute
+  protocol rather than off `__dict__`, and a property is arbitrary user code — running it
+  inside a security check is the thing this must not do, so it is left alone on purpose
+  (see [`docs/tech-debt.md`](docs/tech-debt.md) D7). A C extension type keeping its state
+  where no Python attribute shows it is the same case. `strict_returns=True` with a
+  declared `returns` shape is what rules these out: an object does not match a declared
+  field map, so `on_output_violation` handles it rather than the traversal — measured,
+  and the reason it is the answer rather than a wider traversal.
 - **Masked stringification.** The pre-gate arg scan works on `str(value)`. An
   argument whose `__str__`/`repr` masks its contents (e.g. Pydantic `SecretStr`)
   hides a canary from the check.
