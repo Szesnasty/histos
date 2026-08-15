@@ -32,10 +32,10 @@ from histos.errors import (
     GateDenied,
     ToolErrorRedacted,
 )
+from histos.mediate import callctx as _callctx
 from histos.mediate.callsig import _invoke, _positional_binder, _Unnameable
 from histos.mediate.identity import _current_principal
 from histos.mediate.inspection import _close_quietly, _uninspectable_kind
-from histos.mediate.recorder import _call_policy_hash
 from histos.mediate.toolref import _adopt_metadata
 from histos.policy.contracts import Effect, GateDecision, GateRequest, Principal
 
@@ -43,22 +43,9 @@ from histos.policy.contracts import Effect, GateDecision, GateRequest, Principal
 def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal | None) -> Callable[..., Any]:
     binder = _positional_binder(tool)
 
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
+    def _gated_call(*args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
-        # One read of the engine, held for the whole call, taken before anything can
-        # record. It carries the hash of the ruleset it was built with, so the decision
-        # and the record stamped with it cannot come from two different policies — which
-        # is what a swap landing mid-call produced: a `resource_constraint` denial
-        # recorded against a ruleset that has no constraints.
-        #
-        # The context variable is set rather than reset on the way out. It is read only
-        # by `record()`, which is only reached from inside a gated call, and every such
-        # call sets it here first — so "the ruleset this thread is currently deciding
-        # under" is always current where it is read. Set later, the records above this
-        # line — no principal, a binding denial — would have carried the *previous*
-        # call's hash.
-        engine = gate.engine
-        _call_policy_hash.set(engine.policy_hash)
+        engine = _callctx.engine_for(gate)
         active = bound or _current_principal.get()
         if args:
             if binder is None:
@@ -74,7 +61,7 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
         if active is None:
             decision = gate._no_principal()
             gate._recorder.record(tool_name, call_args, decision, "pre", started, None, gate._will_execute(decision))
-            if gate._enforce:
+            if _callctx.enforce_for(gate):
                 raise GateDenied(decision)
             return _invoke(tool, binder, call_args)
 
@@ -93,7 +80,7 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
                 gate._will_execute(binding_denial),
                 rebound,
             )
-            if gate._enforce:
+            if _callctx.enforce_for(gate):
                 raise GateDenied(binding_denial)
             return _invoke(tool, binder, call_args)
 
@@ -114,8 +101,10 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
         # and leaving it out meant observe invoked the tool with a missing argument
         # and raised a `TypeError` on a call enforce serves without complaint. A dry
         # run that breaks the app teaches the team to skip the dry run.
-        supplied = {k: v for k, v in overrides.items() if k not in exec_source} if not gate._enforce else {}
-        exec_args = checked_args if gate._enforce else {**exec_source, **supplied}
+        supplied = (
+            {k: v for k, v in overrides.items() if k not in exec_source} if not _callctx.enforce_for(gate) else {}
+        )
+        exec_args = checked_args if _callctx.enforce_for(gate) else {**exec_source, **supplied}
         call_args = checked_args
 
         req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=engine.policy_hash)
@@ -185,7 +174,7 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
                 pre = raced
 
         gate._recorder.record(tool_name, call_args, pre, "pre", started, active, gate._will_execute(pre), rebound)
-        if gate._enforce and pre.effect is not Effect.ALLOW:
+        if _callctx.enforce_for(gate) and pre.effect is not Effect.ALLOW:
             # Deny-by-default over the *effect space*, not a list of the effects
             # that block. Written the other way round, an effect this branch has
             # not been taught — a member added to `Effect` later, or one a host
@@ -222,6 +211,17 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
             raise redacted from None
         return _finish(gate, tool_name, call_args, active, started, result)
 
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        # The snapshot is opened here and closed in `finally`, which is what makes a
+        # *nested* gate work: a gated tool calling a second gated tool is ordinary, and
+        # without the reset the inner Gate's ruleset stayed behind and stamped the outer
+        # POST record. Everything inside reads the snapshot rather than the Gate.
+        token = _callctx.open_context(gate)
+        try:
+            return _gated_call(*args, **kwargs)
+        finally:
+            _callctx.close_context(token)
+
     _adopt_metadata(wrapped, tool, tool_name)
     return wrapped
 
@@ -229,22 +229,9 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
 def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal | None) -> Callable[..., Any]:
     binder = _positional_binder(tool)
 
-    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+    async def _gated_call(*args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
-        # One read of the engine, held for the whole call, taken before anything can
-        # record. It carries the hash of the ruleset it was built with, so the decision
-        # and the record stamped with it cannot come from two different policies — which
-        # is what a swap landing mid-call produced: a `resource_constraint` denial
-        # recorded against a ruleset that has no constraints.
-        #
-        # The context variable is set rather than reset on the way out. It is read only
-        # by `record()`, which is only reached from inside a gated call, and every such
-        # call sets it here first — so "the ruleset this thread is currently deciding
-        # under" is always current where it is read. Set later, the records above this
-        # line — no principal, a binding denial — would have carried the *previous*
-        # call's hash.
-        engine = gate.engine
-        _call_policy_hash.set(engine.policy_hash)
+        engine = _callctx.engine_for(gate)
         active = bound or _current_principal.get()
         if args:
             if binder is None:
@@ -261,7 +248,7 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
         if active is None:
             decision = gate._no_principal()
             gate._recorder.record(tool_name, call_args, decision, "pre", started, None, gate._will_execute(decision))
-            if gate._enforce:
+            if _callctx.enforce_for(gate):
                 raise GateDenied(decision)
             return await _invoke(tool, binder, call_args)
 
@@ -280,7 +267,7 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
                 gate._will_execute(binding_denial),
                 rebound,
             )
-            if gate._enforce:
+            if _callctx.enforce_for(gate):
                 raise GateDenied(binding_denial)
             return await _invoke(tool, binder, call_args)
 
@@ -294,8 +281,10 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
         # and leaving it out meant observe invoked the tool with a missing argument
         # and raised a `TypeError` on a call enforce serves without complaint. A dry
         # run that breaks the app teaches the team to skip the dry run.
-        supplied = {k: v for k, v in overrides.items() if k not in exec_source} if not gate._enforce else {}
-        exec_args = checked_args if gate._enforce else {**exec_source, **supplied}
+        supplied = (
+            {k: v for k, v in overrides.items() if k not in exec_source} if not _callctx.enforce_for(gate) else {}
+        )
+        exec_args = checked_args if _callctx.enforce_for(gate) else {**exec_source, **supplied}
         call_args = checked_args
 
         req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=engine.policy_hash)
@@ -351,7 +340,7 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
                 pre = raced
 
         gate._recorder.record(tool_name, call_args, pre, "pre", started, active, gate._will_execute(pre), rebound)
-        if gate._enforce and pre.effect is not Effect.ALLOW:
+        if _callctx.enforce_for(gate) and pre.effect is not Effect.ALLOW:
             # Deny-by-default over the *effect space*, not a list of the effects
             # that block. Written the other way round, an effect this branch has
             # not been taught — a member added to `Effect` later, or one a host
@@ -386,6 +375,17 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
             raise redacted from None
         return _finish(gate, tool_name, call_args, active, started, result)
 
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        # The snapshot is opened here and closed in `finally`, which is what makes a
+        # *nested* gate work: a gated tool calling a second gated tool is ordinary, and
+        # without the reset the inner Gate's ruleset stayed behind and stamped the outer
+        # POST record. Everything inside reads the snapshot rather than the Gate.
+        token = _callctx.open_context(gate)
+        try:
+            return await _gated_call(*args, **kwargs)
+        finally:
+            _callctx.close_context(token)
+
     _adopt_metadata(wrapped, tool, tool_name)
     return wrapped
 
@@ -402,16 +402,14 @@ def _finish(
     lazy = _uninspectable_kind(result)
     if lazy is not None:
         return _refuse_uninspectable(gate, tool_name, call_args, active, started, result, lazy)
-    post_req = GateRequest(
-        tool_name, call_args, active, phase="post", policy_hash=_call_policy_hash.get() or gate._recorder.policy_hash
-    )
-    post, final = gate.engine.post(post_req, result)
+    post_req = GateRequest(tool_name, call_args, active, phase="post", policy_hash=_callctx.policy_hash_for(gate))
+    post, final = _callctx.engine_for(gate).post(post_req, result)
     # The tool has already run by definition on the post phase.
     gate._recorder.record(tool_name, call_args, post, "post", started, active, True)
-    if post.effect is Effect.DENY and gate._enforce:
+    if post.effect is Effect.DENY and _callctx.enforce_for(gate):
         raise GateDenied(post)
     # observe mode never modifies the result.
-    return final if gate._enforce else result
+    return final if _callctx.enforce_for(gate) else result
 
 
 def _refuse_unnameable(
@@ -450,7 +448,7 @@ def _refuse_unnameable(
         ),
     )
     gate._recorder.record(tool_name, dict(kwargs), decision, "pre", started, active, gate._will_execute(decision))
-    if gate._enforce:
+    if _callctx.enforce_for(gate):
         raise GateDenied(decision)
     return tool(*args, **kwargs)
 
@@ -491,7 +489,7 @@ def _refuse_uninspectable(
     )
     # executed=True without argument: the tool body ran to completion.
     gate._recorder.record(tool_name, call_args, decision, "post", started, active, True)
-    if not gate._enforce:
+    if not _callctx.enforce_for(gate):
         # observe mode never modifies the result, and closing it would modify it
         # more thoroughly than any redaction — the caller would get an exhausted
         # object where its data used to be.
@@ -518,10 +516,8 @@ def _finish_exception(
     Returns ``exc`` itself when nothing had to be removed — the caller re-raises it
     with its original traceback intact, so the common case is unchanged.
     """
-    post_req = GateRequest(
-        tool_name, call_args, active, phase="post", policy_hash=_call_policy_hash.get() or gate._recorder.policy_hash
-    )
-    post, text = gate.engine.post_exception(post_req, exc, mutate=gate._enforce)
+    post_req = GateRequest(tool_name, call_args, active, phase="post", policy_hash=_callctx.policy_hash_for(gate))
+    post, text = _callctx.engine_for(gate).post_exception(post_req, exc, mutate=_callctx.enforce_for(gate))
     # `post_exception` reads the exception's *text*, so an exception carrying its
     # payload as a lazy object — `raise ToolError(rows_iterator)` — is the raising
     # half of the same hole `_refuse_uninspectable` closes: `str(exc)` shows
@@ -540,7 +536,7 @@ def _finish_exception(
     # The tool ran — it just ended by raising.
     gate._recorder.record(tool_name, call_args, post, "post", started, active, True)
     # observe mode records what it *would* have removed and changes nothing.
-    if post.effect is Effect.ALLOW or not gate._enforce:
+    if post.effect is Effect.ALLOW or not _callctx.enforce_for(gate):
         return exc
     if lazy is not None:
         # substituting the redacted exception is what drops the unscanned payload —

@@ -1402,3 +1402,182 @@ def test_a_record_names_the_ruleset_that_decided_it_across_a_hot_swap():
         "the record names the ruleset that was swapped in, not the one that decided: "
         f"recorded {record['policy_hash'][:20]}, decided under {strict.content_hash()[:20]}"
     )
+
+
+def test_post_is_decided_by_the_same_ruleset_as_pre():
+    """A swap between PRE and POST applied the *new* rules to the result.
+
+    The wrapper captured `gate.engine` at entry and `_finish` read `gate.engine` again,
+    so a policy swapped while the tool was running decided the outbound half. Measured:
+    PRE under a policy that redacts secrets, POST under one that does not, and an AWS
+    key came back in the clear — with the record naming the first policy's hash. A
+    secret released under rules that forbade it, attributed to the rules that forbade it.
+    """
+    import threading
+
+    def ruleset(redact):
+        return Policy(
+            tools={"t": ToolContract(name="t", args=Schema({}), redact_secret_output=redact)},
+            permissions={"r": frozenset({"t"})},
+        )
+
+    strict, loose = ruleset(True), ruleset(False)
+    running, release = threading.Event(), threading.Event()
+    secret = "AKIAIOSFODNN7EXAMPLE"
+
+    def tool():
+        running.set()
+        release.wait(5)
+        return secret
+
+    sink = InMemoryAuditSink()
+    gate = Gate(strict, audit=sink)
+    safe = gate.wrap(tool, name="t")
+    out: dict[str, object] = {}
+
+    def caller():
+        with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+            out["result"] = safe()
+
+    worker = threading.Thread(target=caller)
+    worker.start()
+    assert running.wait(5), "the tool never ran"
+    gate.policy = loose
+    release.set()
+    worker.join(5)
+
+    assert secret not in str(out.get("result")), "the outbound half ran under rules the call did not start with"
+    post = [e for e in sink.entries if e["phase"] == "post"][-1]
+    assert post["policy_hash"] == strict.content_hash()
+    assert post["policy_version"] == strict.policy_version
+
+
+def test_a_nested_gate_does_not_repoint_the_outer_record():
+    """One tool calling another gated tool is ordinary, and it poisoned the outer POST.
+
+    The call hash lives in a `ContextVar` that was `set` and never reset, so the inner
+    Gate's value survived its own call and the outer POST recorded the *inner* policy's
+    hash beside the *outer* policy's version — a record identifying no ruleset that
+    exists.
+    """
+    inner_policy = Policy(
+        tools={"inner": ToolContract(name="inner", args=Schema({}))},
+        permissions={"r": frozenset({"inner"})},
+        policy_version="9",
+    )
+    outer_policy = Policy(
+        tools={"outer": ToolContract(name="outer", args=Schema({}))},
+        permissions={"r": frozenset({"outer"})},
+        policy_version="1",
+    )
+    inner_sink, outer_sink = InMemoryAuditSink(), InMemoryAuditSink()
+    inner = Gate(inner_policy, audit=inner_sink).wrap(lambda: "inner done", name="inner")
+    outer_gate = Gate(outer_policy, audit=outer_sink)
+    safe = outer_gate.wrap(lambda: inner(), name="outer")
+
+    with use_principal(Principal(role="r", identity="i")):
+        safe()
+
+    post = [e for e in outer_sink.entries if e["phase"] == "post"][-1]
+    assert post["policy_hash"] == outer_policy.content_hash(), "the outer record took the inner gate's hash"
+    assert post["policy_version"] == outer_policy.policy_version
+
+
+def test_the_recorded_version_belongs_to_the_recorded_hash():
+    """Half the snapshot is not a snapshot.
+
+    `policy_hash` came from the call's context and `policy_version` from the recorder's
+    live field, so a swap mid-call produced a record pairing one policy's hash with
+    another's version — an identifier for a ruleset that never existed.
+    """
+    import threading
+
+    from histos.policy.authz import Constraint
+
+    def ruleset(constrained, version):
+        return Policy(
+            tools={
+                "t": ToolContract(
+                    name="t",
+                    args=Schema({"id": Field(type="string")}),
+                    constraints=(Constraint("owner", "eq", value="alice"),) if constrained else (),
+                )
+            },
+            permissions={"r": frozenset({"t"})},
+            policy_version=version,
+        )
+
+    strict, loose = ruleset(True, "1"), ruleset(False, "2")
+    entered, release = threading.Event(), threading.Event()
+
+    def resolver(tool_name, args):
+        entered.set()
+        release.wait(5)
+        return {"owner": "bob"}
+
+    sink = InMemoryAuditSink()
+    gate = Gate(strict, audit=sink, resource_resolver=resolver)
+    safe = gate.wrap(lambda id: "RESULT", name="t")
+
+    def caller():
+        with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+            safe(id="x")
+
+    worker = threading.Thread(target=caller)
+    worker.start()
+    assert entered.wait(5)
+    gate.policy = loose
+    release.set()
+    worker.join(5)
+
+    record = sink.entries[-1]
+    assert record["policy_hash"] == strict.content_hash()
+    assert record["policy_version"] == strict.policy_version, (
+        f"hash names {strict.policy_version!r}'s ruleset, version says {record['policy_version']!r}"
+    )
+
+
+def test_the_enforcement_mode_is_decided_once_per_call():
+    """Mode is part of the ruleset a call runs under, so it belongs to the snapshot.
+
+    Read live, `gate.enforcement = "observe"` landing between PRE and the branch that
+    acts on the decision turned a denial into an execution: the gate said no and the
+    code that raises asked a Gate which had since been told to watch rather than block.
+    """
+    import threading
+
+    ran: list[int] = []
+    entered, release = threading.Event(), threading.Event()
+
+    def resolver(tool_name, args):
+        entered.set()
+        release.wait(5)
+        return {"owner": "bob"}  # the constraint refuses this
+
+    from histos.policy.authz import Constraint
+
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t",
+                args=Schema({"id": Field(type="string")}),
+                constraints=(Constraint("owner", "eq", value="alice"),),
+            )
+        },
+        permissions={"r": frozenset({"t"})},
+    )
+    gate = Gate(policy, audit=InMemoryAuditSink(), resource_resolver=resolver, mode="enforce")
+    safe = gate.wrap(lambda id: ran.append(1) or "RESULT", name="t")
+
+    def caller():
+        with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+            safe(id="x")
+
+    worker = threading.Thread(target=caller)
+    worker.start()
+    assert entered.wait(5)
+    gate.mode = "observe"  # a call that started under enforce must still be blocked
+    release.set()
+    worker.join(5)
+
+    assert not ran, "a call denied under enforce executed because the mode moved mid-call"
