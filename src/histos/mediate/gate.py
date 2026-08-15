@@ -226,11 +226,30 @@ class Gate:
         the old ruleset forever. It also has to re-hash, because ``policy_hash`` is
         what ties an audit record to the ruleset that produced it — a stale hash is a
         record that names a policy which did not decide.
+
+        A *new* Engine, never the old one edited. Editing it in place reached into
+        calls already running: parked in a resolver mid-PRE, a call was refused by a
+        `resource_constraint` that existed only in the outgoing ruleset while the record
+        carried the incoming one's hash — a policy with no such constraint, named as the
+        author of a constraint denial. A call reads `gate.engine` once and holds it, so
+        building a replacement leaves anything in flight on the ruleset it started under
+        and points the *next* call at the new one, which is what a swap should mean.
+
+        The same `LimitStore` and the same callbacks carry over: counters are process
+        state, not policy, and forgetting them on every swap would hand every caller
+        their rate allowance back.
         """
         self._policy = _coerce_policy(policy)
         engine = getattr(self, "engine", None)
         if engine is not None:
-            engine.policy = self._policy
+            self.engine = Engine(
+                self._policy,
+                engine.limits,
+                content_rules=engine.content_rules,
+                resource_resolver=engine.resource_resolver,
+                escalate=engine.escalate,
+                output_budget=engine._output_budget,
+            )
         self._refresh_policy_hash()
 
     def _refresh_policy_hash(self) -> None:

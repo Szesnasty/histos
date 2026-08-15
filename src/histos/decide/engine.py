@@ -170,6 +170,10 @@ class Engine:
         if not isinstance(output_budget, int) or isinstance(output_budget, bool) or output_budget < 1:
             raise PolicyError(f"output_budget must be a positive number of characters, got {output_budget!r}")
         self.policy = policy
+        # Computed here so one read of `gate.engine` yields the ruleset *and* its hash
+        # together. Read separately they are two reads with a swap possible between
+        # them, which is how a record came to name a policy that had not decided it.
+        self.policy_hash = policy.content_hash()
         self.limits = limits
         self.content_rules = content_rules
         self.resource_resolver = resource_resolver

@@ -19,11 +19,19 @@ import sys
 import threading
 import time
 import warnings
+from contextvars import ContextVar
 from typing import Any
 
 from histos._version import __version__
 from histos.policy.contracts import GateDecision, Principal
 from histos.trail.auditrecord import AuditRecord, digest_args
+
+# The ruleset hash for the call currently running on this thread or task, set by the
+# wrapper from the Engine it captured at entry. A `ContextVar` rather than a parameter
+# threaded through twelve `record()` sites: it is per-call by construction, which is the
+# property being restored, and twelve mechanical edits is how the *previous* fix in this
+# file went wrong. Empty outside a gated call, where the recorder's own field is right.
+_call_policy_hash: ContextVar[str] = ContextVar("histos_call_policy_hash", default="")
 
 
 class DecisionRecorder:
@@ -90,7 +98,7 @@ class DecisionRecorder:
             enforced=self.enforced,
             executed=executed,
             latency_us=int((time.perf_counter() - started) * 1_000_000),
-            policy_hash=self.policy_hash,
+            policy_hash=_call_policy_hash.get() or self.policy_hash,
             policy_version=self.policy_version,
             gate_version=__version__,
         )

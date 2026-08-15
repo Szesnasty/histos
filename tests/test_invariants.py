@@ -1276,3 +1276,129 @@ def test_an_ordinary_call_through_a_callback_still_runs():
     with use_principal(Principal(role="r", identity="alice")):
         safe(payload={"amount": 1, "note": "ordinary nested data"})
     assert ran == [1]
+
+
+def test_no_collection_handed_to_the_policy_stays_reachable_by_its_caller():
+    """A frozen dataclass freezes the *binding*, not what the binding points at.
+
+    `Field.enum` is annotated `tuple` and the constructor takes a list without copying
+    it, so the caller keeps a handle on the allowed values of a live Gate: append to it
+    and an argument the gate refused a moment ago is admitted. `ToolContract.constraints`
+    is the same shape and worse — `rules.clear()` removes row-level authorization from a
+    running gate. In both cases the recorded `policy_hash` stays at the value from
+    construction while `content_hash()` has moved, so the trail names a ruleset that is
+    no longer the one deciding, which is the one thing it may never do.
+
+    Seven collections reach the policy from the Python API and every one of them was
+    live. Asked here as one property rather than seven examples, because the eighth is
+    the one nobody writes an example for.
+    """
+    from histos.policy.authz import Binding, Constraint
+
+    mutations: list[tuple[str, object, object]] = []
+
+    enum_values = ["ok"]
+    field = Field(type="string", enum=enum_values)
+    enum_values.append("evil")
+    mutations.append(("Field.enum", field.enum, "evil"))
+
+    item_values = ["ok"]
+    items = Field(type="array", item_type="string", item_enum=item_values)
+    item_values.append("evil")
+    mutations.append(("Field.item_enum", items.item_enum, "evil"))
+
+    literal = ["ok"]
+    constraint = Constraint("f", "in", value=literal)
+    literal.append("evil")
+    mutations.append(("Constraint.value", constraint.value, "evil"))
+
+    rules = [Constraint("owner", "eq", value="alice")]
+    binds = [Binding("tenant", "tenant")]
+    contract = ToolContract(name="t", args=Schema({}), constraints=rules, bindings=binds)
+    rules.clear()
+    binds.clear()
+    mutations.append(("ToolContract.constraints", contract.constraints, "<emptied>"))
+    mutations.append(("ToolContract.bindings", contract.bindings, "<emptied>"))
+
+    declared = {"a": Field()}
+    schema = Schema(declared)
+    declared["injected"] = Field()
+    mutations.append(("Schema.fields", schema.fields, "injected"))
+
+    grants = {"r": frozenset({"t"})}
+    tools = {"t": ToolContract(name="t", args=Schema({}))}
+    policy = Policy(tools=tools, permissions=grants)
+    grants["admin"] = frozenset({"t"})
+    tools["backdoor"] = ToolContract(name="backdoor", args=Schema({}))
+    mutations.append(("Policy.permissions", policy.permissions, "admin"))
+    mutations.append(("Policy.tools", policy.tools, "backdoor"))
+
+    reached = []
+    for name, held, marker in mutations:
+        if marker == "<emptied>":
+            if not held:
+                reached.append(f"{name} was emptied from outside")
+        elif marker in held:
+            reached.append(f"{name} grew {marker!r} from outside")
+    assert not reached, "the caller still owns part of a built policy: " + "; ".join(reached)
+
+
+def test_a_record_names_the_ruleset_that_decided_it_across_a_hot_swap():
+    """The trail's central promise, under the one event that can break it.
+
+    `gate.policy = ...` updates three things in sequence — the Gate's reference, the
+    Engine's, and the recorder's hash — and a call in flight reads them at different
+    moments. Parked in the resolver, mid-PRE, while another thread swaps the ruleset: the
+    call was refused by a `resource_constraint` that exists **only in the old policy**,
+    and the record carried the **new** policy's hash. A ruleset with no such constraint,
+    named as the author of a constraint denial.
+
+    Nothing is wrong with swapping a policy mid-flight — a deploy does it. What has to
+    hold is that one call sees one ruleset from end to end, and that the record says
+    which one.
+    """
+    import threading
+
+    from histos.policy.authz import Constraint
+
+    def ruleset(constrained):
+        return Policy(
+            tools={
+                "t": ToolContract(
+                    name="t",
+                    args=Schema({"id": Field(type="string")}),
+                    constraints=(Constraint("owner", "eq", value="alice"),) if constrained else (),
+                )
+            },
+            permissions={"r": frozenset({"t"})},
+        )
+
+    strict, loose = ruleset(True), ruleset(False)
+    entered, release = threading.Event(), threading.Event()
+
+    def resolver(tool_name, args):
+        entered.set()
+        release.wait(5)
+        return {"owner": "bob"}  # refused by `strict`, unconstrained under `loose`
+
+    sink = InMemoryAuditSink()
+    gate = Gate(strict, audit=sink, resource_resolver=resolver)
+    safe = gate.wrap(lambda id: "RESULT", name="t")
+
+    def caller():
+        with use_principal(Principal(role="r", identity="i")), contextlib.suppress(Exception):
+            safe(id="x")
+
+    worker = threading.Thread(target=caller)
+    worker.start()
+    assert entered.wait(5), "the resolver never ran"
+    gate.policy = loose
+    release.set()
+    worker.join(5)
+
+    record = sink.entries[-1]
+    assert record["rule"] == "resource_constraint", f"expected the old policy to decide, got {record['rule']}"
+    assert record["policy_hash"] == strict.content_hash(), (
+        "the record names the ruleset that was swapped in, not the one that decided: "
+        f"recorded {record['policy_hash'][:20]}, decided under {strict.content_hash()[:20]}"
+    )
