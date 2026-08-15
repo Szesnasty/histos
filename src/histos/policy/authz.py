@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from histos.errors import PolicyError
-from histos.policy.frozen import Principal
+from histos.policy.frozen import Principal, _snapshot_value
 
 _UNSET: Any = object()
 
@@ -142,6 +142,11 @@ class Constraint:
             raise PolicyError("constraint needs exactly one of value= or principal_attr=")
         if has_value:
             _reject_unhashable_value(self.value, f"constraint {self.field!r} {self.op}")
+            # A literal may be a list or a dict — `_reject_unhashable_value` allows both
+            # — and the caller kept it. `literal.append("evil")` widened an `in`
+            # constraint on a gate that was already running. Detached after the check,
+            # so what is validated is what is stored.
+            object.__setattr__(self, "value", _snapshot_value(self.value))
 
     @classmethod
     def owns(cls, field: str, principal_attr: str | None = None) -> Constraint:

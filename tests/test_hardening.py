@@ -177,10 +177,16 @@ def test_review_flags_permissive_and_unconstrained_write():
             "roles": {"admin": {"allow": ["delete_row", "wild"]}},
         }
     )
-    # give 'wild' a permissive (allow_extra) schema to exercise F6
+    # give 'wild' a permissive (allow_extra) schema to exercise F6. Rebuilt rather than
+    # assigned into `policy.tools`, which is read-only now: a caller who kept the dict
+    # they passed could widen a policy after its `content_hash` had been recorded, so
+    # every map on a Policy refuses writes whether or not a Gate owns it.
     from dataclasses import replace
 
-    policy.tools["wild"] = replace(policy.tools["wild"], args=Schema({}, allow_extra=True))
+    policy = replace(
+        policy,
+        tools={**policy.tools, "wild": replace(policy.tools["wild"], args=Schema({}, allow_extra=True))},
+    )
 
     warnings = review_policy(policy).warnings
     assert any("no resource constraint" in w for w in warnings)

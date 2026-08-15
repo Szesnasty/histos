@@ -43,9 +43,9 @@ class ReadOnlyDict(dict):  # type: ignore[type-arg]
 
     def _readonly(self, *_a: Any, **_k: Any) -> Any:
         raise TypeError(
-            "this mapping is read-only: a Gate's ruleset cannot be edited in place, because every audit "
-            "record would keep naming the hash computed before the edit. Swap the whole policy with "
-            "`gate.policy = ...`, which re-hashes."
+            "this mapping is read-only: a ruleset cannot be edited in place, because a hash was taken "
+            "over it and every audit record naming that hash would go on naming it. Build a new one with "
+            "`dataclasses.replace(policy, ...)`, or on a live gate `gate.policy = ...`, which re-hashes."
         )
 
     def __setitem__(self, *_a: Any, **_k: Any) -> Any:
@@ -444,3 +444,58 @@ class Principal:
         # only the key set takes part; `__eq__` still separates principals that differ
         # only in a value, which is all a hash has to allow.
         return hash((self.role, self.identity, self.can_view, tuple(sorted(self.attributes))))
+
+
+def detach_sequence(values: Any) -> tuple[Any, ...]:
+    """A tuple of snapshots, for a field annotated as one and handed a list.
+
+    `frozen=True` freezes the *binding*, never what the binding points at, and every
+    sequence on a policy object was annotated `tuple` and accepted a list unchanged. So
+    the caller kept a handle on a live Gate's rules: `allowed.append("evil")` widened an
+    argument enum a moment after the gate refused that value, and `rules.clear()` took
+    row-level authorization off a running gate — with the recorded `policy_hash` still
+    reading as it did at construction while `content_hash()` had moved.
+
+    Each element goes through :func:`_snapshot_value` as well as the tuple conversion,
+    because an element can be a container too: an enum of lists, a constraint literal
+    holding one. That deep-copies, which is what actually severs the caller's handle;
+    freezing is the second line.
+
+    Use :func:`detach_frozen_sequence` for a sequence of policy dataclasses. Deep-copying
+    those breaks sentinel identity — `Constraint.value` defaults to a module-level
+    `object()`, and a *copy* of that sentinel is not it, so `value is _UNSET` went false
+    and the raw object reached the canonicalizer as "not canonicalizable". Seventy-two
+    tests said so at once.
+    """
+    return tuple(_snapshot_value(v) for v in values)
+
+
+def detach_frozen_sequence(values: Any) -> tuple[Any, ...]:
+    """A tuple of the same elements, for a sequence of frozen policy objects.
+
+    The conversion is the whole fix here: the caller's `list` becomes a `tuple` nothing
+    can append to or clear. The elements are left alone deliberately — each is a frozen
+    dataclass that detaches its own collections in its own `__post_init__`, so the graph
+    is covered by induction, and copying them instead would break the identity of the
+    sentinels they carry.
+    """
+    return tuple(values)
+
+
+def detach_mapping(mapping: Any) -> dict[Any, Any]:
+    """The same for a mapping, one level.
+
+    One level is enough here and deliberately not more: the values are policy objects
+    that detach their own collections in their own `__post_init__`, so the graph is
+    covered by induction rather than by one deep walk that would copy every contract in
+    a policy on every construction. What this stops is the *dict* growing — a tool or a
+    grant appearing in a Gate that was built without it.
+
+    A :class:`ReadOnlyDict`, not a plain one. Returning a plain dict *undid* the views
+    the Gate installs — `Gate` rebuilds its Policy through `replace()`, `__post_init__`
+    runs again, and the wrapper it had just put on came straight back off. Five tests
+    that exist for exactly that failed, which is the only reason this line says
+    `ReadOnlyDict`: detaching is not the same guarantee as refusing writes, and this
+    map needs both.
+    """
+    return ReadOnlyDict(dict(mapping))

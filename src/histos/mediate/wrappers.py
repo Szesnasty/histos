@@ -35,6 +35,7 @@ from histos.errors import (
 from histos.mediate.callsig import _invoke, _positional_binder, _Unnameable
 from histos.mediate.identity import _current_principal
 from histos.mediate.inspection import _close_quietly, _uninspectable_kind
+from histos.mediate.recorder import _call_policy_hash
 from histos.mediate.toolref import _adopt_metadata
 from histos.policy.contracts import Effect, GateDecision, GateRequest, Principal
 
@@ -44,6 +45,20 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
+        # One read of the engine, held for the whole call, taken before anything can
+        # record. It carries the hash of the ruleset it was built with, so the decision
+        # and the record stamped with it cannot come from two different policies — which
+        # is what a swap landing mid-call produced: a `resource_constraint` denial
+        # recorded against a ruleset that has no constraints.
+        #
+        # The context variable is set rather than reset on the way out. It is read only
+        # by `record()`, which is only reached from inside a gated call, and every such
+        # call sets it here first — so "the ruleset this thread is currently deciding
+        # under" is always current where it is read. Set later, the records above this
+        # line — no principal, a binding denial — would have carried the *previous*
+        # call's hash.
+        engine = gate.engine
+        _call_policy_hash.set(engine.policy_hash)
         active = bound or _current_principal.get()
         if args:
             if binder is None:
@@ -103,8 +118,8 @@ def _wrap_sync(gate, tool: Callable[..., Any], tool_name: str, bound: Principal 
         exec_args = checked_args if gate._enforce else {**exec_source, **supplied}
         call_args = checked_args
 
-        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=gate._recorder.policy_hash)
-        pre = gate.engine.pre(req)
+        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=engine.policy_hash)
+        pre = engine.pre(req)
 
         # Human/operator confirmation resolved via a host callback (never a tool
         # the agent can call) — an injected agent cannot self-approve.
@@ -216,6 +231,20 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
 
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
+        # One read of the engine, held for the whole call, taken before anything can
+        # record. It carries the hash of the ruleset it was built with, so the decision
+        # and the record stamped with it cannot come from two different policies — which
+        # is what a swap landing mid-call produced: a `resource_constraint` denial
+        # recorded against a ruleset that has no constraints.
+        #
+        # The context variable is set rather than reset on the way out. It is read only
+        # by `record()`, which is only reached from inside a gated call, and every such
+        # call sets it here first — so "the ruleset this thread is currently deciding
+        # under" is always current where it is read. Set later, the records above this
+        # line — no principal, a binding denial — would have carried the *previous*
+        # call's hash.
+        engine = gate.engine
+        _call_policy_hash.set(engine.policy_hash)
         active = bound or _current_principal.get()
         if args:
             if binder is None:
@@ -269,8 +298,8 @@ def _wrap_async(gate, tool: Callable[..., Any], tool_name: str, bound: Principal
         exec_args = checked_args if gate._enforce else {**exec_source, **supplied}
         call_args = checked_args
 
-        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=gate._recorder.policy_hash)
-        pre = await gate.engine.apre(req)
+        req = GateRequest(tool_name, call_args, active, phase="pre", policy_hash=engine.policy_hash)
+        pre = await engine.apre(req)
 
         if pre.effect is Effect.REQUIRE_CONFIRMATION and gate._confirm is not None:
             try:
@@ -373,7 +402,9 @@ def _finish(
     lazy = _uninspectable_kind(result)
     if lazy is not None:
         return _refuse_uninspectable(gate, tool_name, call_args, active, started, result, lazy)
-    post_req = GateRequest(tool_name, call_args, active, phase="post", policy_hash=gate._recorder.policy_hash)
+    post_req = GateRequest(
+        tool_name, call_args, active, phase="post", policy_hash=_call_policy_hash.get() or gate._recorder.policy_hash
+    )
     post, final = gate.engine.post(post_req, result)
     # The tool has already run by definition on the post phase.
     gate._recorder.record(tool_name, call_args, post, "post", started, active, True)
@@ -487,7 +518,9 @@ def _finish_exception(
     Returns ``exc`` itself when nothing had to be removed — the caller re-raises it
     with its original traceback intact, so the common case is unchanged.
     """
-    post_req = GateRequest(tool_name, call_args, active, phase="post", policy_hash=gate._recorder.policy_hash)
+    post_req = GateRequest(
+        tool_name, call_args, active, phase="post", policy_hash=_call_policy_hash.get() or gate._recorder.policy_hash
+    )
     post, text = gate.engine.post_exception(post_req, exc, mutate=gate._enforce)
     # `post_exception` reads the exception's *text*, so an exception carrying its
     # payload as a lazy object — `raise ToolError(rows_iterator)` — is the raising

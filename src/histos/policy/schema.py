@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from histos.errors import PolicyError
+from histos.policy.frozen import detach_mapping, detach_sequence
 from histos.redos import reject_catastrophic_backtracking
 
 # Cap the input a regex ever sees. This is a size bound and nothing more: at a
@@ -162,6 +163,14 @@ class Field:
     multiple_of: float | None = None
 
     def __post_init__(self) -> None:
+        # Detached first, before any check reads them. Annotated `tuple` and handed a
+        # list, these stayed the caller's: `allowed.append("evil")` widened a live
+        # gate's argument enum after it had already refused that value. See
+        # `detach_sequence`.
+        for name in ("enum", "item_enum"):
+            declared = getattr(self, name)
+            if declared is not None:
+                object.__setattr__(self, name, detach_sequence(declared))
         # Every failure here is a PolicyError: a malformed field is a structural
         # problem in the policy, and a host that wraps `load_policy` in the
         # documented `except PolicyError: fail_closed()` must catch it rather than
@@ -288,6 +297,12 @@ class Schema:
 
     fields: dict[str, Field] = field(default_factory=dict)
     allow_extra: bool = False
+
+    def __post_init__(self) -> None:
+        # One level, which is enough: the values are `Field`s that detach their own
+        # collections. What this stops is the *map* growing — an argument appearing in a
+        # schema that was validated without it. See `detach_mapping`.
+        object.__setattr__(self, "fields", detach_mapping(self.fields))
 
 
 from histos.policy.validation import sensitive_fields as sensitive_fields  # noqa: E402

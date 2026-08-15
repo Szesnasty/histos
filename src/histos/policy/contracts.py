@@ -38,6 +38,7 @@ from histos.policy.canonical import canonical_json
 from histos.policy.fingerprint import _schema_fingerprint, _schema_structure
 from histos.policy.frozen import Principal as Principal
 from histos.policy.frozen import ReadOnlyList as ReadOnlyList
+from histos.policy.frozen import detach_frozen_sequence, detach_mapping
 from histos.policy.schema import Schema
 
 _UNSET: Any = object()
@@ -107,6 +108,11 @@ class ToolContract:
     on_output_violation: str = "redact_all"  # "redact_all" | "deny" | "allow"
 
     def __post_init__(self) -> None:
+        # `rules.clear()` took row-level authorization off a running gate; see
+        # `detach_sequence`. Detached before the checks below, so a value that arrives
+        # as a list is validated in the form it will be enforced in.
+        for name in ("constraints", "bindings"):
+            object.__setattr__(self, name, detach_frozen_sequence(getattr(self, name)))
         if self.access not in ("read", "write"):
             raise PolicyError(f"tool {self.name!r}: access must be 'read'|'write', got {self.access!r}")
         if self.on_output_violation not in ("redact_all", "deny", "allow"):
@@ -261,6 +267,14 @@ class Policy:
                 ) from exc
         if changed:
             object.__setattr__(self, "permissions", coerced)
+        # Last, after every coercion above, because each of them rebuilds a map and a
+        # detachment that ran first would be undone by the rebuild. `Gate` installs
+        # read-only views over these, which protects a *gated* policy and does nothing
+        # for one built and inspected directly — and a caller who kept the dict they
+        # passed could add a tool or a grant to a Policy after its `content_hash` had
+        # been taken and recorded. One level; the values detach their own.
+        for name in ("tools", "permissions", "role_inherits"):
+            object.__setattr__(self, name, detach_mapping(getattr(self, name)))
 
     def contract_for(self, tool_name: str) -> ToolContract | None:
         return self.tools.get(tool_name)
