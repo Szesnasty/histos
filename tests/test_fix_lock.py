@@ -21,6 +21,7 @@ import pytest
 from histos.bundle import load_policy
 from histos.cli import main
 from histos.contracts import Sensitivity
+from histos.display import safe_text
 from histos.errors import PolicyError
 from histos.importers import contracts_from_mcp, contracts_from_openai, contracts_from_openapi, sources_from_mcp
 from histos.lockfile import (
@@ -31,7 +32,6 @@ from histos.lockfile import (
     compare,
     load_lock,
     parse_lock,
-    safe_text,
 )
 from histos.review import review_policy
 
