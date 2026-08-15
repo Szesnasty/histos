@@ -370,6 +370,13 @@ class GateRequest:
     args: dict[str, Any]
     principal: Principal
     phase: str = "pre"  # "pre" | "post"
+    #: The ruleset in force for this call, as `Policy.content_hash()`.
+    #:
+    #: Not read by any check — it is here so a host callback can tell *which* rules it
+    #: is being consulted under. `ApprovalStore` is the reason: an approval is granted
+    #: against a ruleset and spent later, and without this it could not tell that the
+    #: policy had moved in between. Empty when the caller built the request by hand.
+    policy_hash: str = ""
 
 
 # Developer-facing "how to fix it" hints (developer/audit channel ONLY — never the

@@ -6,17 +6,21 @@ says what it is, why it is tolerated, and what resolves it.
 
 ---
 
-## D1 — The LangChain adapter's live path is untested here
+## D1 — The LangChain adapter is tested against a fake, not the live object
 
 [`integrations/base.py`](../src/histos/integrations/base.py) is framework-free
 and fully tested. [`integrations/langchain.py`](../src/histos/integrations/langchain.py)
 — the part that reconstructs a `StructuredTool` and preserves `name` /
-`description` / `args_schema` — is `# pragma: no cover`, because langchain-core is
-not installed and the library has no dependencies.
+`description` / `args_schema` — has six tests, against a `_FakeStructuredTool` and a
+fixture that flips `_HAVE_LANGCHAIN`. They pin both defects this adapter has had: an
+async-only tool resolving to LangChain's own `_run` dispatcher, and `return_direct`,
+`metadata` and `tags` being dropped on protect. This paragraph said the module was
+`# pragma: no cover` and it has not been for some time.
 
-**The cost:** *"one real call through each adapter is denied by policy and the
-framework loop survives"* is unverified here. A change to LangChain's tool API would
-not break a test in this suite.
+**The cost, stated accurately:** what is untested is the *live* object, not the logic.
+A change to LangChain's tool API would break the real adapter and not the fake, so the
+six tests would stay green. That is a narrower gap than "unverified" and it is the one
+that remains.
 
 **Partly answered since.** `demo/00-mediation` drives thirteen entry points at a
 gated tool — every public and private LangChain path, both async paths, the
@@ -28,15 +32,21 @@ is the *loop*: that an agent survives a denial and carries on usefully.
 **What resolves it:** langchain-core in the dev extra plus one integration test per
 adapter, in a CI job allowed dependencies the library itself refuses.
 
-## D2 — CI does not yet cover the adapters
+## D2 — CI covers the adapters; the agent loop is what it does not drive
 
 A workflow now runs ruff, pytest on 3.12/3.13, the conformance corpus, a wheel build,
 and `histos validate` / `coverage` / `drift` against the gallery — the gates this
 library sells to other people are now gates on this library.
 
-**What is still missing:** the adapter question from D1. CI installs no framework, so
-*"is there a tool-execution path that bypasses the gate?"* is still unasked by
-anything automated.
+**Closed, and this entry outlived it.** CI installs `langchain-core` and `langgraph`
+for the demos job and runs `demo/00-mediation/hunt.py`, which drives both frameworks'
+real executors — thirteen entry points, both async paths, and a compiled LangGraph
+`ToolNode`. *"Is there a tool-execution path that bypasses the gate?"* is asked on
+every push, by the thing that found the one real bypass in the first place.
+
+**What is still missing** is D1's remaining half: the agent *loop* surviving a denial
+and carrying on usefully. `hunt.py` proves nothing reaches the tool ungated; it does
+not drive a conversation.
 
 ## D3 — REVIEW findings are prose, not codes
 
@@ -65,10 +75,15 @@ identity**, and the store is in-process only.
 the current target, and it already makes self-approval impossible — the agent cannot
 write to the store.
 
-**The cost:** an approval survives a policy change (it should not — after the rules
-change a human should re-confirm), and there is no way to carry one across
-processes. `confirmation.expires_in` is carried by the *format* but not yet enforced
-by the engine.
+**Two of the four have since landed, and this paragraph claimed otherwise.** An
+approval no longer survives a policy change: the ruleset in force is recorded at grant
+and compared at consume, so a deploy between the click and the call refuses it rather
+than spending it. `confirmation.expires_in` is enforced too — by the store, which has
+the clock the engine deliberately does not.
+
+**The cost that remains:** no nonce and no approver identity in the tuple, and the
+store is in-process, so an approval cannot be carried between processes and the record
+says *that* someone approved rather than *who*.
 
 **What resolves it:** the signed cross-process protocol on the roadmap. It is also a
 prerequisite for treating MCP's MRTR as a confirmation transport — MRTR delivers
@@ -99,21 +114,31 @@ incident here.
 **What resolves it:** `nested_schema` and `cross_field_rules`, both demand-pulled and
 both needing a shape that does not turn the format into an expression language.
 
-## D7 — The post-gate cannot see inside an object return
+## D7 — The post-gate cannot see inside `__slots__` or a `@property`
 
-The outbound half traverses str/bytes/dict/list/tuple/set/frozenset. A return that is a
-dataclass, a Pydantic model or any other opaque object is walked *around*, never into,
-so canary redaction, sensitive-field redaction, projection and the lazy-return refusal
-all stop at its boundary: a canary — or a whole generator — held on an attribute
-reaches the model with `redactions: []` in the record. This is D6's shape on the way
-out, and the same residual is stated in [`../SECURITY.md`](../SECURITY.md).
+**Narrowed since this was written, and this entry said otherwise for two passes.** It
+claimed a dataclass, a Pydantic model "or any other opaque object" is walked around,
+never into. Four of those shapes are entered now — a dataclass, a NamedTuple, anything
+keeping its state in an instance `__dict__` (Pydantic v1 and v2 and every ordinary
+class), and an attribute hung on a `str`/`int`/`bytes` subclass — by the fifth and
+sixth adversarial passes respectively. A canary on any of them is found and the value
+is dropped whole.
 
-**Why tolerated:** reading attributes means executing whatever the class put behind
-them. A `@property` runs author code inside a security check, can raise, can be
-expensive, and can return something different on the second read than the redactor
-inspected on the first — a TOCTOU inside the redactor. Putting the object back together
-afterwards is not generally possible either: the constructor may validate, be frozen, or
-not accept the fields it exposes.
+What remains is narrower and is the part that cannot simply be widened: state that
+lives only in **`__slots__`**, a value behind a **`@property`**, and a C extension type
+keeping its state where no Python attribute shows it. The same residual, in the same
+words, is in [`../SECURITY.md`](../SECURITY.md) — and the two documents disagreeing
+about it is what this rewrite fixes. `tests/test_invariants.py` pins the matrix and
+names both files in its failure message, so the next change to the reach has to move
+all three together.
+
+**Why tolerated:** a `@property` is author code, and running it inside a security check
+can raise, can be expensive, and can return something different on the second read than
+the redactor inspected on the first — a TOCTOU inside the redactor. Slots cannot be told
+apart from a stdlib value type's internals, so reading them would project a `UUID` into
+`{"int": …, "is_safe": …}` and destroy the value. Reading an instance `__dict__`, which
+is what the passes above do, runs no user code — which is why that half could be widened
+and this half cannot.
 
 **What mitigates it:** `strict_returns=True` with a declared `returns` shape. An object
 return does not match a declared field map, so it is handled by `on_output_violation`

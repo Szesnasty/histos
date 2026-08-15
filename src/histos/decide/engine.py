@@ -90,7 +90,9 @@ def _callback_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def for_callback(req: GateRequest) -> GateRequest:
     """The request a host callback sees: same identity, a detached copy of the args."""
-    return GateRequest(req.tool_name, _callback_args(req.args), req.principal, phase=req.phase)
+    return GateRequest(
+        req.tool_name, _callback_args(req.args), req.principal, phase=req.phase, policy_hash=req.policy_hash
+    )
 
 
 # The canary/secret scan is linear in the argument text, and `Field` has no cap on how
