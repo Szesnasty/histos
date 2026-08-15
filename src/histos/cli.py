@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from histos._version import __version__
-from histos.audit import verify_chain
 from histos.bundle import dump_bundle, load_policy
 from histos.contracts import GateRequest, Policy, Principal
 from histos.display import safe_text
@@ -32,6 +31,7 @@ from histos.gate import Gate
 from histos.importers import KINDS, ToolSource, reader_for
 from histos.lockfile import build_lock, compare, contract_hash, load_lock, lock_path_for, unverifiable_tools
 from histos.review import review_policy
+from histos.verify import verify_chain
 
 
 def _read_sources(path: str, kind: str) -> list[ToolSource]:

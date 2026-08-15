@@ -443,7 +443,7 @@ def test_the_refusal_has_its_own_published_code_with_a_remedy() -> None:
     import json
     from pathlib import Path
 
-    from histos.audit import _REASON_IS_POLICY_TEXT
+    from histos.auditrecord import _REASON_IS_POLICY_TEXT
     from histos.contracts import _REMEDY
 
     spec = json.loads((Path(__file__).resolve().parent.parent / "spec" / "decision-codes.json").read_text())

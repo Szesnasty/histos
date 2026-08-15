@@ -45,10 +45,10 @@ from histos import (
     use_principal,
     verify_chain,
 )
-from histos.audit import tip_path_for
 from histos.contracts import Effect, GateRequest
 from histos.detectors import scan_string
 from histos.lockfile import schema_hash
+from histos.logpath import tip_path_for
 from histos.review import review_policy
 
 CANARY = "CANARY-7f3a-SECRET"
@@ -634,7 +634,8 @@ def test_a_rewrite_that_parses_the_same_but_reads_differently_is_caught(tmp_path
 def _write_legacy_tip(log, key: bytes, count: int, tip: str) -> None:
     """The sidecar the writer of that era produced, so verification reaches the line
     check instead of stopping at a missing tip."""
-    from histos.audit import _tip_body, tip_path_for
+    from histos.audit import _tip_body
+    from histos.logpath import tip_path_for
 
     body = _tip_body(count, tip)
     mac = hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()

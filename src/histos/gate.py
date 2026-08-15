@@ -66,7 +66,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from histos._version import __version__
-from histos.audit import AuditRecord, AuditSink, InMemoryAuditSink, digest_args
+from histos.audit import AuditSink, InMemoryAuditSink
+from histos.auditrecord import AuditRecord, digest_args
 from histos.callsig import (
     _any_gate_stamp,
     _exposed_name,
