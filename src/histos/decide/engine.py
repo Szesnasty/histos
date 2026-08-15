@@ -141,7 +141,12 @@ def _first_uncopyable(args: dict[str, Any]) -> str:
 def for_callback(req: GateRequest) -> GateRequest:
     """The request a host callback sees: same identity, a detached copy of the args."""
     return GateRequest(
-        req.tool_name, _callback_args(req.args), req.principal, phase=req.phase, policy_hash=req.policy_hash
+        req.tool_name,
+        _callback_args(req.args),
+        req.principal,
+        phase=req.phase,
+        policy_hash=req.policy_hash,
+        confirmation_expires_in=req.confirmation_expires_in,
     )
 
 
@@ -467,9 +472,9 @@ class Engine:
         integer — is refused rather than downgraded to "no expiry": an approval that can
         never be inside its window must not be treated as one that never leaves it.
 
-        The window itself is published on the decision so the host's approval store can
-        enforce the clock (the engine has no clock and never consumes approvals); see
-        the handoff in ``histos.mediate.approvals``.
+        The window is also copied onto the GateRequest by the wrapper so the host's
+        approval store can enforce the clock (the engine has no clock and never
+        consumes approvals); see the handoff in ``histos.mediate.approvals``.
         """
         window = getattr(contract, "confirmation_expires_in", None)
         if window is None:

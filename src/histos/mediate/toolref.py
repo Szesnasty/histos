@@ -157,7 +157,7 @@ class _IdentityRef:
 _WRAPPER_METADATA = ("__module__", "__name__", "__qualname__", "__doc__")
 
 
-def _adopt_metadata(wrapper: Any, tool: Any, tool_name: str) -> None:
+def _adopt_metadata(wrapper: Any, tool: Any, tool_name: str, gate_token: object) -> None:
     """Give ``wrapper`` the tool's identity without giving away the tool itself.
 
     ``functools.wraps`` is the idiomatic way to do this and is exactly wrong for a
@@ -177,8 +177,9 @@ def _adopt_metadata(wrapper: Any, tool: Any, tool_name: str) -> None:
         value = getattr(tool, attr, None)
         if value is not None:
             setattr(wrapper, attr, value)
-    if getattr(tool, "__name__", None) is None:
-        # A partial or a callable object carries no __name__; the gate knows the name.
+    if getattr(tool, "__name__", None) != tool_name:
+        # A partial/callable object has no name, and an explicitly renamed function
+        # must expose the contract it is actually gated under.
         wrapper.__name__ = tool_name
         wrapper.__qualname__ = tool_name
     with contextlib.suppress(TypeError, ValueError):  # a C callable has no signature
@@ -195,3 +196,4 @@ def _adopt_metadata(wrapper: Any, tool: Any, tool_name: str) -> None:
     # reason. It publishes a name, never a callable: nothing here is reachable through
     # it. See :meth:`Gate.ungated_tools`.
     wrapper.__gate_name__ = tool_name
+    wrapper.__histos_gate_token__ = gate_token

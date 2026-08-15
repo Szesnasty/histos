@@ -23,7 +23,7 @@ from histos import (
     unverifiable_tools,
 )
 from histos.policy.canonical import canonical_number
-from histos.provenance.lockfile import LOCK_VERSION
+from histos.provenance.lockfile import LOCK_VERSION, READABLE_LOCK_VERSIONS
 
 REFUND = {
     "name": "make_refund",
@@ -185,6 +185,14 @@ def test_lock_round_trips():
     reloaded = parse_lock(json.loads(lock.dumps()))
     assert reloaded.tools == lock.tools
     assert reloaded.policy == "security.policy.json"
+
+
+def test_the_published_lock_schema_describes_every_readable_version():
+    """The writer moved to v2 while the normative schema still rejected its output."""
+    schema_path = pathlib.Path(__file__).resolve().parent.parent / "spec" / "tool-lock-0.1.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert set(schema["properties"]["lock_version"]["enum"]) == set(READABLE_LOCK_VERSIONS)
+    assert "reviewed" in schema["$defs"]["entryV2"]["allOf"][1]["required"]
 
 
 def test_an_unknown_key_is_refused_not_ignored():

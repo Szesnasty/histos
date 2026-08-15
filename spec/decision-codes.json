@@ -222,6 +222,18 @@
       "meaning": "The host's confirm callback signalled that the run is parked awaiting an out-of-band approval, by raising one of the types passed as confirm_suspends. Not a denial and not an allow: no decision has been made yet and the tool has not run. Recorded so the trail shows that a human was asked; an engine that lets a suspension leave without a record cannot show that."
     },
     {
+      "code": "confirm_cancelled",
+      "effect": "require_confirmation",
+      "phase": "pre",
+      "meaning": "The host cancelled execution while the gate was awaiting out-of-band confirmation. The cancellation is recorded and propagated unchanged; the tool has not run."
+    },
+    {
+      "code": "pre_cancelled",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "Execution was cancelled while the deterministic pre-gate awaited a host callback such as the resource resolver or semantic tier. The cancellation is recorded and propagated unchanged; no pre-gate decision completed and the tool has not run."
+    },
+    {
       "code": "unnameable_args",
       "effect": "deny",
       "phase": "pre",

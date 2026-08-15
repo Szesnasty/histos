@@ -87,7 +87,8 @@ class ToolContract:
     requires_confirmation: bool = False
     # Seconds an out-of-band approval stays usable once granted. None = no expiry
     # enforced by the engine (the ApprovalStore is in-process and single-use anyway);
-    # the field exists because the *format* carries it to whoever routes approvals.
+    # the field exists because the *format* and GateRequest carry it to whoever routes
+    # and stores approvals.
     confirmation_expires_in: int | None = None
     # Route this call through the host's semantic tier before it may proceed. The tier
     # is the *only* thing that can let it continue: with none wired the call is denied
@@ -113,6 +114,21 @@ class ToolContract:
         # as a list is validated in the form it will be enforced in.
         for name in ("constraints", "bindings"):
             object.__setattr__(self, name, detach_frozen_sequence(getattr(self, name)))
+        for name in (
+            "requires_confirmation",
+            "requires_escalation",
+            "scan_output_for_canary",
+            "deny_secret_args",
+            "redact_secret_output",
+            "project_output",
+            "strict_returns",
+        ):
+            declared = getattr(self, name)
+            if not isinstance(declared, bool):
+                raise PolicyError(
+                    f"tool {self.name!r}: {name} must be true or false, got {declared!r}",
+                    code="invalid_contract",
+                )
         if self.access not in ("read", "write"):
             raise PolicyError(f"tool {self.name!r}: access must be 'read'|'write', got {self.access!r}")
         if self.on_output_violation not in ("redact_all", "deny", "allow"):
@@ -391,6 +407,14 @@ class GateRequest:
     #: against a ruleset and spent later, and without this it could not tell that the
     #: policy had moved in between. Empty when the caller built the request by hand.
     policy_hash: str = ""
+    #: Approval lifetime from the exact contract that produced this request.
+    #:
+    #: This is callback metadata, not a decision input. It travels with a paused
+    #: request so an ApprovalStore that survives ``Gate.policy`` hot reloads does not
+    #: apply either the outgoing or incoming policy's window to an approval issued
+    #: under a third ruleset. ``None`` deliberately means that this request has no
+    #: expiry; it is not the same as "look the value up later".
+    confirmation_expires_in: int | None = None
 
 
 # Developer-facing "how to fix it" hints (developer/audit channel ONLY — never the
@@ -418,6 +442,9 @@ _REMEDY: dict[str, str] = {
     "budget": "raise the tool's budget for this principal",
     "requires_confirmation": "obtain an out-of-band approval for this exact action",
     "confirm_error": "the confirm callback raised, or is async while the tool is sync",
+    "confirm_cancelled": "resume or retry according to the host's cancellation protocol; the tool did not run",
+    "pre_cancelled": "resume or retry according to the host's cancellation protocol; no pre-gate decision "
+    "was made and the tool did not run",
     "no_escalation_tier": "this tool is marked `escalate` and no semantic tier is wired — "
     "pass Gate(escalate=...), or drop `escalate` from the policy; the gate will not "
     "let an unjudged call through",

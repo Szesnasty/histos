@@ -92,16 +92,18 @@ But a naive `confirm=lambda req: True` (or one reading a field the agent control
 defeats it — the same trap as identity.
 
 The safe primitive is **`ApprovalStore`**: a trusted host (a human approver, a
-secure console) calls `store.grant(request_fingerprint(tool, args, principal))`
+secure console) calls `store.grant(exc.request)` on the request carried by
+`GateConfirmationRequired`
 **out-of-band**; the gate consumes it via `Gate(confirm=store.as_confirm())`.
 Approvals are **single-use** and **bound to the exact (tool, args, principal)**, so
 one cannot be replayed to a different action, and the agent — which cannot write to
 the store — cannot approve itself. Confirmation must always originate outside the
 model; never from a boolean the model can influence. Build the store **with the
-policy** (`ApprovalStore(policy)`) if you rely on `confirmation.expires_in`: that is
-where the declared window comes from, and a store built bare holds a grant until it is
-consumed or revoked. The store is also per-process — see *"Limits and approvals are
-per-process"*.
+policy** (`ApprovalStore(policy)`) for legacy fingerprint grants. The preferred request
+form carries the declared `confirmation.expires_in` from the exact policy snapshot the
+approver saw, including across a hot reload. A store built bare and given only a
+fingerprint holds that grant until it is consumed or revoked. The store is also
+per-process — see *"Limits and approvals are per-process"*.
 
 ### Malformed / non-conforming output
 Name-based field redaction cannot save a secret that lands in an **undeclared**

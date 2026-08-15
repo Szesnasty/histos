@@ -110,6 +110,8 @@ _REASON_IS_POLICY_TEXT: frozenset[str] = frozenset(
         "uninspectable_output",
         # tool name and a count of positional arguments; no value is quoted.
         "confirm_suspended",
+        "confirm_cancelled",
+        "pre_cancelled",
         "unnameable_args",
     }
 )

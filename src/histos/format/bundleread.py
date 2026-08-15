@@ -112,6 +112,20 @@ def _required(where: str, d: dict[str, Any], key: str) -> Any:
     return d[key]
 
 
+def _exact_bool(where: str, value: Any) -> bool:
+    """Read a security switch without Python's truthiness coercion."""
+    if not isinstance(value, bool):
+        raise PolicyError(f"{where} must be true or false, got {value!r}", code="invalid_field")
+    return value
+
+
+def _optional_block(where: str, tool: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return an absent block as empty, but reject every malformed present block."""
+    if key not in tool:
+        return {}
+    return _as_mapping(where, tool[key])
+
+
 def _condition_from_dict(name: str, d: Any) -> Constraint:
     where = f"a `resource.where` condition on tool {name!r}"
     d = _as_mapping(where, d)
@@ -181,15 +195,32 @@ def _sensitivity_of(name: str, value: Any) -> Sensitivity:
 def _tool_from_dict(name: str, d: Any) -> ToolContract:
     d = _as_mapping(f"tool {name!r}", d)
     _reject_unknown(f"tool {name!r}", d, _TOOL_KEYS)
-    confirmation = _as_mapping(f"`confirmation` on tool {name!r}", d.get("confirmation") or {})
-    if confirmation:
-        _reject_unknown(f"`confirmation` on tool {name!r}", confirmation, _CONFIRMATION_KEYS)
-    escalate = _as_mapping(f"`escalate` on tool {name!r}", d.get("escalate") or {})
-    if escalate:
-        _reject_unknown(f"`escalate` on tool {name!r}", escalate, _ESCALATE_KEYS)
-    output = _as_mapping(f"`output` on tool {name!r}", d.get("output") or {})
-    if output:
-        _reject_unknown(f"`output` on tool {name!r}", output, _OUTPUT_KEYS)
+    confirmation_where = f"`confirmation` on tool {name!r}"
+    confirmation = _optional_block(confirmation_where, d, "confirmation")
+    _reject_unknown(confirmation_where, confirmation, _CONFIRMATION_KEYS)
+    if "confirmation" in d:
+        confirmation_required = _exact_bool(
+            f"`confirmation.required` on tool {name!r}", _required(confirmation_where, confirmation, "required")
+        )
+    else:
+        confirmation_required = False
+
+    escalate_where = f"`escalate` on tool {name!r}"
+    escalate = _optional_block(escalate_where, d, "escalate")
+    _reject_unknown(escalate_where, escalate, _ESCALATE_KEYS)
+    if "escalate" in d:
+        escalation_required = _exact_bool(
+            f"`escalate.required` on tool {name!r}", _required(escalate_where, escalate, "required")
+        )
+    else:
+        escalation_required = False
+
+    output_where = f"`output` on tool {name!r}"
+    output = _optional_block(output_where, d, "output")
+    _reject_unknown(output_where, output, _OUTPUT_KEYS)
+
+    resource = _optional_block(f"the `resource` block on tool {name!r}", d, "resource")
+    bindings = _optional_block(f"the `bind` block on tool {name!r}", d, "bind")
     return ToolContract(
         name=name,
         args=_schema_from_node(f"`args` on tool {name!r}", d.get("args")),
@@ -198,15 +229,17 @@ def _tool_from_dict(name: str, d: Any) -> ToolContract:
         sensitivity=_sensitivity_of(name, d.get("sensitivity", "low")),
         rate_limit=d.get("rate_limit"),
         budget=d.get("budget"),
-        requires_confirmation=bool(confirmation.get("required", False)),
+        requires_confirmation=confirmation_required,
         confirmation_expires_in=confirmation.get("expires_in"),
-        requires_escalation=bool(escalate.get("required", False)),
-        constraints=_resource_from_dict(name, d.get("resource") or {}),
-        bindings=_bind_from_dict(name, d.get("bind") or {}),
-        scan_output_for_canary=output.get("scan_canary", True),
-        deny_secret_args=d.get("deny_secret_args", True),
-        redact_secret_output=output.get("redact_secrets", True),
-        project_output=output.get("project", False),
-        strict_returns=output.get("strict", False),
+        requires_escalation=escalation_required,
+        constraints=_resource_from_dict(name, resource),
+        bindings=_bind_from_dict(name, bindings),
+        scan_output_for_canary=_exact_bool(f"`output.scan_canary` on tool {name!r}", output.get("scan_canary", True)),
+        deny_secret_args=_exact_bool(f"`deny_secret_args` on tool {name!r}", d.get("deny_secret_args", True)),
+        redact_secret_output=_exact_bool(
+            f"`output.redact_secrets` on tool {name!r}", output.get("redact_secrets", True)
+        ),
+        project_output=_exact_bool(f"`output.project` on tool {name!r}", output.get("project", False)),
+        strict_returns=_exact_bool(f"`output.strict` on tool {name!r}", output.get("strict", False)),
         on_output_violation=output.get("on_violation", "redact_all"),
     )

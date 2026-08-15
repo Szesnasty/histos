@@ -106,8 +106,6 @@ def _json_schema_of(spec: dict[str, Any], content: Any, *, where: str) -> dict[s
     # the one bad tool and the CLI's handler chain did not turn it into an exit code. The
     # user got a traceback out of `histos import` and no policy file. Seven of the eight
     # malformed nodes in this module behaved that way.
-    if content is None:
-        return None
     if not isinstance(content, dict):
         raise _malformed(f"the `content` of {where}", content, "a mapping of media type to schema")
     # Matched by base type, not by exact spelling. `application/json; charset=utf-8`,
@@ -260,12 +258,17 @@ def _source_from_operation(
                     )
             else:
                 schema = {}
-        fields[pname] = field_from_json_schema(schema, required=bool(param.get("required")), root=spec, name=pname)
+        required = param.get("required", False)
+        if not isinstance(required, bool):
+            raise _malformed(f"required on parameter {pname!r} of {name!r}", required, "a boolean")
+        fields[pname] = field_from_json_schema(schema, required=required, root=spec, name=pname)
 
     body_schema = None
     request_body = _deref(spec, op.get("requestBody", {}), where=f"requestBody of {name!r}")
-    if isinstance(request_body, dict):
-        content = request_body.get("content") or {}
+    if not isinstance(request_body, dict):
+        raise _malformed(f"the requestBody of {name!r}", request_body, "an object or local $ref")
+    if request_body:
+        content = request_body.get("content", {})
         body_schema = _json_schema_of(spec, content, where=f"requestBody of {name!r}")
         # The parameter path refuses an unsupported media type loudly, naming the
         # parameter and what it found; this one took the same `None` and dropped the

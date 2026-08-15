@@ -25,6 +25,7 @@ from histos.errors import PolicyError
 from histos.format.bundlekeys import (
     _BUNDLE_KEYS,
     _ROLE_KEYS,
+    _TOOL_NAME,
     _as_list,
     _as_mapping,
     _check_compatibility,
@@ -56,7 +57,18 @@ def _canaries(node: Any) -> list[str]:
                 "appears in ordinary text, so it would deny every call and redact every result",
                 code="invalid_canary",
             )
+    if len(set(tokens)) != len(tokens):
+        raise PolicyError("`canaries` must not contain duplicate tokens", code="invalid_canary")
     return tokens
+
+
+def _optional_string(data: dict[str, Any], key: str, default: str | None = None) -> str | None:
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, str):
+        raise PolicyError(f"`{key}` must be a string, got {type(value).__name__}")
+    return value
 
 
 def load_bundle(data: dict[str, Any]) -> Policy:
@@ -73,7 +85,7 @@ def load_bundle(data: dict[str, Any]) -> Policy:
     _reject_unknown("the policy bundle", data, _BUNDLE_KEYS)
     _check_compatibility(data)
 
-    tools_node = data.get("tools") or {}
+    tools_node = data.get("tools", {})
     if not isinstance(tools_node, dict):
         raise PolicyError(
             "`tools` must be a mapping keyed by tool name, not a list (Policy Format 0.1). "
@@ -83,14 +95,19 @@ def load_bundle(data: dict[str, Any]) -> Policy:
         )
     # No duplicate-name check here on purpose: as a mapping, a repeated name is a
     # duplicate key and the strict parsers reject it before this code runs.
-    # `spec is None` is the YAML spelling of a tool with no body (`t:`); anything else
-    # non-mapping is a mistake `_tool_from_dict` names.
-    tools = {name: _tool_from_dict(name, {} if spec is None else spec) for name, spec in tools_node.items()}
+    tools: dict[str, ToolContract] = {}
+    for name, spec in tools_node.items():
+        if not isinstance(name, str) or _TOOL_NAME.fullmatch(name) is None:
+            raise PolicyError(f"a tool name must match [A-Za-z_][A-Za-z0-9_.-]*, got {name!r}")
+        tools[name] = _tool_from_dict(name, spec)
 
     permissions: dict[str, frozenset[str]] = {}
     role_inherits: dict[str, str] = {}
-    for role, raw_spec in _as_mapping("`roles`", data.get("roles") or {}).items():
-        spec = _as_mapping(f"role {role!r}", raw_spec or {})
+    roles_node = data.get("roles", {})
+    for role, raw_spec in _as_mapping("`roles`", roles_node).items():
+        if not isinstance(role, str) or not role:
+            raise PolicyError(f"a role name must be a non-empty string, got {role!r}")
+        spec = _as_mapping(f"role {role!r}", raw_spec)
         _reject_unknown(f"role {role!r}", spec, _ROLE_KEYS)
         allow = _as_list(f"`allow` on role {role!r}", spec.get("allow", []))
         for entry in allow:
@@ -100,18 +117,23 @@ def load_bundle(data: dict[str, Any]) -> Policy:
                     "(Policy Format 0.1 dropped the {tool: name} object form)",
                     code="invalid_grant",
                 )
+        if len(set(allow)) != len(allow):
+            raise PolicyError(f"`allow` on role {role!r} must not contain duplicate tool names")
         permissions[role] = frozenset(allow)
-        if spec.get("inherits"):
-            role_inherits[role] = spec["inherits"]
+        if "inherits" in spec:
+            parent = spec["inherits"]
+            if not isinstance(parent, str) or not parent:
+                raise PolicyError(f"`inherits` on role {role!r} must be a non-empty role name, got {parent!r}")
+            role_inherits[role] = parent
 
     return Policy(
         tools=tools,
         permissions=permissions,
         role_inherits=role_inherits,
         canaries=frozenset(_canaries(data.get("canaries", []))),
-        policy_id=data.get("policy_id"),
-        policy_version=str(data.get("version", "0")),
-        created_at=data.get("created_at"),
+        policy_id=_optional_string(data, "policy_id"),
+        policy_version=_optional_string(data, "version", "0") or "",
+        created_at=_optional_string(data, "created_at"),
         schema_version=data.get("schema_version", SCHEMA_VERSION),
     )
 

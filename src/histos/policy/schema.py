@@ -171,12 +171,18 @@ class Field:
             declared = getattr(self, name)
             if declared is not None:
                 object.__setattr__(self, name, detach_sequence(declared))
+        for name in ("required", "nullable", "unique_items"):
+            declared = getattr(self, name)
+            if not isinstance(declared, bool):
+                raise PolicyError(f"{name} must be true or false, got {declared!r}", code="invalid_field")
         # Every failure here is a PolicyError: a malformed field is a structural
         # problem in the policy, and a host that wraps `load_policy` in the
         # documented `except PolicyError: fail_closed()` must catch it rather than
         # take an unhandled ValueError on a typo.
         if self.type not in _TYPE_CHECKS:
             raise PolicyError(f"unknown field type: {self.type!r}", code="invalid_field")
+        if self.item_type is not None and self.item_type not in _TYPE_CHECKS:
+            raise PolicyError(f"unknown array item_type: {self.item_type!r}", code="invalid_field")
         if self.sensitive not in (None, "pii", "secret"):
             raise PolicyError(f"sensitive must be None|'pii'|'secret', got {self.sensitive!r}", code="invalid_field")
         for bound in ("minimum", "maximum", "exclusive_minimum", "exclusive_maximum", "multiple_of"):
@@ -299,6 +305,8 @@ class Schema:
     allow_extra: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.allow_extra, bool):
+            raise PolicyError(f"allow_extra must be true or false, got {self.allow_extra!r}", code="invalid_field")
         # One level, which is enough: the values are `Field`s that detach their own
         # collections. What this stops is the *map* growing — an argument appearing in a
         # schema that was validated without it. See `detach_mapping`.

@@ -91,7 +91,7 @@ def guard_callable(
     # `self.func = raw_tool` republished the raw tool as `safe.func`. Popping
     # `__wrapped__` afterwards closed the first hole and left the second open, and this
     # adapter is the path a framework's tools actually travel.
-    _adopt_metadata(safe, fn, name)
+    _adopt_metadata(safe, fn, name, gate._mediation_token)
     return safe
 
 

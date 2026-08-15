@@ -105,6 +105,7 @@ _OUTPUT_KEYS = frozenset({"on_violation", "project", "redact_secrets", "scan_can
 # `bind` values are frozen to exactly `principal.<identifier>` — a substitution, not
 # an expression language. See `_bind_from_dict`.
 _PRINCIPAL_REF = re.compile(r"principal\.([A-Za-z_][A-Za-z0-9_]*)")
+_TOOL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
 _FIELD_KEYS = frozenset(
     {
         "enum",
@@ -217,7 +218,7 @@ _PYTHON_SPELLINGS = {
 
 def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -> None:
     """Fail closed on any key this engine does not understand."""
-    unknown = sorted(k for k in data if k not in allowed)
+    unknown = sorted((k for k in data if k not in allowed), key=lambda item: (type(item).__name__, repr(item)))
     if not unknown:
         return
     # Only at the top level: `permissions` nested inside `tools.<name>` is not the
@@ -233,7 +234,7 @@ def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -
         )
     raise PolicyError(
         f"unknown key {unknown[0]!r} in {where}"
-        + (f" (also: {', '.join(unknown[1:])})" if len(unknown) > 1 else "")
+        + (f" (also: {', '.join(repr(item) for item in unknown[1:])})" if len(unknown) > 1 else "")
         + " — refusing to load. A policy this engine only partly understands would enforce only "
         "part of what it says. Either this engine is older than the policy, or the key is a typo. "
         f"Understood here: {', '.join(sorted(allowed))}.",
@@ -242,17 +243,17 @@ def _reject_unknown(where: str, data: dict[str, Any], allowed: frozenset[str]) -
 
 
 def _check_compatibility(data: dict[str, Any]) -> None:
-    declared = data.get("schema_version")
-    if declared is not None and declared not in SUPPORTED_SCHEMA_VERSIONS:
+    if "schema_version" in data and data["schema_version"] not in SUPPORTED_SCHEMA_VERSIONS:
+        declared = data["schema_version"]
         raise PolicyError(
             f"policy schema_version {declared!r} is not supported by this engine "
             f"(supports: {', '.join(sorted(SUPPORTED_SCHEMA_VERSIONS))})",
             code="unsupported_version",
         )
 
-    requires = data.get("requires")
-    if requires is None:
+    if "requires" not in data:
         return
+    requires = data["requires"]
     if not isinstance(requires, dict):
         raise PolicyError(f"`requires` must be a mapping, got {type(requires).__name__}")
     _reject_unknown("`requires`", requires, _REQUIRES_KEYS)
@@ -260,6 +261,11 @@ def _check_compatibility(data: dict[str, Any]) -> None:
     features = requires.get("features", [])
     if not isinstance(features, list):
         raise PolicyError(f"`requires.features` must be a list, got {type(features).__name__}")
+    if any(not isinstance(feature, str) for feature in features):
+        bad = next(feature for feature in features if not isinstance(feature, str))
+        raise PolicyError(f"`requires.features` entries must be strings, got {bad!r}")
+    if len(set(features)) != len(features):
+        raise PolicyError("`requires.features` must not contain duplicates")
     missing = sorted(f for f in features if f not in ENGINE_FEATURES)
     if missing:
         raise PolicyError(

@@ -21,7 +21,6 @@ from histos import (
     Principal,
     Schema,
     ToolContract,
-    request_fingerprint,
     use_principal,
 )
 
@@ -73,6 +72,7 @@ def run() -> list[tuple[str, str]]:
     safe = gate.wrap(make_refund)
     support = Principal(role="support", identity="support-42", attributes={"tenant_id": "acme"})
     results: list[tuple[str, str]] = []
+    pending_request = None
 
     with use_principal(support):
         # 1. Hijacked: drain a huge refund, spoofing the tenant.
@@ -89,12 +89,12 @@ def run() -> list[tuple[str, str]]:
             results.append(("await confirm", "ALLOWED without confirm?!"))
         except GateConfirmationRequired as d:
             results.append(("await confirm", d.public_reason))
+            pending_request = d.request
 
         # 3. A human approves the EXACT (bound) action out-of-band, then it runs —
         #    and the leaked card/token are stripped before the model sees the result.
-        approvals.grant(
-            request_fingerprint("make_refund", {"order_id": "ORD-1", "amount": 400, "tenant_id": "acme"}, support)
-        )
+        assert pending_request is not None
+        approvals.grant(pending_request)
         out = safe(order_id="ORD-1", amount=400, tenant_id="attacker")
         results.append(("approved+run", f"model sees {out}"))
 

@@ -131,15 +131,10 @@ def dump_bundle(policy: Policy) -> dict[str, Any]:
             entry["rate_limit"] = tool.rate_limit
         if tool.budget is not None:
             entry["budget"] = tool.budget
-        # Emitted whenever either half is set. The loader reads `required` and
-        # `expires_in` independently, so `confirmation: {expires_in: 300}` with no
-        # `required` is a legal bundle — and the dump only wrote the block when
-        # `required` was true, so that bundle came back without its window and hashed
-        # differently. `dump_bundle`'s own docstring states the round trip.
+        # Every block carries its explicit security switch. The loader refuses an
+        # expiry-only block rather than guessing whether omission meant false.
         if tool.requires_confirmation or tool.confirmation_expires_in is not None:
-            entry["confirmation"] = {}
-            if tool.requires_confirmation:
-                entry["confirmation"]["required"] = True
+            entry["confirmation"] = {"required": tool.requires_confirmation}
             if tool.confirmation_expires_in is not None:
                 entry["confirmation"]["expires_in"] = tool.confirmation_expires_in
         if tool.requires_escalation:

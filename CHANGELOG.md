@@ -8,6 +8,28 @@ between minor versions — every such change is listed here.
 
 ## [Unreleased]
 
+### Fixed — final release audit
+
+- Policy blocks that are present but malformed (`null`, a list, a scalar, or a
+  missing/non-boolean `required`) are now rejected instead of being collapsed to an
+  empty block. All security switches are exact booleans in both bundle and Python APIs,
+  and array `item_type` is validated eagerly.
+- Approval expiry is pinned to the paused `GateRequest`, so an `ApprovalStore` that
+  survives a `Gate.policy` hot reload enforces the window the approver actually saw.
+  The request form, `store.grant(exc.request)`, is now the documented default.
+- Complete-mediation reports distinguish wrappers produced by different Gate instances
+  and verify the exposed name against the contract name. An explicit `wrap(name=...)`
+  now publishes that name to frameworks.
+- Cancellation while a synchronous or asynchronous confirmation callback is pending is
+  recorded as `confirm_cancelled`; cancellation in a resource resolver or semantic tier
+  is recorded as `pre_cancelled`. Both carry `executed=false` and propagate unchanged.
+- Audit-chain verification now returns a diagnostic instead of raising for non-object
+  JSON records, invalid UTF-8, directories, and filesystem read failures.
+- Tool-lock parsing now enforces required maps, evidence hashes, reviewed copies and
+  exact field types, and its published JSON Schema now describes both readable version
+  1 and current version 2. OpenAPI parameter `required` is also an exact boolean rather
+  than a Python-truthiness coercion.
+
 ### Fixed — the sixth adversarial pass
 
 The fifth pass rewrote about 430 lines of the engine. This pass attacked those
