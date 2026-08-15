@@ -77,18 +77,11 @@ from histos.callsig import (
     _Unnameable,
 )
 from histos.content_rules import ContentRules
-from histos.contracts import (
-    Effect,
-    GateDecision,
-    GateRequest,
-    Policy,
-    Principal,
-    ToolContract,
-    _snapshot_value,
-)
+from histos.contracts import Effect, GateDecision, GateRequest, Policy, Principal, ToolContract
 from histos.engine import _MAX_OUTPUT_SCAN_CHARS as _DEFAULT_OUTPUT_BUDGET
 from histos.engine import Engine, EscalationTier, ResourceResolver, for_callback
 from histos.errors import GateConfirmationRequired, GateDenied, PolicyError, ToolErrorRedacted
+from histos.frozen import _snapshot_value
 from histos.identity import (
     _current_principal,
 )

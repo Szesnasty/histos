@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from histos.bundle import load_policy
-from histos.contracts import Policy, Principal, ReadOnlyDict, ToolContract
+from histos.contracts import Policy, Principal, ToolContract
 from histos.errors import PolicyError
+from histos.frozen import ReadOnlyDict
 from histos.schema import Schema
 
 # Anything `load_policy` accepts, plus an already-built Policy and None (which means
