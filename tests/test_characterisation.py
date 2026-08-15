@@ -340,7 +340,7 @@ def test_the_principal_contextvar_is_one_object():
     reads the other — every call unauthenticated, and no test of a single module would
     notice."""
     from histos.engine import Engine  # the reader
-    from histos.gate import _current_principal  # the writer
+    from histos.identity import _current_principal  # the writer
 
     who = Principal(role="clerk", identity="alice")
     with use_principal(who):
@@ -357,7 +357,7 @@ def test_the_principal_contextvar_is_one_object():
 
 
 def test_the_scope_token_stack_is_one_object():
-    from histos.gate import _scope_tokens
+    from histos.identity import _scope_tokens
 
     outer = use_principal(Principal(role="a", identity="1"))
     outer.__enter__()

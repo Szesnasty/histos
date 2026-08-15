@@ -108,6 +108,12 @@ from histos.gate import (
     ProtectResult,
     gate,
     protect,
+)
+
+# From `identity`, not re-exported through `gate`: the two ContextVars behind these are
+# process-wide singletons, and importing them from the module that owns them is what
+# keeps a second copy from ever being plausible.
+from histos.identity import (
     reset_principal,
     set_principal,
     use_principal,
@@ -149,9 +155,21 @@ from histos.schema import Field, Schema
 # on how you reached it, and the failure lands on a reader following the docs. The
 # function keeps the name, since that is the documented API, and the module's public
 # surface is re-attached to it so both spellings resolve to the same objects.
-for _name in ("Gate", "ProtectResult", "gate", "protect", "reset_principal", "set_principal", "use_principal"):
-    setattr(gate, _name, getattr(_sys.modules["histos.gate"], _name))
-del _name
+# `histos.gate.use_principal` is a documented spelling and stays one, even though the
+# three identity names moved to `histos.identity` when `gate.py` was split. The source
+# module is named per attribute rather than assumed, so the next move is a one-line edit
+# here instead of an AttributeError a reader meets after following the docs.
+for _name, _home in (
+    ("Gate", "histos.gate"),
+    ("ProtectResult", "histos.gate"),
+    ("gate", "histos.gate"),
+    ("protect", "histos.gate"),
+    ("reset_principal", "histos.identity"),
+    ("set_principal", "histos.identity"),
+    ("use_principal", "histos.identity"),
+):
+    setattr(gate, _name, getattr(_sys.modules[_home], _name))
+del _name, _home
 
 __all__ = [
     "ApprovalStore",

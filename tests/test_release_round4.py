@@ -976,7 +976,7 @@ def test_a_recycled_address_cannot_steal_another_scopes_token():
     """An entry was `(id(self), token)` and held no reference, so a scope entered and
     never exited left an entry whose object was freed — and `__slots__` makes every
     `use_principal` the same size, so the next allocation lands on that address."""
-    from histos.gate import _scope_tokens
+    from histos.identity import _scope_tokens
 
     scope = use_principal(Principal(role="clerk", identity="alice"))
     scope.__enter__()
