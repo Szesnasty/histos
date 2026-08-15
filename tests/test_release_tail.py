@@ -634,8 +634,8 @@ def test_a_rewrite_that_parses_the_same_but_reads_differently_is_caught(tmp_path
 def _write_legacy_tip(log, key: bytes, count: int, tip: str) -> None:
     """The sidecar the writer of that era produced, so verification reaches the line
     check instead of stopping at a missing tip."""
-    from histos.audit import _tip_body
     from histos.logpath import tip_path_for
+    from histos.verify import _tip_body
 
     body = _tip_body(count, tip)
     mac = hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
