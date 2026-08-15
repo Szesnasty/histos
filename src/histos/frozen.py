@@ -21,6 +21,7 @@ the whole subtree when one leaf refused.
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -302,3 +303,61 @@ def _snapshot_value(value: Any, *, readonly: bool = True, _seen: frozenset[int] 
         return deepcopy(value)
     except Exception:  # noqa: BLE001 — an uncopyable leaf must not fail the request
         return value
+
+
+@dataclass(frozen=True)
+class Principal:
+    """Who is making the call.
+
+    **Trusted, and bound out-of-band**. The host sets this from
+    workload identity or an authenticated session — it must NEVER be derived from
+    a tool argument or model output. The gate is only as strong as this value.
+
+    ``attributes`` carry trusted context used by resource-aware constraints
+    (e.g. ``{"tenant_id": "acme", "region": "eu"}``). ``can_view`` lists the
+    **sensitivity classes** — ``"pii"``, ``"secret"`` — this principal may see in the
+    clear; it is not a list of field names, and putting one there unredacts nothing.
+    Attribute values are deep-copied on binding, so a value handed to a tool through a
+    ``bind`` is a copy and the trust anchor cannot be rewritten through it.
+    """
+
+    role: str
+    identity: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+    can_view: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        # `frozen=True` froze the *binding* and nothing else: the dict it points at
+        # stayed writable, so the trust anchor of the whole library could be edited
+        # after the gate had been built from it. Take a snapshot behind a read-only
+        # view, so a Principal handed to a gate cannot change under it and a caller
+        # who kept the dict they passed in cannot change it either.
+        #
+        # `deepcopy`, not `dict(...)`: that was a shallow copy behind a read-only view,
+        # so `{"tenants": [...]}` was still the caller's live list. Two ways that bites.
+        # `Gate._apply_bindings` writes the trusted value straight into the tool's
+        # arguments, so the tool body received the trust anchor itself and an ordinary
+        # `args["tenants"].append(...)` edited what the *next* call would be authorized
+        # against; and a host that kept its own dict could rewrite a bound principal
+        # mid-request. A snapshot has to be a snapshot all the way down.
+        object.__setattr__(self, "attributes", ReadOnlyDict(_snapshot(dict(self.attributes))))
+        # A list here is the natural thing to write and it silently half-worked: it
+        # compared as a member of nothing, and it made `hash(principal)` raise, which
+        # is the one thing `__hash__` below exists to allow. Coerce rather than refuse —
+        # the meaning of `["pii"]` is not in doubt.
+        # A bare string is one sensitivity class, not a set of characters. `frozenset("pii")`
+        # is `{'p','i'}`, which matches nothing and silently turns a grant into a denial —
+        # the coercion that was added to accept a list quietly broke the shortest spelling.
+        if isinstance(self.can_view, str):
+            object.__setattr__(self, "can_view", frozenset({self.can_view}))
+        elif not isinstance(self.can_view, frozenset):
+            object.__setattr__(self, "can_view", frozenset(self.can_view))
+
+    def __hash__(self) -> int:
+        # The generated hash covered `attributes`, which is a mapping and unhashable,
+        # so a "frozen" Principal could not go in a set or key a cache — the obvious
+        # thing to want from the type the host binds per request. Attribute *values*
+        # are host-supplied and may themselves be unhashable (a list of regions), so
+        # only the key set takes part; `__eq__` still separates principals that differ
+        # only in a value, which is all a hash has to allow.
+        return hash((self.role, self.identity, self.can_view, tuple(sorted(self.attributes))))
