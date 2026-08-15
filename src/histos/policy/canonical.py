@@ -30,7 +30,18 @@ from typing import Any
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
-def _canon(obj: Any, numbers_as_text: bool) -> Any:
+# How deep a value may nest before this refuses to canonicalise it. CPython's own limit
+# is around a thousand frames and each level here costs two, so a walk that keeps going
+# raises `RecursionError` from wherever it happens to be — and this one runs on the
+# *argument* digest, before any decision has been reached. A self-referential argument
+# therefore reached the caller as an unhandled `RecursionError` with nothing written to
+# the trail: no execution, which is the right direction, but no decision and no record
+# either, which is not a denial, it is an absence. The bound is far past any real
+# document and short of the interpreter's.
+_MAX_CANON_DEPTH = 200
+
+
+def _canon(obj: Any, numbers_as_text: bool, _open: tuple[int, ...] = ()) -> Any:
     # bool BEFORE int (bool is a subclass of int) so True never tags as ["i", 1].
     if isinstance(obj, bool):
         return ["b", obj]
@@ -56,17 +67,31 @@ def _canon(obj: Any, numbers_as_text: bool) -> Any:
         return ["s", obj]
     if isinstance(obj, bytes):
         return ["y", obj.hex()]
+    if isinstance(obj, (list, tuple, set, frozenset, dict)):
+        # Only the containers currently *open* on this path, so a value referenced twice
+        # from one structure — a shared child, which is ordinary — still canonicalises,
+        # and only a genuine cycle is refused. Ids are safe to compare here because every
+        # container in `_open` is reachable from the argument being walked and so cannot
+        # be freed and its address handed to something else mid-walk.
+        inner = _open + (id(obj),)
+        if id(obj) in _open:
+            raise ValueError("value contains a reference cycle, so it has no canonical form")
+        if len(inner) > _MAX_CANON_DEPTH:
+            raise ValueError(f"value nests deeper than {_MAX_CANON_DEPTH}, past what can be canonicalised")
+    else:
+        inner = _open
+
     if isinstance(obj, (list, tuple)):
-        return ["l", [_canon(x, numbers_as_text) for x in obj]]
+        return ["l", [_canon(x, numbers_as_text, inner) for x in obj]]
     if isinstance(obj, (set, frozenset)):
         items = sorted(
-            (_canon(x, numbers_as_text) for x in obj),
+            (_canon(x, numbers_as_text, inner) for x in obj),
             key=lambda c: json.dumps(c, sort_keys=True, ensure_ascii=False),
         )
         return ["t", items]
     if isinstance(obj, dict):
         pairs = sorted(
-            ([_canon(k, numbers_as_text), _canon(v, numbers_as_text)] for k, v in obj.items()),
+            ([_canon(k, numbers_as_text, inner), _canon(v, numbers_as_text, inner)] for k, v in obj.items()),
             key=lambda p: json.dumps(p[0], sort_keys=True, ensure_ascii=False),
         )
         return ["d", pairs]

@@ -820,3 +820,144 @@ def test_a_secret_carrying_an_invisible_character_is_never_partly_redacted(paddi
     assert "pan" in kinds, "the card number was not found at all"
     assert pan[:6] not in redacted, f"the leading digits survived: {redacted[:80]!r}"
     assert pan[-6:] not in redacted, "the trailing digits survived"
+
+
+# ── standing checks: the shapes that keep coming back, asked as rules ─────
+#
+# Round six found ten defects and eight of them were two patterns wearing different
+# clothes. Sampling the same distribution a seventh time is worth less than making the
+# two patterns unable to recur, so each one is asked here as a property over the whole
+# surface by reflection — a new field or a new walker is covered the day it is written,
+# without anyone remembering to add a case.
+
+
+def _cyclic_list():
+    x = ["a"]
+    x.append(x)
+    return x
+
+
+def _cyclic_dict():
+    d = {"a": "b"}
+    d["self"] = d
+    return d
+
+
+def _deep(levels=4000):
+    top = current = {}
+    for _ in range(levels):
+        nxt: dict = {"pad": "x"}
+        current["k"] = nxt
+        current = nxt
+    return top
+
+
+@pytest.mark.parametrize("shape", ["cyclic_list", "cyclic_dict", "deep"])
+@pytest.mark.parametrize("side", ["argument", "return"])
+def test_every_call_gets_a_decision_and_a_record_however_the_data_is_shaped(shape, side):
+    """A gate that raises where a verdict was owed has failed, whichever way it fails.
+
+    Six of this library's walkers recurse over data the caller or the tool chooses. The
+    outbound ones are bounded — `_over_output_budget` wraps both of its passes and
+    answers "too deep to walk is too deep to scan". The inbound digest was not: a
+    self-referential argument reached `canonical_json` and the caller got a
+    `RecursionError` with **nothing written to the trail at all** — no execution, which
+    is the right direction, but no decision and no record either, which is not a denial,
+    it is an absence.
+    """
+    make = {"cyclic_list": _cyclic_list, "cyclic_dict": _cyclic_dict, "deep": _deep}[shape]
+    ran: list[int] = []
+    policy = Policy(
+        tools={
+            "t": ToolContract(
+                name="t",
+                args=Schema({"a": Field(type="any", required=False)}),
+                returns=Schema({"k": Field(type="any", required=False)}),
+            )
+        },
+        permissions={"r": frozenset({"t"})},
+        canaries=frozenset({CANARY}),
+    )
+    sink = InMemoryAuditSink()
+    tool = (lambda a=None: ran.append(1) or make()) if side == "return" else (lambda a=None: ran.append(1) or "ok")
+    safe = Gate(policy, audit=sink).wrap(tool, name="t")
+
+    with use_principal(Principal(role="r", identity="i")):
+        try:
+            safe(a=make()) if side == "argument" else safe()
+        except RecursionError:
+            pytest.fail(f"a {shape} {side} raised RecursionError where a decision was owed")
+        except Exception:  # noqa: BLE001 — a denial is a fine answer; an unhandled walk is not
+            pass
+
+    assert sink.entries, f"a {shape} {side} produced no audit record at all"
+
+
+# One legal, *different* value per field. A field absent from both this map and the
+# metadata list below fails the test that follows, which is the point: the day someone
+# adds a knob the gate reads, this says so rather than letting it sit outside the hash.
+_A_DIFFERENT_VALUE: dict[str, typing.Any] = {
+    # Field
+    "type": "integer", "required": False, "enum": (1, 2), "max_length": 7, "min_length": 2,
+    "pattern": "^x$", "sensitive": "pii", "nullable": True, "item_type": "string",
+    "max_items": 4, "min_items": 1, "item_enum": ("a",), "unique_items": True,
+    "minimum": 5, "maximum": 9, "exclusive_minimum": 4, "exclusive_maximum": 10, "multiple_of": 2,
+    # ToolContract
+    "access": "write", "rate_limit": 3, "budget": 100, "requires_confirmation": True,
+    "confirmation_expires_in": 60, "requires_escalation": True, "scan_output_for_canary": False,
+    "deny_secret_args": False, "redact_secret_output": False, "project_output": True,
+    "strict_returns": True, "on_output_violation": "deny",
+    "args": Schema({"different": Field(type="integer")}),
+    "returns": Schema({"different": Field(type="integer")}),
+}  # fmt: skip
+
+# The only exemption, and it is structural rather than a judgement: a contract's `name`
+# is the key it is filed under, so changing it is adding a different tool and removing
+# this one, which the hash sees anyway. Everything else has to be in there — including
+# `sensitivity`, `constraints` and `bindings`, which an earlier draft of this test waved
+# through as "metadata" and which the gate very much enforces.
+_NOT_A_RULE = frozenset({"name"})
+
+
+@pytest.mark.parametrize("holder", ["Field", "ToolContract"])
+def test_everything_the_gate_enforces_is_inside_the_content_hash(holder):
+    """An approval binds to this hash, the lockfile pins it, drift detection compares it.
+
+    So a knob the engine reads and the hash does not cover is two rulesets wearing one
+    identity, and every one of those three reports green across the difference. Asked by
+    reflection over the dataclass rather than from a list somebody maintains, because a
+    list is what fails silently when a field is added.
+    """
+    from histos.policy.authz import Binding, Constraint
+    from histos.policy.contracts import Sensitivity
+
+    _A_DIFFERENT_VALUE["sensitivity"] = Sensitivity.HIGH
+    _A_DIFFERENT_VALUE["constraints"] = (Constraint("f", "eq", value=1),)
+    _A_DIFFERENT_VALUE["bindings"] = (Binding("f", "tenant"),)
+
+    def content_hash(field=None, **contract):
+        contract.setdefault("args", Schema({"a": field if field is not None else Field(type="any")}))
+        return Policy(
+            tools={"t": ToolContract(name="t", **contract)}, permissions={"r": frozenset({"t"})}
+        ).content_hash()
+
+    baseline = content_hash()
+    target = Field if holder == "Field" else ToolContract
+    unpinned, uncovered = [], []
+    for spec in dataclasses.fields(target):
+        if spec.name in _NOT_A_RULE:
+            continue
+        if spec.name not in _A_DIFFERENT_VALUE:
+            uncovered.append(spec.name)
+            continue
+        value = _A_DIFFERENT_VALUE[spec.name]
+        moved = (
+            content_hash(field=dataclasses.replace(Field(type="any"), **{spec.name: value}))
+            if holder == "Field"
+            else content_hash(**{spec.name: value})
+        )
+        if moved == baseline:
+            unpinned.append(spec.name)
+
+    assert not uncovered, f"{holder} has fields this test says nothing about: {uncovered}"
+    assert not unpinned, f"{holder} fields the gate enforces and the content hash ignores: {unpinned}"
