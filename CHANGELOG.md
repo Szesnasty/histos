@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) **once the pub
 surface is frozen at v0.3**. Until then, the top-level API may still change
 between minor versions — every such change is listed here.
 
-## [0.1.1](https://github.com/Szesnasty/histos/compare/v0.1.0...v0.1.1) (2026-08-16)
+## [0.1.1](https://github.com/Szesnasty/histos/releases/tag/v0.1.1) (2026-08-16)
 
 
 ### Bug Fixes
