@@ -9,14 +9,43 @@ agents are actually built.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import pathlib
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+
+def _endpoint(value: str, setting: str) -> str:
+    """Validate an operator-provided HTTP endpoint before a request sees it.
+
+    A custom OpenAI-compatible base is useful for a local Ollama server, but allowing
+    a remote clear-text HTTP URL would put the prompt — and on the hosted path,
+    ``OPENAI_API_KEY`` — on the wire unchanged. Environment configuration is trusted;
+    a typo should still fail loud rather than turn into disclosure.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise RuntimeError(f"{setting} is not a valid URL: {value!r}") from exc
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise RuntimeError(f"{setting} must be an absolute http(s) URL, got {value!r}")
+    if parsed.username is not None or parsed.password is not None or parsed.fragment:
+        raise RuntimeError(f"{setting} must not contain credentials or a URL fragment")
+    try:
+        loopback = ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        loopback = hostname.lower() == "localhost"
+    if parsed.scheme != "https" and not loopback:
+        raise RuntimeError(f"{setting} must use HTTPS unless it points at localhost")
+    return value.rstrip("/")
+
 
 MODEL = os.environ.get("OPS_MODEL", "qwen2.5:7b")
 
@@ -26,13 +55,16 @@ MODEL = os.environ.get("OPS_MODEL", "qwen2.5:7b")
 # interesting question is how often it refuses across the distribution it will
 # actually be served at.
 TEMPERATURE = float(os.environ.get("OPS_TEMP", "0"))
-ENDPOINT = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+ENDPOINT = _endpoint(os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat"), "OLLAMA_URL")
 
 # Where the OpenAI-shaped path points. Overridable for two reasons, one of them the
 # reason it exists: Ollama serves an OpenAI-compatible endpoint at `/v1`, so the
 # normaliser below can be exercised against a real server without spending anything.
 # Code that only ever runs when money is on the line is code nobody has tested.
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_BASE_URL = _endpoint(
+    os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    "OPENAI_BASE_URL",
+)
 
 #: Tokens billed on this process, accumulated as the loop runs. Read into the run
 #: record so a sweep can be costed from its own output instead of from a receipt.
@@ -66,7 +98,8 @@ def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[st
     ).encode()
     request = urllib.request.Request(ENDPOINT, data=payload, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=300) as response:
+        # ENDPOINT passed `_endpoint` at module load; urllib has no scheme left to choose.
+        with urllib.request.urlopen(request, timeout=300) as response:  # nosec B310
             body = json.loads(response.read())
     except urllib.error.URLError as exc:
         raise RuntimeError(f"cannot reach Ollama at {ENDPOINT} — is `ollama serve` running? ({exc})") from exc
@@ -171,6 +204,7 @@ def _post(url: str, body: dict[str, Any], *, attempts: int = 3) -> dict[str, Any
     vanish that way. Three attempts matches the `max_retries=3` the LangChain demos
     get from their client for free.
     """
+    url = _endpoint(url, "OpenAI request URL")
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
@@ -179,7 +213,8 @@ def _post(url: str, body: dict[str, Any], *, attempts: int = 3) -> dict[str, Any
     last = ""
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            # `_endpoint` above restricts urllib to HTTPS or local loopback HTTP.
+            with urllib.request.urlopen(request, timeout=300) as response:  # nosec B310
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:
             detail = exc.read()[:300].decode(errors="replace")

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "9dfa72f86027a4ab0975abefb240a6ed553a843a",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "histos",
+      "include-component-in-tag": false,
+      "include-v-in-tag": true,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "src/histos/_version.py"
+        }
+      ]
+    }
+  }
+}

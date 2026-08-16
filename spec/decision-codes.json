@@ -146,6 +146,12 @@
       "meaning": "Total call budget exhausted for this principal and tool."
     },
     {
+      "code": "limit_store_capacity",
+      "effect": "deny",
+      "phase": "pre",
+      "meaning": "The in-process limit store reached its configured maximum number of identity/tool keys. Fail closed rather than allocate unbounded attacker-chosen identity state."
+    },
+    {
       "code": "requires_confirmation",
       "effect": "require_confirmation",
       "phase": "pre",

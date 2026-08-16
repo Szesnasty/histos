@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Literal output-scanner canary used by the adversarial test suite"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^CANARY-7f3a-SECRET$''']
+paths = ['''^tests/test_release_round4\.py$''']

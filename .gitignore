@@ -18,6 +18,16 @@ venv/
 env/
 ENV/
 
+# Local configuration and credentials. Keep an explicit example file if the
+# project ever needs one, but never let a real dotenv file enter a release.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Tooling caches
 .pytest_cache/
 .ruff_cache/

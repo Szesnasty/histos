@@ -68,7 +68,7 @@ def apply_bindings(
             )
         # Copied on the way out. `Principal` deep-copies on construction, which
         # stops the *caller* rewriting a bound identity; it does not stop the tool,
-        # and a bind hands the tool the stored object itgate. So an ordinary
+        # and a bind hands the tool the stored object it gates. So an ordinary
         # `tenants.append(...)` inside a tool body edited the trust anchor that the
         # next call in the same request would be authorized against — the one value
         # in the library that must not be reachable from anything the model can

@@ -22,13 +22,6 @@ from typing import Any
 from histos.errors import PolicyError
 from histos.policy.canonical import canonical_json
 from histos.policy.frozen import detach_mapping, detach_sequence
-from histos.redos import reject_catastrophic_backtracking
-
-# Cap the input a regex ever sees. This is a size bound and nothing more: at a
-# backtracking degree of three or four, 4 KiB is not a bound at all — a merely
-# *polynomial* pattern turns it into hours, and an exponential one into years. The
-# time bound is `_reject_catastrophic_backtracking` below, which refuses such a
-# pattern at policy-load time. Both apply; only the second one bounds time.
 
 # Largest magnitude a numeric bound may carry. Beyond this, `float()` on the value
 # overflows and the comparison/`multiple_of` arithmetic in `_check_number` raises
@@ -342,7 +335,26 @@ class Field:
                 compiled = re.compile(self.pattern)
             except re.error as exc:
                 raise PolicyError(f"invalid regex pattern {self.pattern!r}: {exc}", code="invalid_field") from exc
-            reject_catastrophic_backtracking(self.pattern, compiled)
+            # Lazy on purpose. The structural screen reads CPython's private regex
+            # parse tree so it agrees with the engine it protects. Importing it at
+            # module load made *all* of Histos unimportable on an implementation that
+            # does not expose those internals, even for policies with no patterns.
+            # Such an implementation may use the rest of the gate; asking it to load a
+            # pattern fails closed here, at policy construction, with a useful error.
+            try:
+                from histos.redos import reject_catastrophic_backtracking
+
+                reject_catastrophic_backtracking(self.pattern, compiled)
+            except PolicyError:
+                # A successfully running screen reports unsafe user input with its
+                # own precise reason. Do not blur that into an availability problem.
+                raise
+            except Exception as exc:  # noqa: BLE001 — private parser drift fails closed
+                raise PolicyError(
+                    "pattern validation is unavailable on this Python implementation; "
+                    "Histos will not run an unscreened backtracking regex",
+                    code="unsafe_pattern",
+                ) from exc
 
 
 @dataclass(frozen=True)

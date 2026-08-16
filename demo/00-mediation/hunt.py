@@ -326,7 +326,9 @@ def _unpickled(fn: Any) -> Any:
     or anything else that sends a tool across a boundary.
     """
     try:
-        return pickle.loads(pickle.dumps(fn))
+        # Deliberately probes a round trip of the locally constructed wrapper. No
+        # external bytes are accepted; using pickle is the behavior under test.
+        return pickle.loads(pickle.dumps(fn))  # nosec B301
     except Exception as exc:
         raise PathAbsent(f"pickle refuses: {str(exc)[:56]}") from exc
 

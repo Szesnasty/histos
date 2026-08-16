@@ -18,7 +18,7 @@ import re._constants as _re_const
 import re._parser as _re_parser
 from typing import Any
 
-_MAX_PATTERN_INPUT = 4_096
+from histos._bounds import _MAX_PATTERN_INPUT as _MAX_PATTERN_INPUT
 
 # ── ReDoS screen ─────────────────────────────────────────────────────────
 #

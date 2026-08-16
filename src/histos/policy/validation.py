@@ -18,25 +18,32 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from histos._bounds import _MAX_PATTERN_INPUT
 from histos.policy.schema import _TYPE_CHECKS, Field, Schema
-from histos.redos.alphabet import _MAX_PATTERN_INPUT
 
 
 def _check_string_value(name: str, spec: Field, value: str) -> list[str]:
     """Length and pattern checks for a string — a scalar arg *or* one array element.
 
-    The absolute ``_MAX_PATTERN_INPUT`` cap is a DoS/ReDoS bound and always applies;
-    ``max_length`` and ``pattern`` apply when declared. At most one error is
-    reported (the first that fails), matching the scalar path.
+    ``max_length`` applies when declared. The absolute ``_MAX_PATTERN_INPUT`` cap is
+    narrower: it protects stdlib ``re.fullmatch`` and therefore applies only when a
+    pattern will actually run. Applying it to every ordinary string made a schema with
+    no length declaration silently refuse document bodies after 4 KiB.
+
+    At most one error is reported (the first that fails), matching the scalar path.
     """
-    if len(value) > _MAX_PATTERN_INPUT:
-        return [f"{name}: value too long ({len(value)} > {_MAX_PATTERN_INPUT})"]
     if spec.min_length is not None and len(value) < spec.min_length:
         return [f"{name}: shorter than min_length {spec.min_length}"]
     if spec.max_length is not None and len(value) > spec.max_length:
         return [f"{name}: longer than max_length {spec.max_length}"]
-    if spec.pattern is not None and not re.fullmatch(spec.pattern, value):
-        return [f"{name}: does not match required pattern"]
+    if spec.pattern is not None:
+        if len(value) > _MAX_PATTERN_INPUT:
+            return [
+                f"{name}: pattern input too long ({len(value)} > {_MAX_PATTERN_INPUT}); "
+                "remove pattern and validate larger structured text inside the tool"
+            ]
+        if not re.fullmatch(spec.pattern, value):
+            return [f"{name}: does not match required pattern"]
     return []
 
 
