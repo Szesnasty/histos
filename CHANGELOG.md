@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) **once the pub
 surface is frozen at v0.3**. Until then, the top-level API may still change
 between minor versions — every such change is listed here.
 
+## [0.1.1](https://github.com/Szesnasty/histos/compare/v0.1.0...v0.1.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* **docs:** teach policy authoring on PyPI ([4915e06](https://github.com/Szesnasty/histos/commit/4915e06f7313d7a8f9c959d9586272cf1cdf4d30))
+
 ## 0.1.0 (2026-08-16)
 
 
