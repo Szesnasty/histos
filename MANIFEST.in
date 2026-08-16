@@ -17,7 +17,7 @@ graft spec
 # suite also reads demo/ and scripts/ from the tree root, and demo/ is five
 # applications with their own dependency sets and generated databases. So the
 # distribution stops half-shipping a suite; the suite runs against the tag it was
-# written for, https://github.com/Szesnasty/histos/tree/v0.1.0.
+# written for, published at https://github.com/Szesnasty/histos/releases.
 prune tests
 
 # `src/histos.egg-info` is a gitignored artifact of a previous local build that was

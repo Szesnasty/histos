@@ -46,10 +46,11 @@ Legend: `[x]` shipped · `[ ]` todo · 🚦 a gate not crossed until it passes.
 - [x] `review_policy` tri-state; `coverage` as a CI gate
 - [x] Hash-chained audit with a verifier
 - [x] `histos` CLI: validate / review / coverage / explain / import / drift / audit verify
-- [x] CI — ruff check and format, pytest on 3.12/3.13 including the conformance
-      corpus, the wheel installed bare to prove the zero-dependency claim, and
-      `validate` / `review` / `coverage` / `drift` run against the gallery. The gates
-      this library sells to other people are now gates on this library.
+- [x] CI — ruff check and format, pytest on Python 3.12–3.14 across Linux, Windows
+      and macOS including the conformance corpus, the wheel installed bare to prove
+      the zero-dependency claim, and `validate` / `review` / `coverage` / `drift` run
+      against the gallery. The gates this library sells to other people are now gates
+      on this library.
 - [x] **Contract drift detection** — `histos drift` fails on a tool definition that
       moved since it was reviewed, `histos import --update` refreshes `args`/`returns`
       without touching the security semantics, and a sidecar lock records three hashes
@@ -67,21 +68,26 @@ Legend: `[x]` shipped · `[ ]` todo · 🚦 a gate not crossed until it passes.
       LangGraph `ToolNode`; it found a real bypass and now guards the regression.
 - [x] `[project.urls]` — Homepage / Repository / Issues / Changelog, carried into the
       wheel metadata, so PyPI links where the code actually is.
+- [x] **Draft 0.1 published with the engine** — schema, decision codes, versioning
+      rules and conformance fixtures ship in the source distribution; the editor
+      schema is also served at `usehistos.dev/spec/policy-0.1.schema.json`.
+- [x] **Policy-authoring path** — a complete policy on PyPI, a focused writing guide,
+      seven checked YAML/JSON examples and generated key reference.
 
 ---
 
 ## Next
 
-- [ ] **Publish `spec/` as Draft 0.1** — schema, decision codes, versioning rules,
-      released together with the engine that enforces them. Draft, never "standard":
-      inheritance, precedence and resource references are unsettled, and a published
-      format is far harder to fix than an API.
 - [ ] **MCP as one product flow**, never an adapter now and DX later:
       `tools/list` → infer contracts → generate policy → observe → suggest → human
       review → enforce. An MCP server exposing twenty tools makes cold start *worse*,
       so generation ships with the adapter or neither ships.
 - [ ] **MRTR confirmation, experimental** — carrying the full approval tuple. MRTR is
       a transport; the approval is the security decision, and the two must not merge.
+- [ ] **Call-sequence constraints, designed before implemented** — one observed attack
+      split a secret across individually legal calls, so per-call checks and volume
+      budgets were insufficient. Find the smallest deterministic state model that
+      blocks composition without turning the policy into a workflow language.
 
 ## 🚦 Adoption gate — nothing below starts until this passes
 
@@ -112,15 +118,6 @@ Ordered by pull, not preference. The signal that would pull each one is in paren
       `format_validators`
 - [ ] `cost_budget`, multi-window `rate_limit`, `limit_scope`, shared limit backend
       *(first multi-replica deployment)*
-- [ ] `call_sequence_constraint` — no `send_email` after `read_secret`
-      **⚠ the signal has fired.** In July 2026 an OpenAI model, blocked by a credential
-      scanner, split the token across several individually-legal steps and reconstructed
-      it later, so the full value never appeared in one checked operation; the published
-      conclusion was that controlling individual actions had stopped being sufficient.
-      That defeats exact-match secret detection *and* the one-decision-per-call model,
-      and removing the shell does not help — a bounded agent can still split a secret
-      across forty legal sends, or drain a table with forty legal reads. Budgets bound
-      volume, not composition. This is no longer demand-pulled; it is owed.
 - [ ] Signed cross-process confirmation: policy hash, expiry, nonce, approver identity
       *(first multi-process deployment, or the first auditor asking)*
 - [ ] `dry_run_simulate`, `policy_analysis` — effective permissions, over-provisioning

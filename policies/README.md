@@ -5,6 +5,10 @@ top to bottom is a tour of the format. The YAML carries the reasoning in comment
 the JSON is the same policy for machines — JSON has no comments, which is the whole
 reason both spellings exist here.
 
+If this is your first policy, start with the shorter
+[policy-writing guide](../docs/writing-policies.md), then return here for complete
+patterns at increasing complexity.
+
 This directory is a **catalogue of the format**. It is not the same thing as its two
 neighbours, and the difference is worth knowing:
 
@@ -136,7 +140,8 @@ JSON policies by filename pattern instead (`*.policy.json`). Whether the format
 should reserve `$schema` is [an open question, deliberately not settled in Draft
 0.1](../docs/policy-format-draft-0.1.md).
 
-Until `usehistos.dev` serves the schema, point the directive at your checkout:
+The hosted schema is the convenient default. For an offline checkout, point the
+directive at the local copy instead:
 
 ```yaml
 # yaml-language-server: $schema=./spec/policy-0.1.schema.json

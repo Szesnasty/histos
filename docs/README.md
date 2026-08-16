@@ -6,11 +6,14 @@ manual.
 
 ## Start here
 
-- [Security model](../SECURITY.md) — the guarantee, required trust and where it stops.
-- [Identity](identity.md) — bind a principal from an authenticated host context.
-- [Policy gallery](../policies/README.md) — seven worked YAML/JSON policies.
+- [Writing policies](writing-policies.md) — go from an existing tool surface to a
+  validated, reviewed and enforced policy.
+- [Policy gallery](../policies/README.md) — seven worked YAML/JSON policies, ordered
+  from one safe lookup to tenant isolation, RAG, payments, MCP, email and deploys.
 - [Policy reference](policy-reference.md) — every supported key, generated from the
   schema.
+- [Security model](../SECURITY.md) — the guarantee, required trust and where it stops.
+- [Identity](identity.md) — bind a principal from an authenticated host context.
 
 ## Adopt it safely
 

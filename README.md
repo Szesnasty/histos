@@ -74,42 +74,64 @@ infrastructure, clone the repository and run `python examples/makeRefund_demo.py
 The adversarial applications are in
 [`demo/`](https://github.com/Szesnasty/histos/tree/main/demo).
 
-## Protect a tool
+## Write a policy
+
+A policy is YAML or JSON. This is a complete, enforceable YAML policy — not a sketch:
+
+```yaml
+# yaml-language-server: $schema=https://usehistos.dev/spec/policy-0.1.schema.json
+schema_version: histos.policy/0.1
+policy_id: support-search
+version: "1"
+
+tools:
+  search_docs:
+    access: read
+    args:
+      query: {type: string, min_length: 1, max_length: 500}
+    returns:
+      title: {type: string}
+      snippet: {type: string}
+    output:
+      project: true
+      strict: true
+
+roles:
+  support:
+    allow: [search_docs]
+```
+
+Unknown tools, roles and arguments deny by default. Validate the document, review the
+missing security decisions, then exercise one call without running the tool:
+
+```bash
+histos validate security.policy.yaml
+histos review security.policy.yaml
+histos explain security.policy.yaml search_docs \
+  --role support --args '{"query":"refund policy"}'
+```
+
+Load the same file around the callable your agent receives:
 
 ```python
-from histos import Field, GateDenied, Policy, Principal, Schema, ToolContract
-from histos import gate, use_principal
+from histos import Principal, protect, use_principal
 
-def delete_user(user_id: int):
-    return {"deleted": user_id}
+def search_docs(query: str):
+    return {"title": "Refunds", "snippet": "Refunds require a receipt."}
 
-policy = Policy(
-    tools={"delete_user": ToolContract(
-        name="delete_user",
-        args=Schema({"user_id": Field(type="integer")}),
-        access="write",
-    )},
-    permissions={"admin": frozenset({"delete_user"})},
-)
+guarded = protect([search_docs], policy="security.policy.yaml")
 
-safe_delete = gate(delete_user, policy=policy)
-
-with use_principal(Principal(role="admin", identity="svc-1")):
-    safe_delete(user_id=42)  # allowed
-
-with use_principal(Principal(role="viewer", identity="svc-2")):
-    try:
-        safe_delete(user_id=42)
-    except GateDenied as exc:
-        print(exc.decision.rule)  # rbac
+with use_principal(Principal(role="support", identity="user-42")):
+    result = guarded.tools["search_docs"](query="refund policy")
 ```
 
 Set the `Principal` in trusted host code from an authenticated session or workload
-identity — never from model output or a tool argument. `protect()` handles a whole
-tool set and reports policy review and coverage; a supplied tool with no contract or
-grant is still wrapped and denies by default. See the
-[complete quickstart](https://github.com/Szesnasty/histos/blob/main/examples/quickstart.py)
-and [commented policy](https://github.com/Szesnasty/histos/blob/main/examples/security.policy.yaml).
+identity — never from model output or a tool argument. For a real tool set, import its
+argument and return shapes instead of retyping them, then author the decisions schemas
+cannot know: grants, ownership, trusted bindings, limits, confirmation and output.
+Follow the [policy-writing guide](https://github.com/Szesnasty/histos/blob/main/docs/writing-policies.md),
+use the [seven worked policies](https://github.com/Szesnasty/histos/tree/main/policies),
+or run the [complete quickstart](https://github.com/Szesnasty/histos/blob/main/examples/quickstart.py).
 
 ## A production adoption path
 
@@ -143,7 +165,7 @@ are in [SECURITY.md](https://github.com/Szesnasty/histos/blob/main/SECURITY.md).
 
 ## Status and documentation
 
-Histos 0.1.0 is an alpha API implementing Histos Policy Format Draft 0.1. The Python
+Histos is an alpha API implementing Histos Policy Format Draft 0.1. The Python
 engine, policy format, CLI, conformance corpus, LangChain/LangGraph adapters and tool
 definition import/drift workflow exist today. A hosted control plane, JavaScript
 runtime and dedicated MCP enforcement product do not.

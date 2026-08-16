@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from histos import Principal, load_bundle_yaml, protect, use_principal
 from histos._version import __version__
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
@@ -58,7 +59,11 @@ def _relative_link_targets(text: str) -> list[str]:
     not rewrite relative targets against the source repository the way GitHub does, so
     every one of these is a 404 on the project page.
     """
-    return [t for t in MARKDOWN_LINK.findall(text) if not ALREADY_ABSOLUTE.match(t)]
+    # A Python expression such as ``tools["name"](argument)`` contains the same
+    # ``](`` delimiter as a Markdown link. It is code, not a target PyPI will resolve.
+    prose = re.sub(r"```.*?```", "", text, flags=re.S)
+    prose = re.sub(r"`[^`\n]*`", "", prose)
+    return [t for t in MARKDOWN_LINK.findall(prose) if not ALREADY_ABSOLUTE.match(t)]
 
 
 def _manifest_promises() -> tuple[list[str], list[str]]:
@@ -143,6 +148,85 @@ def test_readme_install_section_installs_the_released_package():
     assert "git clone" not in install.lower()
 
 
+def test_the_pypi_readme_contains_a_real_policy_authoring_path(tmp_path: Path):
+    """The project page must get a reader from install to an enforceable file.
+
+    The first release showed only a policy assembled with Python constructors. That
+    proved the engine but hid the portable artifact the product is built around. Keep
+    the YAML on PyPI executable rather than letting it decay into pseudocode.
+    """
+    readme = README.read_text(encoding="utf-8")
+    section = readme.split("## Write a policy", 1)[1].split("\n## ", 1)[0]
+    match = re.search(r"```yaml\n(.*?)```", section, flags=re.S)
+    assert match is not None, "the PyPI README has no YAML policy example"
+
+    policy = load_bundle_yaml(match.group(1))
+    assert policy.validate() == []
+    assert set(policy.tools) == {"search_docs"}
+    assert policy.permissions == {"support": frozenset({"search_docs"})}
+    assert "histos validate security.policy.yaml" in section
+    assert "histos review security.policy.yaml" in section
+    assert "histos explain security.policy.yaml" in section
+    assert "docs/writing-policies.md" in section
+
+    from histos.cli import main
+
+    policy_path = tmp_path / "security.policy.yaml"
+    policy_path.write_text(match.group(1), encoding="utf-8")
+    assert main(["validate", str(policy_path)]) == 0
+    assert main(["review", str(policy_path)]) == 0
+    assert (
+        main(
+            [
+                "explain",
+                str(policy_path),
+                "search_docs",
+                "--role",
+                "support",
+                "--args",
+                '{"query":"refund policy"}',
+            ]
+        )
+        == 0
+    )
+
+    def search_docs(query: str):
+        return {"title": "Refunds", "snippet": "Refunds require a receipt."}
+
+    guarded = protect([search_docs], policy=policy)
+    with use_principal(Principal(role="support", identity="reader")):
+        assert guarded.tools["search_docs"](query="refund policy") == {
+            "title": "Refunds",
+            "snippet": "Refunds require a receipt.",
+        }
+
+
+def test_local_markdown_links_resolve_inside_the_repository():
+    """A documentation map is useful only while every local target exists."""
+    root = README.parent.resolve()
+    broken: list[str] = []
+    for document in sorted(root.rglob("*.md")):
+        if any(part in {".venv", "node_modules", ".git"} for part in document.parts):
+            continue
+        text = document.read_text(encoding="utf-8")
+        # Code examples contain real expressions such as ``tools[…](**args)`` that
+        # are valid Markdown-link-shaped text but are not links.
+        prose = re.sub(r"```.*?```", "", text, flags=re.S)
+        prose = re.sub(r"`[^`\n]*`", "", prose)
+        for raw in re.findall(r"\[[^\]\n]+\]\(([^)\n]+)\)", prose):
+            target = raw.strip().split(maxsplit=1)[0].strip("<>")
+            if re.match(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|#)", target):
+                continue
+            relative = target.split("#", 1)[0].split("?", 1)[0]
+            if not relative:
+                continue
+            resolved = (document.parent / relative).resolve()
+            if root not in (resolved, *resolved.parents) or not resolved.exists():
+                broken.append(f"{document.relative_to(root)} -> {target}")
+
+    assert not broken, f"local documentation links do not resolve: {broken}"
+
+
 def test_manifest_promises_only_paths_that_exist():
     includes, grafts = _manifest_promises()
     assert includes and grafts, "MANIFEST.in ships nothing"
@@ -162,7 +246,13 @@ def test_sdist_ships_the_reading_the_long_description_sends_people_to(sdist: Bui
     # Named individually rather than derived from MANIFEST.in: these are the files the
     # README calls the most useful in the repository, and dropping one from the graft
     # list would otherwise make this test agree with the mistake.
-    for promised in ("SECURITY.md", "CHANGELOG.md", "examples/quickstart.py", "conformance/manifest.json"):
+    for promised in (
+        "SECURITY.md",
+        "CHANGELOG.md",
+        "docs/writing-policies.md",
+        "examples/quickstart.py",
+        "conformance/manifest.json",
+    ):
         assert promised in sdist.names, f"a `pip download` consumer cannot read {promised}"
 
 

@@ -205,7 +205,7 @@ jobs:
         run: |
           files="$(tar -tzf dist/*.tar.gz | cut -d/ -f2-)"
           for promised in SECURITY.md CHANGELOG.md CONTRIBUTING.md \
-                          examples/quickstart.py policies/README.md \
+                          docs/writing-policies.md examples/quickstart.py policies/README.md \
                           spec/decision-codes.json conformance/manifest.json; do
             echo "$files" | grep -qx "$promised" || { echo "sdist is missing $promised" >&2; exit 1; }
           done
