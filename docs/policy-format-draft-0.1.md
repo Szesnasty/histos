@@ -56,7 +56,7 @@ so the version space can be reused downward exactly once — now. That is a real
 argument for settling this before the first publish rather than after.
 
 The namespace prefix (`histos.`) and the schema `$id` host
-(`https://histos.dev/spec/policy-0.1.schema.json`) are both settled. They were the
+(`https://usehistos.dev/spec/policy-0.1.schema.json`) are both settled. They were the
 last reason to delay publishing this draft, and the reason the name had to be locked
 first: the prefix is part of every policy file, and the `$id` is part of every
 `$ref`. Neither moves again.

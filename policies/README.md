@@ -119,7 +119,7 @@ the construct.
 Every policy here starts with:
 
 ```yaml
-# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# yaml-language-server: $schema=https://usehistos.dev/spec/policy-0.1.schema.json
 ```
 
 That one line gives VS Code, JetBrains and anything else speaking the YAML language
@@ -136,7 +136,7 @@ JSON policies by filename pattern instead (`*.policy.json`). Whether the format
 should reserve `$schema` is [an open question, deliberately not settled in Draft
 0.1](../docs/policy-format-draft-0.1.md).
 
-Until `histos.dev` serves the schema, point the directive at your checkout:
+Until `usehistos.dev` serves the schema, point the directive at your checkout:
 
 ```yaml
 # yaml-language-server: $schema=./spec/policy-0.1.schema.json
