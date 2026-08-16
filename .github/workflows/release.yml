@@ -141,7 +141,12 @@ jobs:
               "trusted-publisher workflow completes",
           ):
               assert phrase not in metadata, f"the long description still says {phrase!r}"
-          relative = [t for t in re.findall(r"\]\(([^)]+)\)", metadata) if not re.match(r"^(https?:|mailto:|#)", t)]
+          # Python expressions such as ``tools["name"](argument)`` contain the
+          # same ``](`` delimiter as a Markdown link. Remove code before looking
+          # for relative prose links, just like the packaging regression test.
+          prose = re.sub(r"```.*?```", "", metadata, flags=re.S)
+          prose = re.sub(r"`[^`\n]*`", "", prose)
+          relative = [t for t in re.findall(r"\]\(([^)]+)\)", prose) if not re.match(r"^(https?:|mailto:|#)", t)]
           assert not relative, f"relative links 404 on pypi.org: {sorted(set(relative))}"
           PY
 

@@ -137,6 +137,19 @@ def test_readme_has_no_relative_links():
     assert not dead, f"README links must be absolute to survive PyPI rendering: {dead}"
 
 
+def test_release_workflow_ignores_link_shaped_code():
+    """The final inline gate must make the same code/prose distinction as this suite.
+
+    The v0.1.1 release initially stopped after treating
+    ``tools["search_docs"](query=...)`` as a relative Markdown link. Keep the
+    independently running workflow check aligned with ``_relative_link_targets``.
+    """
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    assert 'prose = re.sub(r"```.*?```", "", metadata, flags=re.S)' in workflow
+    assert 'prose = re.sub(r"`[^`\\n]*`", "", prose)' in workflow
+    assert 're.findall(r"\\]\\(([^)]+)\\)", prose)' in workflow
+
+
 def test_readme_install_section_installs_the_released_package():
     readme = README.read_text(encoding="utf-8")
     for phrase in DENIES_ITS_OWN_RELEASE:
