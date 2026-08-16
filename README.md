@@ -2,6 +2,8 @@
 
 > ## Hijacked. Still bounded.
 
+**[usehistos.dev](https://usehistos.dev)**
+
 **Deterministic authorization for AI agent tool calls — before execution and after
 return.** The model proposes. Your policy decides.
 

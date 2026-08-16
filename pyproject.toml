@@ -47,7 +47,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage      = "https://github.com/Szesnasty/histos"
+Homepage      = "https://usehistos.dev"
 Repository    = "https://github.com/Szesnasty/histos"
 Documentation = "https://github.com/Szesnasty/histos/tree/main/docs"
 Issues        = "https://github.com/Szesnasty/histos/issues"

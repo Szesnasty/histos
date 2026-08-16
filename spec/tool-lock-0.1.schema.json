@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://histos.dev/spec/tool-lock-0.1.schema.json",
+  "$id": "https://usehistos.dev/spec/tool-lock-0.1.schema.json",
   "title": "Histos Tool Lock 1–2",
   "$comment": "Provenance for the imported half of a policy. The policy itself stays a self-contained, hashed artifact and never references a contract it does not contain; this file records where the imported shapes came from and what they looked like when a human last reviewed them. Nothing here affects a decision, so nothing here is part of the policy's content_hash. The hash definitions below are NORMATIVE: a second implementation that computes them differently will report drift the reference engine does not, which is worse than reporting none.",
   "type": "object",

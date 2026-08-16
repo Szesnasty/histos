@@ -148,7 +148,7 @@ at increasing complexity, read [`policies/`](../policies/).
 Your editor can show all of this while you type. Put this line at the top of a policy:
 
 ```yaml
-# yaml-language-server: $schema=https://histos.dev/spec/policy-0.1.schema.json
+# yaml-language-server: $schema=https://usehistos.dev/spec/policy-0.1.schema.json
 ```
 
 Two rules govern everything below, and they are why the tables are shorter than you might expect:

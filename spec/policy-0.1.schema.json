@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://histos.dev/spec/policy-0.1.schema.json",
+  "$id": "https://usehistos.dev/spec/policy-0.1.schema.json",
   "$comment": "Histos Policy Format, Draft 0.1. The $id is an identifier first, but it is meant to resolve: this host MUST serve this document before Draft 0.1 is published, because changing an $id after publication breaks every $ref that points at it. NOT STABLE: see docs/policy-format-draft-0.1.md for what is still open. An engine MUST reject any document with a property not described here (additionalProperties is false everywhere on purpose — a policy an engine only partly understands would enforce only part of what it says).",
   "title": "Histos Policy, Draft 0.1",
   "type": "object",
