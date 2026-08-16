@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) **once the pub
 surface is frozen at v0.3**. Until then, the top-level API may still change
 between minor versions — every such change is listed here.
 
+## 0.1.0 (2026-08-16)
+
+
+### Features
+
+* ship deterministic agent tool-call enforcement ([0632ab8](https://github.com/Szesnasty/histos/commit/0632ab82c8e626e8781a57a6c7972f0bcebe1029))
+
+
+### Documentation
+
+* label demo fixtures as synthetic ([d4cb261](https://github.com/Szesnasty/histos/commit/d4cb261d53987c0a2cafe312188fab1224e8a2a6))
+* use final website domain ([b7e10b7](https://github.com/Szesnasty/histos/commit/b7e10b763d83fa4635e28104fde3c9210ccd1812))
+
 ## [Pre-release history]
 
 ### Fixed — publication-blocking audit
