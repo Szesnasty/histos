@@ -95,6 +95,32 @@ def test_messages_without_tool_calls_pass_through_untouched(llm):
     assert out[0] is history[0] and out[1] is history[1]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://models.example.com/v1",
+        "file:///tmp/fake-api",
+        "https://user:secret@api.example.com/v1",
+        "https://api.example.com/v1#fragment",
+        "https://[not-an-ipv6-address]/v1",
+    ],
+)
+def test_hosted_endpoint_refuses_cleartext_remote_or_non_http_urls(llm, url):
+    with pytest.raises(RuntimeError):
+        llm._endpoint(url, "TEST_URL")
+
+
+@pytest.mark.parametrize("url", ["https://api.example.com/v1", "http://localhost:11434/v1", "http://[::1]:11434/v1"])
+def test_hosted_endpoint_allows_https_and_local_loopback_http(llm, url):
+    assert llm._endpoint(url, "TEST_URL") == url
+
+
+def test_post_validates_the_destination_before_reading_the_api_key(llm, monkeypatch):
+    monkeypatch.setattr(llm, "_api_key", lambda: pytest.fail("the key was read before URL validation"))
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        llm._post("http://models.example.com/v1/chat/completions", {}, attempts=1)
+
+
 def test_outbound_does_not_mutate_the_loops_own_history(llm):
     """The loop calls the same function again on the next turn.
 

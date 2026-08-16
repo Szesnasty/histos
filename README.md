@@ -62,18 +62,8 @@ raw distinctions and partial-wiring failure are documented in the
 
 ## Install
 
-After the `v0.1.0` trusted-publisher workflow completes:
-
 ```bash
 pip install "histos[yaml]"
-```
-
-Until that tag is published, install the current source:
-
-```bash
-git clone https://github.com/Szesnasty/histos
-cd histos
-pip install ".[yaml]"
 ```
 
 Requires Python 3.12 or newer. The `yaml` extra adds PyYAML; JSON policies use only
@@ -142,6 +132,9 @@ authorization.
 - Histos does not understand intent or stop unsafe workflows composed from separately
   allowed calls. Limits and built-in approvals are process-local; the default audit
   sink is memory-only.
+- The complete joined argument text is limited to 1 MiB by default and can be raised
+  with `input_budget=`. A field using `pattern` is limited to 4,096 characters because
+  it runs through Python's backtracking regex engine; unpatterned text is not.
 
 The exact guarantee, residual object-inspection limits and safe deployment patterns
 are in [SECURITY.md](https://github.com/Szesnasty/histos/blob/main/SECURITY.md).

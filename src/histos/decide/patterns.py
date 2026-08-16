@@ -1,20 +1,18 @@
 """Static regex pattern *data* for the optional content-rules module.
 
 Heuristics, and deliberately **not** used by the core gate — see
-:mod:`histos.decide.content_rules` for why. This module only holds the pattern lists
-and the scan bound; :class:`~histos.decide.content_rules.ContentRules`
-decides when (and whether) to apply them.
+:mod:`histos.decide.content_rules` for why. This module only holds the pattern lists;
+:class:`~histos.decide.content_rules.ContentRules` decides when (and whether) to
+apply them.
 
-Every match is length-bounded to avoid ReDoS: an argument blob longer than
-``_MAX_SCAN_LEN`` is truncated before matching, so a pathological input cannot
-stall the caller.
+The engine has already bounded the complete argument blob before these run. Scanning
+only a prefix is not a performance bound — it is an allow path for a forbidden phrase
+placed after that prefix.
 """
 
 from __future__ import annotations
 
 import re
-
-_MAX_SCAN_LEN = 8_000
 
 # Injected instructions attempting to override the agent's own rules.
 INJECTION_PATTERNS: list[re.Pattern[str]] = [

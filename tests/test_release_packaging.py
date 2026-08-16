@@ -11,6 +11,7 @@ the tree the build happens to start from.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -34,7 +35,13 @@ ALREADY_ABSOLUTE = re.compile(r"^(https?:|mailto:|#)")
 # Phrases that were true while the package was unpublished and become a lie the moment
 # it is. They are checked as text rather than as a review item because a reviewer reads
 # the README on GitHub, where relative links work and the install block looks fine.
-DENIES_ITS_OWN_RELEASE = ("Not on PyPI", "not yet on PyPI", "git+https://github.com/Szesnasty/histos")
+DENIES_ITS_OWN_RELEASE = (
+    "Not on PyPI",
+    "not yet on PyPI",
+    "git+https://github.com/Szesnasty/histos",
+    "Until that tag is published",
+    "trusted-publisher workflow completes",
+)
 
 # A build writes `src/histos.egg-info`, `build/` and `dist/` beside the sources, and a
 # test suite has no business doing that to the tree it is running in — hence the copy,
@@ -129,7 +136,11 @@ def test_readme_install_section_installs_the_released_package():
     readme = README.read_text(encoding="utf-8")
     for phrase in DENIES_ITS_OWN_RELEASE:
         assert phrase not in readme, f"README still says {phrase!r}"
-    assert 'pip install "histos[yaml]"' in readme
+    install = readme.split("## Install", 1)[1].split("\n## ", 1)[0]
+    assert 'pip install "histos[yaml]"' in install
+    assert "until" not in install.lower()
+    assert "after" not in install.lower()
+    assert "git clone" not in install.lower()
 
 
 def test_manifest_promises_only_paths_that_exist():
@@ -172,7 +183,7 @@ def test_sdist_carries_no_earlier_builds_egg_info(sdist: BuiltSdist):
 
 
 def test_the_changelog_never_claims_a_release_that_did_not_happen():
-    """A dated heading says "this version shipped". Nothing may say that before it did.
+    """A dated heading is released, or the one Release Please candidate.
 
     This test used to require a dated heading matching `__version__`, and that is how
     `## [0.1.0] - 2026-08-12` came to describe a release that never happened: the gate
@@ -182,30 +193,33 @@ def test_the_changelog_never_claims_a_release_that_did_not_happen():
     not exist, and two adversarial passes were missing from the file whose whole job is
     saying what changed.
 
-    So it asks the other way round now. A dated entry must have a tag behind it, and the
-    version being built must be described *somewhere* — under its own heading once it
-    ships, under `[Unreleased]` until then. Both states are honest; the one in between
-    is not.
+    Release Please necessarily writes the candidate heading in its PR before creating
+    the tag. That one intermediate state is identified by the manifest already tracking
+    the same source version. Every older dated heading still needs a tag. Before the
+    first release, the detailed record lives under `Pre-release history` and makes no
+    shipped claim.
     """
     changelog = CHANGELOG.read_text(encoding="utf-8")
-    headings = re.findall(r"^## \[([^\]]+)\](.*)$", changelog, flags=re.M)
-    assert headings, "the changelog has no version headings at all"
-
-    dated = [(name, rest) for name, rest in headings if name != "Unreleased"]
+    dated = re.findall(r"^## \[?(\d+\.\d+\.\d+)\]?(.*)$", changelog, flags=re.M)
     for name, rest in dated:
         assert re.search(r"\d{4}-\d{2}-\d{2}", rest), f"the {name} heading carries no release date: {rest!r}"
         assert "unreleased" not in rest.lower(), f"{name} is both dated and unreleased"
 
     tagged = _git_tags()
+    manifest = json.loads((CHANGELOG.parent / ".release-please-manifest.json").read_text(encoding="utf-8"))["."]
     if tagged is not None:
-        unbacked = [name for name, _ in dated if f"v{name}" not in tagged]
+        unbacked = [name for name, _ in dated if f"v{name}" not in tagged and name != manifest]
         assert not unbacked, (
             f"the changelog says {unbacked} shipped and there is no tag for it. "
-            "Either cut the tag or move the entry back under [Unreleased]."
+            "Only the version currently tracked by Release Please may be a pre-tag candidate."
         )
 
-    described = any(name == __version__ for name, _ in dated) or _unreleased_body(changelog).strip()
-    assert described, f"the build is {__version__} and the changelog says nothing about it"
+    if manifest == "0.0.0":
+        assert _section_body(changelog, "## [Pre-release history]").strip()
+    else:
+        assert any(name == __version__ for name, _ in dated), (
+            f"Release Please tracks {manifest}, but the changelog has no {__version__} candidate"
+        )
 
 
 def _git_tags() -> set[str] | None:
@@ -225,18 +239,25 @@ def _git_tags() -> set[str] | None:
     return set(done.stdout.split()) if done.returncode == 0 else None
 
 
-def _unreleased_body(changelog: str) -> str:
-    start = changelog.find("## [Unreleased]")
+def _section_body(changelog: str, heading: str) -> str:
+    start = changelog.find(heading)
     if start == -1:
         return ""
-    end = changelog.find("\n## [", start + 1)
-    return changelog[start + len("## [Unreleased]") : end if end != -1 else len(changelog)]
+    end = changelog.find("\n## ", start + len(heading))
+    return changelog[start + len(heading) : end if end != -1 else len(changelog)]
 
 
 def test_release_workflow_publishes_without_a_long_lived_token():
     assert RELEASE_WORKFLOW.exists(), "there is no release workflow; the published artifact is ungated"
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    assert 'tags: ["v*"]' in workflow
+    assert "branches: [main]" in workflow
+    assert 'tags: ["v*"]' not in workflow, "pushing an arbitrary tag must not start an upload"
+    assert "release_tag:" in workflow, "a failed post-tag release needs an explicit recovery path"
+    assert "git describe --tags --exact-match HEAD" in workflow
+    assert re.search(r"googleapis/release-please-action@[0-9a-f]{40}\b", workflow)
+    assert "needs.release-please.outputs.release_created == 'true'" in workflow
+    assert "issues: write" in workflow
+    assert "pull-requests: write" in workflow
     assert "id-token: write" in workflow, "Trusted Publishing needs an OIDC token"
     assert "pypa/gh-action-pypi-publish" in workflow
     assert "twine check" in workflow
@@ -244,6 +265,50 @@ def test_release_workflow_publishes_without_a_long_lived_token():
     # push a release nothing links back to a commit.
     assert "PYPI_API_TOKEN" not in workflow
     assert "password:" not in workflow
+
+
+def test_every_github_action_is_pinned_to_an_immutable_commit():
+    root = RELEASE_WORKFLOW.parent.parent.parent
+    uses: list[tuple[Path, str]] = []
+    for path in sorted((root / ".github" / "workflows").glob("*.yml")):
+        for action in re.findall(r"^\s*uses:\s*([^\s#]+)", path.read_text(encoding="utf-8"), flags=re.M):
+            uses.append((path, action))
+
+    assert uses, "the repository has no GitHub Actions to audit"
+    mutable = [f"{path.name}: {action}" for path, action in uses if not re.search(r"@[0-9a-f]{40}$", action)]
+    assert not mutable, f"actions execute mutable upstream refs: {mutable}"
+
+    dependabot = (root / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    assert "package-ecosystem: github-actions" in dependabot
+
+
+def test_release_please_tracks_the_real_version_file_and_plain_v_tags():
+    root = RELEASE_WORKFLOW.parent.parent.parent
+    config = json.loads((root / "release-please-config.json").read_text(encoding="utf-8"))
+    manifest = json.loads((root / ".release-please-manifest.json").read_text(encoding="utf-8"))
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    package = config["packages"]["."]
+
+    # Before the first public release the manifest records that no release exists.
+    # The bootstrap commit carries `Release-As: 0.1.0`; Release Please changes this to
+    # the source version in the release PR. Keep the assertion valid on both sides of
+    # that one-time transition, while refusing an arbitrary stale version.
+    assert manifest in ({".": "0.0.0"}, {".": __version__})
+    if manifest["."] == "0.0.0":
+        assert re.fullmatch(r"[0-9a-f]{40}", config["bootstrap-sha"])
+    assert package["release-type"] == "python"
+    assert package["package-name"] == "histos"
+    assert package["include-component-in-tag"] is False
+    assert package["include-v-in-tag"] is True
+    assert {"type": "generic", "path": "src/histos/_version.py"} in package["extra-files"]
+    assert "x-release-please-version" in (root / "src/histos/_version.py").read_text(encoding="utf-8")
+    if manifest["."] == "0.0.0":
+        # Release Please's changelog updater recognises a bracketed H2 as an
+        # insertion point. Without one on the first release it creates another
+        # `# Changelog` and demotes the entire existing document by one level.
+        assert "## [Pre-release history]" in changelog
+    else:
+        assert re.search(rf"^## \[?{re.escape(__version__)}\]?\b", changelog, flags=re.M)
 
 
 def test_no_document_links_at_a_ref_that_does_not_exist():

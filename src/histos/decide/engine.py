@@ -8,7 +8,7 @@ The pre-gate chain (fail-fast), review-revised:
 
 1. ``unknown_tool``     — no contract → deny-by-default
 2. ``rbac``             — role allow-list
-3. ``arg_schema``       — arguments validated against the tool contract
+3. ``arg_schema``       — arguments validated and bounded before host callbacks
 4. ``resource_constraint`` — **resource-aware authorization**
 5. ``canary_exfil``     — exact-match canary in an argument
 6. ``content_rule``     — OPTIONAL heuristic patterns, only if opted in
@@ -166,6 +166,7 @@ class Engine:
         content_rules: ContentRules | None = None,
         resource_resolver: ResourceResolver | None = None,
         escalate: EscalationTier | None = None,
+        input_budget: int = _MAX_SCAN_CHARS,
         output_budget: int = _MAX_OUTPUT_SCAN_CHARS,
     ) -> None:
         # Validated like every other policy knob. `0` and negatives were accepted in
@@ -174,6 +175,8 @@ class Engine:
         # reads as a tool fault and is a typo in the host's configuration.
         if not isinstance(output_budget, int) or isinstance(output_budget, bool) or output_budget < 1:
             raise PolicyError(f"output_budget must be a positive number of characters, got {output_budget!r}")
+        if not isinstance(input_budget, int) or isinstance(input_budget, bool) or input_budget < 1:
+            raise PolicyError(f"input_budget must be a positive number of characters, got {input_budget!r}")
         self.policy = policy
         # Computed here so one read of `gate.engine` yields the ruleset *and* its hash
         # together. Read separately they are two reads with a swap possible between
@@ -183,6 +186,10 @@ class Engine:
         self.content_rules = content_rules
         self.resource_resolver = resource_resolver
         self.escalate = escalate
+        # The complete joined argument text is scanned or the call is refused. Hosts
+        # accepting documents larger than the conservative default can raise this;
+        # it never means "scan only this prefix".
+        self._input_budget = input_budget
         # How much tool output the post-gate will read. A hard module constant was the
         # wrong shape: it is a deployment question — a reporting tool legitimately
         # returns tens of megabytes — and the answer decides whether a result is
@@ -203,14 +210,15 @@ class Engine:
 
         Only the resolver hop is async — evaluation itself stays synchronous and
         CPU-only, so the two paths cannot drift into different verdicts. The cheap
-        checks (steps 1–3) run **before** the resolver on both paths: this path used to
+        checks (steps 1–3, including the complete argument scan budget) run **before**
+        the resolver on both paths: this path used to
         resolve first, so an unauthorized caller, or one whose arguments the schema
         rejects, still drove a real lookup in the host's trusted datastore — an
         existence/timing oracle and an SSRF primitive the sync path denied outright.
         """
         try:
             contract = self.policy.contract_for(req.tool_name)
-            early = self._pre_before_resource(req, contract)
+            early, blob = self._pre_before_resource(req, contract)
             if early is not None:
                 return early
             resource: Any = _UNRESOLVED
@@ -226,7 +234,7 @@ class Engine:
                 except Exception as exc:  # noqa: BLE001 — a raising resolver fails closed
                     return GateDecision(Effect.DENY, "resolver_error", f"resource_resolver raised: {exc!r}")
                 resource = resolved or {}
-            return await self._apre_after_resource(req, contract, resource)
+            return await self._apre_after_resource(req, contract, blob, resource)
         except Exception as exc:  # noqa: BLE001 — fail-closed
             return GateDecision(Effect.DENY, "internal_error", f"fail-closed on exception: {exc!r}")
 
@@ -240,49 +248,75 @@ class Engine:
 
     def _pre(self, req: GateRequest, resource: Any = _UNRESOLVED) -> GateDecision:
         contract = self.policy.contract_for(req.tool_name)
-        early = self._pre_before_resource(req, contract)
+        early, blob = self._pre_before_resource(req, contract)
         if early is not None:
             return early
-        return self._pre_after_resource(req, contract, resource)
+        return self._pre_after_resource(req, contract, blob, resource)
 
-    def _pre_before_resource(self, req: GateRequest, contract: Any) -> GateDecision | None:
-        """Steps 1–3: the CPU-only checks that must precede any resolver side effect.
+    def _pre_before_resource(self, req: GateRequest, contract: Any) -> tuple[GateDecision | None, str]:
+        """Steps 1–3: CPU-only checks and the scan budget, before any resolver.
 
-        Returns None when the call has earned a resource lookup — and only then, which
-        is what keeps `pre` and `apre` identical in *what they touch*, not just in what
-        they answer.
+        Returns the complete argument blob with an empty decision when the call has
+        earned a resource lookup — and only then. Building it once here means neither
+        sync nor async evaluation can hand a host callback an argument set the gate
+        would later refuse as too large to inspect completely.
         """
         # 1. Deny-by-default: a tool with no contract is not gated → refused.
         if contract is None:
-            return GateDecision(Effect.DENY, "unknown_tool", f"no policy for tool {req.tool_name!r}")
+            return GateDecision(Effect.DENY, "unknown_tool", f"no policy for tool {req.tool_name!r}"), ""
 
         # 2. RBAC allow-list (deny-by-default per role).
         if req.tool_name not in self.policy.allowed_tools(req.principal.role):
-            return GateDecision(
-                Effect.DENY,
-                "rbac",
-                f"role {req.principal.role!r} may not call {req.tool_name!r}",
-                field="role",
-                expected=f"grant for {req.tool_name!r}",
-                received=req.principal.role,
+            return (
+                GateDecision(
+                    Effect.DENY,
+                    "rbac",
+                    f"role {req.principal.role!r} may not call {req.tool_name!r}",
+                    field="role",
+                    expected=f"grant for {req.tool_name!r}",
+                    received=req.principal.role,
+                ),
+                "",
             )
 
         # 3. Argument schema. A gated tool with no schema cannot be validated →
         #    fail closed, never wave the call through.
         if contract.args is None:
-            return GateDecision(
-                Effect.DENY, "no_arg_schema", f"tool {req.tool_name!r} has no arg schema; cannot gate safely"
+            return (
+                GateDecision(
+                    Effect.DENY, "no_arg_schema", f"tool {req.tool_name!r} has no arg schema; cannot gate safely"
+                ),
+                "",
             )
         errors = validate(contract.args, req.args)
         if errors:
             first = errors[0]
             field = first.split(":", 1)[0]
-            return GateDecision(Effect.DENY, "arg_schema", "; ".join(errors), field=field)
-        return None
+            return GateDecision(Effect.DENY, "arg_schema", "; ".join(errors), field=field), ""
 
-    def _pre_after_resource(self, req: GateRequest, contract: Any, resource: Any = _UNRESOLVED) -> GateDecision:
+        blob, oversized = _stringify_args(req.args, self._input_budget)
+        if oversized:
+            # Arguments too large to scan are refused, not scanned in part: canary,
+            # secret and optional content checks are meaningful only over the whole
+            # argument text. Do this before a resolver receives a detached copy.
+            return (
+                GateDecision(
+                    Effect.DENY,
+                    "arg_schema",
+                    f"arguments exceed the {self._input_budget} character budget the gate will scan",
+                    field=next(iter(req.args), ""),
+                    expected=f"<= {self._input_budget} characters of argument text",
+                    received="oversized",
+                ),
+                "",
+            )
+        return None, blob
+
+    def _pre_after_resource(
+        self, req: GateRequest, contract: Any, blob: str, resource: Any = _UNRESOLVED
+    ) -> GateDecision:
         """Steps 4–9, resolving a sync semantic tier inline."""
-        blocked = self._pre_checks(req, contract, resource)
+        blocked = self._pre_checks(req, contract, blob, resource)
         if blocked is not None:
             return blocked
         if not contract.requires_escalation:
@@ -290,7 +324,7 @@ class Engine:
         refusal = self._escalate(req)
         return refusal if refusal is not None else self._after_escalation(req, contract)
 
-    async def _apre_after_resource(self, req: GateRequest, contract: Any, resource: Any) -> GateDecision:
+    async def _apre_after_resource(self, req: GateRequest, contract: Any, blob: str, resource: Any) -> GateDecision:
         """The same tail, awaiting an async semantic tier.
 
         The two paths are duplicated for exactly one hop, the same way the resolver is:
@@ -298,7 +332,7 @@ class Engine:
         verdict reader, so the sync and async gates cannot drift into different
         verdicts — only into different ways of waiting for the same answer.
         """
-        blocked = self._pre_checks(req, contract, resource)
+        blocked = self._pre_checks(req, contract, blob, resource)
         if blocked is not None:
             return blocked
         if not contract.requires_escalation:
@@ -306,7 +340,9 @@ class Engine:
         refusal = await self._aescalate(req)
         return refusal if refusal is not None else self._after_escalation(req, contract)
 
-    def _pre_checks(self, req: GateRequest, contract: Any, resource: Any = _UNRESOLVED) -> GateDecision | None:
+    def _pre_checks(
+        self, req: GateRequest, contract: Any, blob: str, resource: Any = _UNRESOLVED
+    ) -> GateDecision | None:
         """Steps 4–7: every remaining check that is CPU-only. None = keep going.
 
         Split out so the sync and async paths share it verbatim, and so the two steps
@@ -320,18 +356,6 @@ class Engine:
             return constraint_decision
 
         # 5. Canary exfiltration attempt via an argument (verbatim + normalized).
-        blob, oversized = _stringify_args(req.args)
-        if oversized:
-            # Arguments too large to scan are refused, not scanned in part: the canary
-            # and secret checks below are only meaningful over the WHOLE argument text.
-            return GateDecision(
-                Effect.DENY,
-                "arg_schema",
-                f"arguments exceed the {_MAX_SCAN_CHARS} character budget the gate will scan",
-                field=next(iter(req.args), ""),
-                expected=f"<= {_MAX_SCAN_CHARS} characters of argument text",
-                received="oversized",
-            )
         if self.policy.canaries and (
             canary.find(blob, self.policy.canaries) or canary.find_normalized(blob, self.policy.canaries)
         ):
@@ -362,6 +386,15 @@ class Engine:
             req.principal.identity, req.tool_name, rate_limit=contract.rate_limit, budget=contract.budget
         )
         if limit_rule is not None:
+            if limit_rule == "limit_store_capacity":
+                return GateDecision(
+                    Effect.DENY,
+                    limit_rule,
+                    f"limit store is tracking its maximum of {self.limits.max_keys} identity/tool keys; "
+                    "increase max_keys or forget an identity that can no longer call",
+                    expected=f"fewer than {self.limits.max_keys} tracked limit keys",
+                    received=str(self.limits.tracked_keys),
+                )
             # See `Gate._consume_limit`: the window is not in the policy format, so the
             # decision names it rather than leaving the reader of `rate_limit: 3` to guess.
             window = f" (window: {self.limits.window_seconds:g}s)" if limit_rule == "rate_limit" else ""

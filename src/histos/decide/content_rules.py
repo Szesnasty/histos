@@ -39,13 +39,12 @@ class ContentRules:
         """Return ``(rule, matched_pattern)`` for the first hit, or ``None``."""
         if not text:
             return None
-        scan_text = text[: patterns._MAX_SCAN_LEN]
         if self.check_injection:
             for pat in patterns.INJECTION_PATTERNS:
-                if pat.search(scan_text):
+                if pat.search(text):
                     return ("injection_pattern", pat.pattern)
         if self.check_exfiltration:
             for pat in patterns.EXFILTRATION_PATTERNS:
-                if pat.search(scan_text):
+                if pat.search(text):
                     return ("exfiltration_pattern", pat.pattern)
         return None

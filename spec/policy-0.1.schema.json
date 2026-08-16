@@ -184,7 +184,7 @@
           "minItems": 1
         },
         "item_type": {
-          "description": "Element type for an array. String elements are bounded by the same length/pattern caps as a scalar string.",
+          "description": "Element type for an array. String elements use declared length bounds; an element evaluated by `pattern` is additionally capped at 4,096 characters. Unpatterned text is bounded only by declared lengths and the host's aggregate input scan budget.",
           "enum": [
             "string",
             "integer",
@@ -200,7 +200,7 @@
           "minimum": 0
         },
         "max_length": {
-          "description": "Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls.",
+          "description": "Maximum string length, inclusive. The cheapest bound there is on an argument a manipulated model controls. With no declared maximum, unpatterned text may use the host's aggregate input scan budget; `pattern` inputs retain a separate 4,096-character safety cap.",
           "type": "integer",
           "minimum": 0
         },
@@ -234,7 +234,7 @@
           "type": "boolean"
         },
         "pattern": {
-          "description": "Compiled at load, so an invalid regex fails loudly — and screened at load for runaway backtracking, so a pattern imported from a third-party schema cannot hang the process that enforces it. An engine that accepts a pattern this one refuses is not compatible: the refusal is part of the format. The screen is deliberately conservative and refuses some safe shapes; the error names the rewrite.",
+          "description": "Compiled at load and screened for runaway backtracking before it can execute. Runtime input to a pattern is capped at 4,096 characters; unpatterned strings do not inherit that cap. The screen uses CPython regex-parser internals lazily: implementations without them can use the rest of Histos but fail closed with `unsafe_pattern` when a pattern is constructed. An engine that accepts a pattern this one refuses is not compatible: the refusal is part of the format.",
           "type": "string"
         },
         "required": {

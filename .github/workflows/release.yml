@@ -1,51 +1,90 @@
-# The one artifact this repository never gated was the one everybody installs.
-#
-# CI proves the working tree behaves; a `twine upload` from a laptop proves nothing
-# about the file that lands on PyPI. So publication happens here, from a tag, and the
-# wheel that gets uploaded is the wheel the suite just ran against — not the source
-# tree next to it. Publishing uses PyPI Trusted Publishing (OIDC), so there is no
-# long-lived API token to leak, and the upload carries a PEP 740 attestation binding
-# it to this workflow and this commit — the provenance property `histos drift` and the
-# tool lock exist to give this library's users, applied to the library itself.
+# Release Please owns release PRs, version bumps, tags and GitHub Releases. The
+# build and PyPI upload stay in this workflow deliberately: events created with
+# GITHUB_TOKEN do not start another workflow, so a separate tag-only publisher
+# would silently skip releases created by Release Please.
 
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vX.Y.Z tag to rebuild and publish after a failed release run (leave empty otherwise)
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  # The build job runs the suite, which is most of what CI proves — but not the lint and
-  # type gates, and a release that skips a gate the ordinary pushes have to pass is a
-  # hole in the same wall. Cheap, so it runs here rather than being assumed from a green
-  # commit that may not be the tagged one.
+  release-please:
+    name: prepare or create a release
+    if: >-
+      ${{
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'push' ||
+         (github.event_name == 'workflow_dispatch' && inputs.release_tag == ''))
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
   gates:
     name: lint and types
+    needs: release-please
+    if: >-
+      ${{
+        always() &&
+        ((github.event_name == 'workflow_dispatch' && inputs.release_tag != '') ||
+         needs.release-please.outputs.release_created == 'true')
+      }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag != '' && inputs.release_tag || needs.release-please.outputs.tag_name }}
+          fetch-tags: true
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+
       - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]" mypy
       - run: python -m ruff check .
-      # `ruff format --check` was the gate this job was missing, which is the exact hole
-      # the comment above describes: CI runs it on every push to main, so a tag cut from
-      # a branch that never opened a pull request could be released past it.
       - run: python -m ruff format --check .
       - run: python -m mypy
 
   build:
     name: build, then test what was built
+    needs: release-please
+    if: >-
+      ${{
+        always() &&
+        ((github.event_name == 'workflow_dispatch' && inputs.release_tag != '') ||
+         needs.release-please.outputs.release_created == 'true')
+      }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag != '' && inputs.release_tag || needs.release-please.outputs.tag_name }}
+          fetch-tags: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -57,17 +96,25 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
-      # A tag that disagrees with `histos._version` would publish a distribution whose
-      # `gate_version` — stamped into every audit record — names a release that does
-      # not exist. Refuse the upload rather than reconcile it afterwards.
-      - name: The tag is the version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: The release identity matches the built version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag != '' && inputs.release_tag || needs.release-please.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
         run: |
-          tagged="${GITHUB_REF_NAME#v}"
-          built="$(python -c 'import re,sys; sys.path.insert(0, "src"); from histos._version import __version__; print(__version__)')"
+          tagged="${RELEASE_TAG#v}"
+          built="$(python -c 'import sys; sys.path.insert(0, "src"); from histos._version import __version__; print(__version__)')"
+          actual_tag="$(git describe --tags --exact-match HEAD)"
+          test -n "$RELEASE_TAG"
+          test "$actual_tag" = "$RELEASE_TAG" || {
+            echo "checkout is at $actual_tag, not requested release tag $RELEASE_TAG" >&2; exit 1; }
           test "$tagged" = "$built" || {
-            echo "tag $GITHUB_REF_NAME does not match histos._version $built" >&2; exit 1; }
-          test -f "dist/histos-$built.tar.gz" && test -f "dist/histos-$built-py3-none-any.whl"
+            echo "tag $RELEASE_TAG does not match histos._version $built" >&2; exit 1; }
+          if test -n "$RELEASE_VERSION"; then
+            test "$RELEASE_VERSION" = "$built" || {
+              echo "Release Please proposed $RELEASE_VERSION but the build is $built" >&2; exit 1; }
+          fi
+          test -f "dist/histos-$built.tar.gz"
+          test -f "dist/histos-$built-py3-none-any.whl"
 
       - name: twine check
         run: twine check --strict dist/*
@@ -86,7 +133,13 @@ jobs:
               handle = archive.extractfile(name)
               assert handle is not None
               metadata = handle.read().decode("utf-8")
-          for phrase in ("Not on PyPI", "not yet on PyPI", "git+https://github.com/Szesnasty/histos"):
+          for phrase in (
+              "Not on PyPI",
+              "not yet on PyPI",
+              "git+https://github.com/Szesnasty/histos",
+              "Until that tag is published",
+              "trusted-publisher workflow completes",
+          ):
               assert phrase not in metadata, f"the long description still says {phrase!r}"
           relative = [t for t in re.findall(r"\]\(([^)]+)\)", metadata) if not re.match(r"^(https?:|mailto:|#)", t)]
           assert not relative, f"relative links 404 on pypi.org: {sorted(set(relative))}"
@@ -110,28 +163,32 @@ jobs:
           esac
           /tmp/release-check/bin/python -m pytest -q -o pythonpath=
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: distributions
           path: dist/
 
   publish:
     name: publish to PyPI (trusted publishing)
-    needs: [build, gates]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-please, build, gates]
+    if: >-
+      ${{
+        always() &&
+        needs.build.result == 'success' &&
+        needs.gates.result == 'success' &&
+        ((github.event_name == 'workflow_dispatch' && inputs.release_tag != '') ||
+         needs.release-please.outputs.release_created == 'true')
+      }}
     runs-on: ubuntu-latest
-    # The environment is where the PyPI Trusted Publisher is scoped and where a
-    # required reviewer can be attached, so an upload cannot happen because someone
-    # pushed a tag by accident.
     environment:
       name: pypi
       url: https://pypi.org/p/histos
     permissions:
-      id-token: write   # OIDC for Trusted Publishing. No API token exists to steal.
+      id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: distributions
           path: dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

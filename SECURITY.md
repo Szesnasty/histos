@@ -263,6 +263,24 @@ untouched: the tool receives exactly what it would have received with no gate at
 `bind` included. An earlier version rewrote the arguments in observe too, and a dry run
 whose side effects differ from the ungated app is measuring something else.
 
+### The pre-gate scans at most 1 MiB of complete argument text by default
+
+Canary, secret and optional content-rule checks must read the complete joined argument
+text or refuse the call. They never scan a prefix and call the remainder clean. The
+default is 1 MiB; `input_budget=` on `Gate`, `gate()` and `protect()` raises or lowers
+it for tools that legitimately accept larger documents. Crossing it is an `arg_schema`
+denial before execution, not a partial scan.
+
+This aggregate budget is separate from field validation. An ordinary string with no
+declared `max_length` may use the whole input budget. A string evaluated by `pattern`
+has a stricter 4,096-character cap because it enters Python's backtracking regex engine;
+the cap applies only to that field (or string array element) and cannot be raised. Use a
+structural parser inside the tool rather than a regex policy for larger documents.
+
+`ContentRules` is opt-in and heuristic, but once enabled it scans this complete bounded
+blob. It does not stop at 8,000 characters: that old prefix limit let padding in earlier
+arguments hide a match in a later one.
+
 ### The post-gate stops reading at 4 MiB of tool output
 
 Every outbound control has to read the value to act on it, and reading is linear in the
@@ -357,6 +375,14 @@ A true global limit needs shared state (e.g. Redis) — opt-in infra, in tension
 with zero-dependency. The stateless core (RBAC / schema / constraint / canary) is
 unaffected.
 
+`LimitStore` retains one entry per `(identity, tool)` that actually consumes a declared
+limit. Its default `max_keys=100_000` is a hard memory-cardinality bound: expired
+rate-only entries are reclaimed when room is needed, and an unseen identity is denied
+with `limit_store_capacity` rather than allocating past the bound. Lifetime budget
+counters cannot be discarded automatically without restoring allowance. A host may
+raise `max_keys`, replace the store, or call `forget(identity, tool)` only when that
+identity/tool pair has genuinely been retired.
+
 `ApprovalStore` is in-memory on the same terms, and the consequence points the other
 way — towards refusing, not allowing. A grant written by a trusted host into worker 3's
 store does not exist in workers 1, 2 and 4, so on a multi-worker deployment the
@@ -391,8 +417,8 @@ no execution bound; screening is what a zero-dependency core can do without swap
 in a non-stdlib engine.
 
 Adjacent repeats over overlapping alphabets are judged by **how many ways the run can
-split its input** — the product of their caps, each clamped to the 4 096-character
-argument limit — rather than by how many of them there are. `\d+\d+` is 4 096², sixteen
+split its input** — the product of their caps, each clamped to the 4,096-character
+pattern-input limit — rather than by how many of them there are. `\d+\d+` is 4,096², sixteen
 million splits and 49 ms of held GIL per call, and is refused; `^[a-zA-Z]{1,10}[a-zA-Z0-9]{0,20}$`
 is two hundred splits and 0.00 ms, and loads. Counting instead of multiplying refused
 both, which cost the ordinary username validator its tool at MCP import time — a control
@@ -407,16 +433,22 @@ time and all with a working rewrite: a bounded multiline body
 separator is preceded by `\s*`, and `^(?:[A-Z][a-z0-9]*)+$`. In each the boundary is in
 fact forced — by the `\n`, by the `,`, by the case change — and the screen cannot see it.
 It does not claim to catch every pathological regex ever written either: a polynomial
-(not exponential) blowup on a very long input is still possible, which is why the length
-cap below is the second bound rather than the only one. *(Array arguments are bounded twice: per element by the string
-length cap, and in aggregate by a scan budget, so neither an oversized element nor an
-unbounded element count can turn one schema-valid call into a stall.)*
+(not exponential) blowup on a very long input is still possible, which is why every
+string that actually uses `pattern` is capped at 4,096 characters. Unpatterned text is
+not subject to that per-field cap; it remains bounded in aggregate by `input_budget=`.
+Array arguments follow the same rule per string element and share the aggregate budget.
+
+The screen reads private CPython regex-parser modules so it reasons about the exact parse
+tree the engine will execute. They are imported lazily: `import histos` and policies
+without `pattern` work on implementations that do not expose those modules. Constructing
+a patterned field there fails closed with `unsafe_pattern` rather than running an
+unscreened regex or making the whole package unimportable.
 
 ### Argument validation is shallow for nested objects
 The schema validator is deliberately tiny. A `type="object"` argument is
 checked only for being a `dict` — its **inner fields are not validated**. Array
-elements are type-checked, and for `item_type="string"` each element is bounded by
-the same length/pattern caps as a scalar string, but there is no cross-field or
+elements are type-checked, and for `item_type="string"` each element gets the same
+declared length bounds and pattern-only cap as a scalar string, but there is no cross-field or
 deep-structure validation. A tool that takes deeply nested arguments must not assume
 the gate validated the inner structure; validate it in the tool, or keep arguments flat.
 

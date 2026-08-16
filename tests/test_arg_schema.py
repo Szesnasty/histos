@@ -75,13 +75,20 @@ def test_array_string_elements_are_length_checked_per_element():
     assert "tags[1]" in exc.value.decision.reason
 
 
-def test_array_string_element_over_hard_cap_is_denied():
-    # A huge element must not slip past the absolute DoS/ReDoS cap into the tool.
+def test_unpatterned_array_string_element_can_exceed_pattern_cap():
+    # Unpatterned text is governed by the aggregate gate input budget, not re.fullmatch's
+    # narrower 4096-character safety ceiling.
     safe = _wrap(Schema({"tags": Field(type="array", item_type="string")}))
+    with use_principal(Principal(role="r")):
+        assert safe(tags=["ok", "x" * 5000]) == {"tags": ["ok", "x" * 5000]}
+
+
+def test_patterned_array_string_element_over_pattern_cap_is_denied():
+    safe = _wrap(Schema({"tags": Field(type="array", item_type="string", pattern=r"x+")}))
     with use_principal(Principal(role="r")), pytest.raises(GateDenied) as exc:
-        safe(tags=["ok", "x" * 5000])
+        safe(tags=["x" * 5000])
     assert exc.value.decision.rule == "arg_schema"
-    assert "too long" in exc.value.decision.reason
+    assert "pattern input too long" in exc.value.decision.reason
 
 
 def test_array_string_element_pattern_is_enforced():

@@ -6,14 +6,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) **once the pub
 surface is frozen at v0.3**. Until then, the top-level API may still change
 between minor versions — every such change is listed here.
 
-## [Unreleased]
+## [Pre-release history]
+
+### Fixed — publication-blocking audit
+
+- PyPI metadata now presents one durable `pip install "histos[yaml]"` instruction
+  instead of freezing pre-release caveats into the immutable project description.
+- Unpatterned text can use the host's configurable aggregate input budget; only values
+  actually evaluated by Python `re` retain the 4,096-character safety ceiling.
+- Optional content rules scan the complete bounded argument blob, so padding before an
+  injected instruction can no longer move it beyond an 8,000-character prefix.
+- Regex-parser internals load only when a patterned field is constructed. The rest of
+  Histos remains importable without CPython's private parser; a pattern then fails
+  closed if its structural safety screen is unavailable.
+- `LimitStore(max_keys=...)` now bounds attacker-selected identity/tool cardinality,
+  reclaims expired rate-only keys, and exposes an explicit `forget()` operation for
+  identities whose lifetime-budget state may safely be retired.
+- The demo setup now pulls every model used by its published comparison table, and
+  release automation, verification diagnostics and public API signatures agree with
+  the behavior they describe.
+- Aggregate input size is refused before a trusted resource resolver receives the
+  arguments, on both sync and async paths. Oversized input can no longer trigger host
+  IO that the deterministic chain already knows it will deny.
+- Every third-party GitHub Action is pinned to a commit and updated through Dependabot.
+  Publication runs only after Release Please creates a release; rebuilding an existing
+  tag is a separate, explicit manual recovery path that verifies the exact checkout.
+- Hosted-demo endpoints now reject non-HTTP schemes, embedded credentials and remote
+  clear-text HTTP before reading an API key or sending prompt content.
 
 ### Changed — release presentation
 
-- The project README is now a 161-line product entry point instead of a 468-line
-  manual: enforcement thesis, measured evidence, install, one working example and
-  the production boundary. It explicitly names the clinic policy's feature cost and
-  keeps model-dependent demo results separate from deterministic controls.
+- The project README is now a short product entry point instead of a long manual:
+  enforcement thesis, measured evidence, install, one working example and the
+  production boundary. It explicitly names the clinic policy's feature cost and keeps
+  model-dependent demo results separate from deterministic controls.
 - `docs/README.md` is the documentation map. The roadmap and known-debt inventory no
   longer list the shipped demo and live framework mediation harness as unfinished.
 
@@ -31,7 +57,9 @@ between minor versions — every such change is listed here.
 - OpenAI provenance now hashes non-projected source fields (including `strict` and the
   outer tool container), and MCP/OpenAI/OpenAPI importers distinguish malformed present
   fields from absent ones. The changed normative source shape is corpus `0.6.0`.
-- Approval and rate-limit clocks now reject non-finite values and backwards movement;
+- Approval and rate-limit clocks now reject non-finite values; approval clocks also
+  reject backwards movement, while a backwards limiter clock conservatively retains
+  calls for longer instead of reopening the window;
   OpenAPI server inheritance preserves an explicitly empty nearest-level declaration,
   and policy review includes roles declared only as inheritance children.
 - Python policy constructors now validate their full object graph (schema entries,
@@ -542,6 +570,3 @@ adapters. Zero runtime dependencies.
   earlier layout (`../apps/...`, `../packages/histos/`) are gone, hard-coded
   test counts that had drifted across four documents are gone, and `tech-debt.md`
   now distinguishes debt that lives *here* from debt that left with the extraction.
-
-[Unreleased]: https://github.com/Szesnasty/histos/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Szesnasty/histos/releases/tag/v0.1.0

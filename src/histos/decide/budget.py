@@ -27,7 +27,7 @@ def _stringify(value: Any) -> str:
 _MAX_SCAN_CHARS = 1_048_576
 
 
-def _stringify_args(args: dict[str, Any]) -> tuple[str, bool]:
+def _stringify_args(args: dict[str, Any], budget: int = _MAX_SCAN_CHARS) -> tuple[str, bool]:
     """The text the pre-gate scans, plus whether the size budget was blown.
 
     Containers are walked leaf by leaf so the budget can stop an oversized argument
@@ -44,8 +44,11 @@ def _stringify_args(args: dict[str, Any]) -> tuple[str, bool]:
         if isinstance(value, dict):
             return all(walk(k) and walk(v) for k, v in value.items())
         text = _stringify(value)
-        total += len(text)
-        if total > _MAX_SCAN_CHARS:
+        # ``pieces`` are joined with one space below. Count those separators too, or
+        # an array of attacker-chosen empty strings can produce a blob larger than the
+        # advertised budget while contributing zero leaf characters.
+        total += len(text) + (1 if pieces else 0)
+        if total > budget:
             return False
         pieces.append(text)
         return True

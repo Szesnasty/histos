@@ -29,6 +29,8 @@ manual.
 
 ## Project decisions
 
+- [Release runbook](releasing.md) — immutable-upload prerequisites, normal release
+  flow and the explicit recovery path.
 - [Roadmap](roadmap.md) — shipped work, next work and the adoption gate.
 - [Known debt](tech-debt.md) — deliberate limitations and their exit criteria.
 - [Open-core boundary](open-core-boundary.md) — what stays open and what a future

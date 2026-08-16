@@ -34,6 +34,8 @@ cd demo/01-physio-clinic
 python3.13 -m venv .venv
 .venv/bin/pip install -r requirements.txt -e "../..[yaml]"
 ollama pull qwen2.5:7b
+# Only needed to reproduce the second-model comparison table below (~17 GB).
+ollama pull gemma4:26b
 ```
 
 Then point the rest at that virtualenv, and add the one extra package the MCP demo

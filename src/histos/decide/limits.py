@@ -12,9 +12,10 @@ limiter has. We surface the caveat rather than pretend it is free.
 
 **Growth:** only the *enforcement* path allocates, and only for a key that has
 actually consumed a slot — checking a limit for a thousand identities leaves
-nothing behind. Rate state that has fallen out of the window is dropped by
-:meth:`LimitStore.prune`, which a long-lived host should call periodically; budget
-counters are permanent by definition and are never pruned.
+nothing behind. The store has a configurable hard ``max_keys`` bound and
+opportunistically drops expired rate-only keys before admitting a new one at that
+bound. Budget counters are permanent by definition until the host explicitly calls
+:meth:`LimitStore.forget` while offboarding an identity.
 
 The clock is injectable so limit behaviour is deterministic under test.
 """
@@ -38,7 +39,13 @@ class LimitStore:
     (identity, tool) cannot both slip past a limit (no check→consume TOCTOU).
     """
 
-    def __init__(self, *, window_seconds: float = 60.0, time_fn: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        window_seconds: float = 60.0,
+        time_fn: Callable[[], float] = time.monotonic,
+        max_keys: int = 100_000,
+    ) -> None:
         # A negative or NaN window makes every recorded call immediately fall outside
         # the window (`at >= cutoff` is always false for NaN), silently disabling a
         # declared rate limit. Configuration is part of the security boundary, so
@@ -52,8 +59,11 @@ class LimitStore:
             raise PolicyError(f"window_seconds must be a positive finite number, got {window_seconds!r}")
         if not callable(time_fn):
             raise PolicyError(f"time_fn must be callable, got {type(time_fn).__name__}")
+        if isinstance(max_keys, bool) or not isinstance(max_keys, int) or max_keys < 1:
+            raise PolicyError(f"max_keys must be a positive integer, got {max_keys!r}")
         self._window = float(window_seconds)
         self._now = time_fn
+        self._max_keys = max_keys
         self._calls: dict[tuple[str, str], deque[float]] = defaultdict(deque)
         self._budget_used: dict[tuple[str, str], int] = defaultdict(int)
         self._lock = threading.RLock()
@@ -68,6 +78,17 @@ class LimitStore:
         carries it (see docs/roadmap.md, `limit_scope`).
         """
         return self._window
+
+    @property
+    def max_keys(self) -> int:
+        """Maximum distinct ``(identity, tool)`` keys retained by this store."""
+        return self._max_keys
+
+    @property
+    def tracked_keys(self) -> int:
+        """Number of distinct identities/tools currently occupying limit state."""
+        with self._lock:
+            return len(self._calls.keys() | self._budget_used.keys())
 
     def _key(self, identity: str | None, tool: str) -> tuple[str, str]:
         return (identity or "<anonymous>", tool)
@@ -100,8 +121,9 @@ class LimitStore:
     def try_consume(self, identity: str | None, tool: str, *, rate_limit: int | None, budget: int | None) -> str | None:
         """Atomically check limits and, if within them, consume one slot.
 
-        Returns the exceeded rule name (``"rate_limit"``/``"budget"``) without
-        consuming, or ``None`` after consuming. This is the enforcement path.
+        Returns the exceeded rule name (``"rate_limit"``, ``"budget"`` or
+        ``"limit_store_capacity"``) without consuming, or ``None`` after consuming.
+        This is the enforcement path.
         """
         with self._lock:
             key = self._key(identity, tool)
@@ -121,13 +143,27 @@ class LimitStore:
         that decides on its own when to forget is a limiter you cannot reason about.
         """
         with self._lock:
-            cutoff = self._time() - self._window
-            stale = [key for key, window in self._calls.items() if not window or window[-1] < cutoff]
-            for key in stale:
-                del self._calls[key]
-            return len(stale)
+            return self._prune_locked(self._time())
+
+    def forget(self, identity: str | None, tool: str) -> bool:
+        """Explicitly erase one key, for tenant/tool retirement.
+
+        This also restores any lifetime budget for that key. It is never automatic:
+        calling it while the identity can still return would hand that caller a fresh
+        allowance. The return says whether any state existed.
+        """
+        with self._lock:
+            key = self._key(identity, tool)
+            existed = key in self._calls or key in self._budget_used
+            self._calls.pop(key, None)
+            self._budget_used.pop(key, None)
+            return existed
 
     def _check_locked(self, key: tuple[str, str], rate_limit: int | None, budget: int | None) -> str | None:
+        if rate_limit is None and budget is None:
+            return None
+        if self._would_exceed_capacity_locked(key):
+            return "limit_store_capacity"
         if budget is not None and self._budget_used.get(key, 0) >= budget:
             return "budget"
         if rate_limit is not None and self._recent_count(key) >= rate_limit:
@@ -141,6 +177,9 @@ class LimitStore:
         # accumulated one permanent entry per identity that had ever called it, which
         # on a multi-tenant server is unbounded growth `prune()` cannot reclaim and
         # nothing reads.
+        if rate_limit is None and budget is None:
+            return
+        self._make_room_locked(key)
         if rate_limit is not None:
             window = self._calls[key]
             now = self._time()
@@ -152,6 +191,40 @@ class LimitStore:
                 window.popleft()
         if budget is not None:
             self._budget_used[key] += 1
+
+    def _would_exceed_capacity_locked(self, key: tuple[str, str]) -> bool:
+        """Whether a new key has nowhere safe to go, without mutating read state."""
+        if key in self._calls or key in self._budget_used:
+            return False
+        tracked = self._calls.keys() | self._budget_used.keys()
+        if len(tracked) < self._max_keys:
+            return False
+        # A stale rate-only key will be removed atomically by `_make_room_locked` if
+        # this call reaches consumption. Merely checking remains read-only.
+        cutoff = self._time() - self._window
+        return not any(
+            old_key not in self._budget_used and (not window or window[-1] < cutoff)
+            for old_key, window in self._calls.items()
+        )
+
+    def _make_room_locked(self, key: tuple[str, str]) -> None:
+        """Prune stale rate keys before allocating at capacity; otherwise fail loud."""
+        if key in self._calls or key in self._budget_used:
+            return
+        if len(self._calls.keys() | self._budget_used.keys()) >= self._max_keys:
+            self._prune_locked(self._time())
+        if len(self._calls.keys() | self._budget_used.keys()) >= self._max_keys:
+            raise PolicyError(
+                f"LimitStore capacity {self._max_keys} is exhausted; increase max_keys or "
+                "forget an identity that can no longer call"
+            )
+
+    def _prune_locked(self, now: float) -> int:
+        cutoff = now - self._window
+        stale = [key for key, window in self._calls.items() if not window or window[-1] < cutoff]
+        for key in stale:
+            del self._calls[key]
+        return len(stale)
 
     def _recent_count(self, key: tuple[str, str]) -> int:
         """Calls inside the window, without allocating or mutating anything.

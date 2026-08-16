@@ -62,6 +62,7 @@ from typing import Any
 
 from histos.decide.content_rules import ContentRules
 from histos.decide.engine import _MAX_OUTPUT_SCAN_CHARS as _DEFAULT_OUTPUT_BUDGET
+from histos.decide.engine import _MAX_SCAN_CHARS as _DEFAULT_INPUT_BUDGET
 from histos.decide.engine import Engine, EscalationTier, ResourceResolver
 from histos.decide.limits import LimitStore
 from histos.errors import PolicyError
@@ -119,6 +120,7 @@ class Gate:
         mode: str | None = None,
         enforcement: str | None = None,
         audit_key: bytes | None = None,
+        input_budget: int = _DEFAULT_INPUT_BUDGET,
         output_budget: int = _DEFAULT_OUTPUT_BUDGET,
         strict: bool = False,
     ) -> None:
@@ -169,6 +171,7 @@ class Gate:
             content_rules=content_rules,
             resource_resolver=resource_resolver,
             escalate=escalate,
+            input_budget=input_budget,
             output_budget=output_budget,
         )
         self._confirm = confirm
@@ -268,6 +271,7 @@ class Gate:
                 content_rules=engine.content_rules,
                 resource_resolver=engine.resource_resolver,
                 escalate=engine.escalate,
+                input_budget=engine._input_budget,
                 output_budget=engine._output_budget,
             )
         self._refresh_policy_hash()
@@ -325,6 +329,15 @@ class Gate:
         )
         if raced is None:
             return None
+        if raced == "limit_store_capacity":
+            return GateDecision(
+                Effect.DENY,
+                raced,
+                f"limit store is tracking its maximum of {self.limits.max_keys} identity/tool keys; "
+                "increase max_keys or forget an identity that can no longer call",
+                expected=f"fewer than {self.limits.max_keys} tracked limit keys",
+                received=str(self.limits.tracked_keys),
+            )
         # The window is named because it is not in the policy: `rate_limit: 3` means
         # three calls per the LimitStore's window, which is a constructor argument and
         # not something the document can express, so a reader of the policy alone
@@ -527,6 +540,7 @@ def gate(
     enforcement: str | None = None,
     name: str | None = None,
     audit_key: bytes | None = None,
+    input_budget: int = _DEFAULT_INPUT_BUDGET,
     output_budget: int = _DEFAULT_OUTPUT_BUDGET,
     strict: bool = False,
     is_async: bool | None = None,
@@ -547,6 +561,7 @@ def gate(
         mode=mode,
         enforcement=enforcement,
         audit_key=audit_key,
+        input_budget=input_budget,
         output_budget=output_budget,
         strict=strict,
     )
@@ -558,6 +573,7 @@ def protect(
     *,
     policy: PolicySource,
     fixed_principal: Principal | None = None,
+    principal: Principal | None = None,
     audit: AuditSink | None = None,
     limits: LimitStore | None = None,
     confirm: Callable[[GateRequest], Any] | None = None,
@@ -567,6 +583,7 @@ def protect(
     mode: str | None = None,
     enforcement: str | None = None,
     audit_key: bytes | None = None,
+    input_budget: int = _DEFAULT_INPUT_BUDGET,
     output_budget: int = _DEFAULT_OUTPUT_BUDGET,
     strict: bool = False,
     infer_missing: bool = True,
@@ -589,7 +606,13 @@ def protect(
         mode=mode,
         enforcement=enforcement,
         audit_key=audit_key,
+        input_budget=input_budget,
         output_budget=output_budget,
         strict=strict,
     )
-    return g.protect(tools, fixed_principal=fixed_principal, infer_missing=infer_missing)
+    return g.protect(
+        tools,
+        fixed_principal=fixed_principal,
+        principal=principal,
+        infer_missing=infer_missing,
+    )

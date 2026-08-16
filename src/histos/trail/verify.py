@@ -183,9 +183,15 @@ def _verify_tip(log: Path, count: int, tip: str, key: bytes | None) -> tuple[boo
         # it was exempt from the check every line of the log gets. Keeping the genuine
         # triple last and prepending a fabricated `records` makes `json.loads` take the
         # real one — so the MAC still authenticates — while a reader sees the forgery.
-        forged = _duplicate_key(text) or _respelt_ascii(text)
-        if forged is not None:
-            return False, f"tip file {sidecar.name} says two different things about {forged!r}"
+        duplicate = _duplicate_key(text)
+        if duplicate is not None:
+            return False, f"tip file {sidecar.name} says two different things about key {duplicate!r}"
+        respelt = _respelt_ascii(text)
+        if respelt is not None:
+            return False, (
+                f"tip file {sidecar.name} contains non-canonical printable-ASCII escape {respelt!r}; "
+                "no JSON writer used by Histos produces that spelling"
+            )
         rec = json.loads(text)
         expected_count = int(rec["records"])
         expected_tip = str(rec["hash"])
