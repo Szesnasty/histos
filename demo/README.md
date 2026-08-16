@@ -4,6 +4,10 @@ Working agents, built the way they are actually built, then run twice: once as
 written, once behind a policy. Each demo is a directory with its own dependencies
 and its own model, because a demo that cannot be run is a screenshot.
 
+All people, organisations, phone numbers, identity numbers, medical records,
+invoices and infrastructure records in these demos are synthetic test fixtures.
+Committed model transcripts contain only interactions with those fixtures.
+
 The rule these follow, and the reason they are worth reading:
 
 > **The agent is not built for Histos.** It is built for its job, by someone who has
