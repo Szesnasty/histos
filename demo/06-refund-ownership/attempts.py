@@ -22,7 +22,7 @@ import platform
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import histos
 from histos import (
@@ -110,11 +110,7 @@ def _run(attempt: Attempt, call) -> Attempt:
         attempt.outcome = type(exc).__name__
         attempt.rule = str(exc)[:60]
     attempt.executions = len(_executions) - before
-    attempt.as_expected = (
-        attempt.executions == 1
-        if attempt.expectation == "executes"
-        else attempt.executions == 0
-    )
+    attempt.as_expected = attempt.executions == 1 if attempt.expectation == "executes" else attempt.executions == 0
     return attempt
 
 
@@ -124,12 +120,8 @@ def run_all() -> list[Attempt]:
     gate = Gate(policy, resource_resolver=load_order, confirm=approvals.as_confirm())
     safe_refund = gate.wrap(issue_refund)
 
-    u1 = Principal(
-        role="customer", identity="u1", attributes={"owner_id": "u1", "tenant_id": "store"}
-    )
-    guest = Principal(
-        role="guest", identity="u1", attributes={"owner_id": "u1", "tenant_id": "store"}
-    )
+    u1 = Principal(role="customer", identity="u1", attributes={"owner_id": "u1", "tenant_id": "store"})
+    guest = Principal(role="guest", identity="u1", attributes={"owner_id": "u1", "tenant_id": "store"})
 
     out: list[Attempt] = []
 
@@ -243,9 +235,7 @@ def run_all() -> list[Attempt]:
 
 def _git(*args: str) -> str:
     try:
-        return subprocess.check_output(
-            ["git", *args], text=True, stderr=subprocess.DEVNULL
-        ).strip()
+        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:  # noqa: BLE001
         return "unavailable"
 
@@ -256,7 +246,7 @@ def build_record(attempts: list[Attempt]) -> dict:
     blocked = [a for a in wrapped if a.expectation == "blocked"]
     return {
         "demo": "refund row ownership",
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "provenance": {
             "library": "histos",
             "version": histos.__version__,

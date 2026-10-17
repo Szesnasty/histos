@@ -314,6 +314,12 @@ jobs:
       - name: The review's own attacks, against the shipped library
         run: python demo/05-the-review/attacks.py
 
+      # Row ownership, counted by executions inside the handler rather than by the
+      # decisions the engine reports about itself. Exits with the number of attempts
+      # that behaved unexpectedly.
+      - name: Refund row ownership, counted by executions
+        run: python demo/06-refund-ownership/attempts.py
+
       - name: Every demo policy is valid and reviewable
         run: |
           for policy in demo/*/security.policy.yaml; do
